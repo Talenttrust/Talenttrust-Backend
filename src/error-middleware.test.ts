@@ -2,6 +2,7 @@ import { ApiError } from './errors/ApiError';
 import {
   errorMiddleware,
   isBodyParserError,
+  isEntityTooLargeError,
   notFoundMiddleware,
 } from './middleware/error-middleware';
 
@@ -37,5 +38,25 @@ describe('error middleware', () => {
     notFoundMiddleware({} as never, {} as never, next);
 
     expect(next).toHaveBeenCalledWith(expect.any(ApiError));
+  });
+
+  it('identifies oversized body parser errors', () => {
+    expect(isEntityTooLargeError({ type: 'entity.too.large', status: 413 })).toBe(true);
+    expect(isEntityTooLargeError({ type: 'entity.parse.failed', status: 400 })).toBe(false);
+  });
+
+  it('maps oversized request bodies to a safe response', () => {
+    const status = jest.fn().mockReturnThis();
+    const json = jest.fn();
+
+    errorMiddleware(
+      { type: 'entity.too.large', status: 413 } as never,
+      {} as never,
+      { status, json } as never,
+      jest.fn(),
+    );
+
+    expect(status).toHaveBeenCalledWith(413);
+    expect(json).toHaveBeenCalledWith({ error: 'Request body is too large.' });
   });
 });

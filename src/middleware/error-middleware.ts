@@ -23,6 +23,11 @@ export function errorMiddleware(
     return;
   }
 
+  if (isEntityTooLargeError(error)) {
+    res.status(413).json({ error: 'Request body is too large.' });
+    return;
+  }
+
   if (error instanceof ApiError) {
     res.status(error.status).json({ error: error.message });
     return;
@@ -43,5 +48,20 @@ export function isBodyParserError(error: unknown): boolean {
       'status' in error &&
       error.type === 'entity.parse.failed' &&
       error.status === 400,
+  );
+}
+
+/**
+ * @notice Detect oversized request payload failures from Express parsers.
+ * @param error Thrown framework error value.
+ */
+export function isEntityTooLargeError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'type' in error &&
+      'status' in error &&
+      error.type === 'entity.too.large' &&
+      error.status === 413,
   );
 }

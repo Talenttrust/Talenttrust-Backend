@@ -129,6 +129,81 @@ Detailed backend test notes live in:
 
 - `docs/backend/integration-testing.md`
 - `docs/backend/cache-layer.md`
+- `docs/backend/webhook-ingestion.md`
+
+## Webhook ingestion
+
+The backend now includes a signed blockchain webhook intake endpoint:
+
+- `POST /webhooks/blockchain`
+
+The endpoint verifies the webhook signature against the exact raw request body before parsing or processing the event.
+
+### Signature and headers
+
+By default the route expects:
+
+- `X-Webhook-Signature`
+- `X-Webhook-Timestamp`
+- `X-Webhook-Id`
+
+The signature is an HMAC-SHA256 digest of:
+
+```text
+<timestamp>.<raw-request-body>
+```
+
+The shared secret is loaded from `WEBHOOK_SECRET`.
+
+### Supported events
+
+The current supported normalized event types are:
+
+- `contract.metadata.updated`
+- `contract.payment.released`
+
+Unknown event types are rejected safely.
+
+### Replay and idempotency
+
+The webhook layer currently protects against replay and duplicate delivery by:
+
+- rejecting timestamps older than the configured max age
+- reserving delivery ids during processing
+- acknowledging already processed delivery ids without re-running the handler
+- releasing failed deliveries so provider retries can succeed
+
+### Configuration
+
+Environment variables:
+
+- `WEBHOOK_SECRET`
+- `WEBHOOK_SIGNATURE_HEADER` default `x-webhook-signature`
+- `WEBHOOK_TIMESTAMP_HEADER` default `x-webhook-timestamp`
+- `WEBHOOK_EVENT_ID_HEADER` default `x-webhook-id`
+- `WEBHOOK_MAX_AGE_SECONDS` default `300`
+- `WEBHOOK_RAW_BODY_LIMIT` default `64kb`
+
+### Security notes
+
+- signature verification uses the raw request body, not reserialized JSON
+- constant-time digest comparison is used
+- unsigned, malformed, tampered, and stale requests are rejected before processing
+- duplicate deliveries are handled idempotently
+- oversized payloads are rejected with `413`
+- responses do not expose secrets, signatures, or internal stack traces
+
+### Test coverage
+
+The webhook tests cover:
+
+- valid signature acceptance
+- missing, malformed, invalid, and stale signature rejection
+- raw-body verification behavior
+- duplicate delivery handling
+- malformed JSON and unsupported events
+- processing-failure sanitization
+- missing configuration and oversized payload handling
 
 ## Contributing
 
