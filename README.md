@@ -30,11 +30,7 @@ npm run dev
 npm start
 ```
 
-## Scripts
 
-| Script   | Description                    |
-|----------|--------------------------------|
-| `npm run build` | Compile TypeScript to `dist/`  |
 | `npm run start` | Run production server          |
 | `npm run dev`   | Run with ts-node-dev           |
 | `npm test`      | Run Jest tests                 |
