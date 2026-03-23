@@ -2,6 +2,28 @@
 
 Express API for the TalentTrust decentralized freelancer escrow protocol. Handles contract metadata, reputation, and integration with Stellar/Soroban.
 
+## Runtime Configuration Toggles
+
+The backend now supports validated feature flags for controlled rollout of higher-risk routes. Runtime configuration is loaded once at process boot, and invalid values fail startup instead of silently enabling unexpected behavior.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `3001` | HTTP port for the Express server |
+| `FEATURE_CONTRACTS_API_ENABLED` | `true` | Enables the `/api/v1/contracts` route while preserving current default behavior |
+| `FEATURE_RUNTIME_CONFIG_ENDPOINT_ENABLED` | `false` | Enables the `/api/v1/runtime-config` diagnostics route |
+
+Accepted boolean values: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off` (case-insensitive).
+
+### Example
+
+```bash
+FEATURE_CONTRACTS_API_ENABLED=false \
+FEATURE_RUNTIME_CONFIG_ENDPOINT_ENABLED=true \
+npm run dev
+```
+
+When a feature is disabled, the backend responds with `404` and a `feature_disabled` payload. This keeps dark-launched routes non-discoverable to normal clients while leaving `/health` available for orchestration and uptime checks.
+
 ## Prerequisites
 
 - Node.js 18+
@@ -39,6 +61,10 @@ npm start
 | `npm run dev`   | Run with ts-node-dev           |
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
+
+## Runtime Toggle Documentation
+
+Reviewer-focused implementation notes, threat scenarios, and operational guidance live in [`docs/backend/runtime-configuration-toggles.md`](docs/backend/runtime-configuration-toggles.md).
 
 ## Contributing
 
