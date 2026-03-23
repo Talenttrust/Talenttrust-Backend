@@ -43,6 +43,48 @@ npm start
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
 
+## Cache layer
+
+The backend now includes a small in-memory cache layer for safe read-mostly contract lookups.
+
+Cached flows:
+
+- `GET /api/v1/contracts`
+- `GET /api/v1/contracts/:id`
+
+These cover the current read-heavy route and metadata lookup behavior in the repo.
+
+### Strategy
+
+- cache backend: in-memory
+- default TTL: `30` seconds
+- default max items: `100`
+- invalidation: explicit invalidation of affected list/detail keys after `POST /api/v1/contracts`
+- fallback: cache failures fall back to the source-of-truth service without failing the request
+
+### Configuration
+
+Environment variables:
+
+- `CACHE_ENABLED` (default `true`)
+- `CACHE_TTL_SECONDS` (default `30`)
+- `CACHE_MAX_ITEMS` (default `100`)
+
+### Security notes
+
+- only shared read-mostly contract data is cached
+- no auth/session/token data is cached
+- no authorization results are cached
+- cache keys are deterministic and normalized
+- cache backend failures do not override source-of-truth correctness
+
+### Threat scenarios validated
+
+- stale read cache after writes
+- cache backend read/write failure
+- unbounded in-memory growth through item limit and TTL
+- key collision risk reduced by explicit namespacing
+
 ## Integration tests
 
 The backend includes a focused integration test suite covering representative API behavior for:
@@ -60,6 +102,7 @@ The tests verify:
 - duplicate creation conflicts
 - not found and unsupported route behavior
 - internal error sanitization
+- cache hit/miss, invalidation, disabled-cache mode, and cache-failure fallback
 - server bootstrap/start-stop behavior
 
 ### Test architecture
@@ -85,6 +128,7 @@ To keep tests deterministic and reviewer-friendly:
 Detailed backend test notes live in:
 
 - `docs/backend/integration-testing.md`
+- `docs/backend/cache-layer.md`
 
 ## Contributing
 

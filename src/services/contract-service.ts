@@ -4,11 +4,20 @@ import { ApiError } from '../errors/ApiError';
 import type { ContractRecord, CreateContractInput } from '../types/contract';
 
 /**
+ * @notice Contract service interface shared by the base and cached services.
+ */
+export interface ContractServicePort {
+  listContracts(): ContractRecord[];
+  getContractById(id: string): ContractRecord | undefined;
+  createContract(input: CreateContractInput): ContractRecord;
+}
+
+/**
  * @notice Small in-memory contract service used by the API layer and tests.
  * @dev The service intentionally keeps state isolated per app instance so
  *      integration tests remain deterministic and do not require a database.
  */
-export class ContractService {
+export class ContractService implements ContractServicePort {
   private readonly contracts: ContractRecord[];
 
   /**

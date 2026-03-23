@@ -1,14 +1,14 @@
 import { Router } from 'express';
 
 import { ApiError } from '../errors/ApiError';
-import { ContractService } from '../services/contract-service';
+import type { ContractServicePort } from '../services/contract-service';
 import type { CreateContractInput } from '../types/contract';
 
 /**
  * @notice Build the contract routes with an injected service for test isolation.
  * @param contractService Service used to read and create contract records.
  */
-export function createContractRouter(contractService: ContractService): Router {
+export function createContractRouter(contractService: ContractServicePort): Router {
   const router = Router();
 
   router.get('/api/v1/contracts', (_req, res) => {

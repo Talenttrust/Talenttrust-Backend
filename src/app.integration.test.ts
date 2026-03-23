@@ -1,6 +1,8 @@
 import request from 'supertest';
 
 import { createApp } from './app';
+import type { CacheStore } from './cache/cache-store';
+import type { ContractServicePort } from './services/contract-service';
 
 describe('TalentTrust API integration', () => {
   it('boots the app in test mode without side effects', async () => {
@@ -197,5 +199,120 @@ describe('TalentTrust API integration', () => {
 
     expect(response.status).toBe(500);
     expect(response.body).toEqual({ error: 'Internal server error.' });
+  });
+
+  it('caches repeated contract list requests through the API', async () => {
+    const source: ContractServicePort = {
+      listContracts: jest.fn(() => [
+        {
+          id: 'ctr-cache',
+          title: 'Cached list',
+          clientId: 'client-1',
+          freelancerId: 'freelancer-1',
+          budget: 900,
+          currency: 'USDC',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]),
+      getContractById: jest.fn(),
+      createContract: jest.fn(),
+    };
+
+    const app = createApp({ contractService: source, cacheConfig: { enabled: true, ttlSeconds: 30, maxItems: 10 } });
+
+    await request(app).get('/api/v1/contracts');
+    await request(app).get('/api/v1/contracts');
+
+    expect(source.listContracts).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates the cached list after contract creation', async () => {
+    const createdContracts: Array<{ id: string; title: string; clientId: string; freelancerId: string; budget: number; currency: string; createdAt: string }> = [];
+    const source: ContractServicePort = {
+      listContracts: jest.fn(() => [...createdContracts]),
+      getContractById: jest.fn((id: string) => createdContracts.find((contract) => contract.id === id)),
+      createContract: jest.fn((input) => {
+        const created = {
+          id: 'ctr-new',
+          ...input,
+          createdAt: '2026-01-01T00:00:00.000Z',
+        };
+        createdContracts.push(created);
+        return created;
+      }),
+    };
+
+    const app = createApp({ contractService: source, cacheConfig: { enabled: true, ttlSeconds: 30, maxItems: 10 } });
+
+    const first = await request(app).get('/api/v1/contracts');
+    expect(first.body.contracts).toHaveLength(0);
+
+    await request(app).post('/api/v1/contracts').send({
+      title: 'Invalidate me',
+      clientId: 'client-1',
+      freelancerId: 'freelancer-2',
+      budget: 200,
+      currency: 'USDC',
+    });
+
+    const second = await request(app).get('/api/v1/contracts');
+    expect(second.body.contracts).toHaveLength(1);
+    expect(source.listContracts).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to source data when cache reads fail', async () => {
+    const source: ContractServicePort = {
+      listContracts: jest.fn(() => []),
+      getContractById: jest.fn(() => ({
+        id: 'ctr-fallback',
+        title: 'Fallback',
+        clientId: 'client-1',
+        freelancerId: 'freelancer-1',
+        budget: 50,
+        currency: 'USDC',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      })),
+      createContract: jest.fn(),
+    };
+    const failingCache: CacheStore = {
+      get: () => {
+        throw new Error('cache read failed');
+      },
+      set: () => {
+        throw new Error('cache write failed');
+      },
+      delete: jest.fn(),
+      clear: jest.fn(),
+    };
+
+    const app = createApp({
+      contractService: source,
+      cacheStore: failingCache,
+      cacheConfig: { enabled: true, ttlSeconds: 30, maxItems: 10 },
+    });
+
+    const response = await request(app).get('/api/v1/contracts/ctr-fallback');
+
+    expect(response.status).toBe(200);
+    expect(response.body.contract.id).toBe('ctr-fallback');
+    expect(source.getContractById).toHaveBeenCalledTimes(1);
+  });
+
+  it('bypasses cache when disabled', async () => {
+    const source: ContractServicePort = {
+      listContracts: jest.fn(() => []),
+      getContractById: jest.fn(),
+      createContract: jest.fn(),
+    };
+
+    const app = createApp({
+      contractService: source,
+      cacheConfig: { enabled: false, ttlSeconds: 30, maxItems: 10 },
+    });
+
+    await request(app).get('/api/v1/contracts');
+    await request(app).get('/api/v1/contracts');
+
+    expect(source.listContracts).toHaveBeenCalledTimes(2);
   });
 });
