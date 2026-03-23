@@ -2,6 +2,33 @@
 
 Express API for the TalentTrust decentralized freelancer escrow protocol. Handles contract metadata, reputation, and integration with Stellar/Soroban.
 
+## Error Handling and Testing
+
+The backend enforces a consistent API error envelope and status-code policy across request validation, routing, dependency failures, and unexpected runtime errors.
+
+### Error Envelope
+
+All handled errors return:
+
+```json
+{
+	"error": {
+		"code": "machine_readable_code",
+		"message": "safe message",
+		"requestId": "request-correlation-id"
+	}
+}
+```
+
+### Status-Code Guarantees
+
+- `400` for malformed JSON (`invalid_json`) and request validation errors (`validation_error`)
+- `404` for unknown routes (`not_found`)
+- `503` for expected dependency outages (`dependency_unavailable`)
+- `500` for unexpected failures (`internal_error`)
+
+Detailed notes are in `docs/backend/error-handling.md`.
+
 ## Prerequisites
 
 - Node.js 18+
