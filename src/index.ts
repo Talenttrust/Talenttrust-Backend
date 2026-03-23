@@ -1,18 +1,22 @@
-import express, { Request, Response } from 'express';
+import { createServer, type Server } from 'http';
 
-const app = express();
-const PORT = process.env.PORT || 3001;
+import { createApp } from './app';
 
-app.use(express.json());
+/**
+ * @notice Start the HTTP server for the TalentTrust backend.
+ * @param port Port to bind to. Defaults to the PORT environment variable or 3001.
+ */
+export function startServer(port: number | string = process.env.PORT || 3001): Server {
+  const app = createApp();
+  const server = createServer(app);
 
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'talenttrust-backend' });
-});
+  server.listen(port, () => {
+    console.log(`TalentTrust API listening on http://localhost:${port}`);
+  });
 
-app.get('/api/v1/contracts', (_req: Request, res: Response) => {
-  res.json({ contracts: [] });
-});
+  return server;
+}
 
-app.listen(PORT, () => {
-  console.log(`TalentTrust API listening on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  startServer();
+}
