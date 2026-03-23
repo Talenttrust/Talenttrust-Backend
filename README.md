@@ -23,6 +23,9 @@ npm run build
 # Run tests
 npm test
 
+# Run tests with coverage
+npm test -- --coverage
+
 # Start dev server (with hot reload)
 npm run dev
 
@@ -39,6 +42,49 @@ npm start
 | `npm run dev`   | Run with ts-node-dev           |
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
+
+## Integration tests
+
+The backend includes a focused integration test suite covering representative API behavior for:
+
+- `GET /health`
+- `GET /api/v1/contracts`
+- `GET /api/v1/contracts/:id`
+- `POST /api/v1/contracts`
+
+The tests verify:
+
+- success paths
+- malformed JSON handling
+- validation failures
+- duplicate creation conflicts
+- not found and unsupported route behavior
+- internal error sanitization
+- server bootstrap/start-stop behavior
+
+### Test architecture
+
+To keep tests deterministic and reviewer-friendly:
+
+- `src/app.ts` creates the Express app without listening
+- `src/index.ts` only starts the HTTP server
+- `ContractService` uses per-app in-memory state for tests
+- no external services or production systems are contacted
+
+### Security and threat assumptions validated
+
+- malformed input is rejected early
+- invalid identifiers do not proceed to resource lookup
+- duplicate resource creation is blocked
+- self-dealing contract creation is denied
+- internal errors are sanitized and do not leak stack traces
+- integration tests do not depend on live external systems
+
+### Documentation
+
+Detailed backend test notes live in:
+
+- `docs/backend/integration-testing.md`
 
 ## Contributing
 
