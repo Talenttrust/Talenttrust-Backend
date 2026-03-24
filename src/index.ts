@@ -1,18 +1,26 @@
-import express, { Request, Response } from 'express';
+/**
+ * Server Entry Point
+ * Starts the Express server
+ */
 
-const app = express();
-const PORT = process.env.PORT || 3001;
+import app from './app';
+import { config } from './config/environment';
 
-app.use(express.json());
+const PORT = config.port;
 
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'talenttrust-backend' });
-});
+/**
+ * Start the Express server
+ */
+export function startServer(): void {
+  app.listen(PORT, () => {
+    console.log(`TalentTrust API listening on http://localhost:${PORT}`);
+    console.log(`API Version: ${config.apiVersion}`);
+  });
+}
 
-app.get('/api/v1/contracts', (_req: Request, res: Response) => {
-  res.json({ contracts: [] });
-});
+// Start server only if not in test environment
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
 
-app.listen(PORT, () => {
-  console.log(`TalentTrust API listening on http://localhost:${PORT}`);
-});
+export default app;
