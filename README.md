@@ -40,6 +40,15 @@ npm start
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
 
+## Authentication & Authorization
+
+The API uses **Role-Based Access Control (RBAC)** with four roles: `admin`,
+`freelancer`, `client`, and `guest`. Protected endpoints require a
+`Bearer <token>` header.
+
+See [docs/backend/authentication-authorization.md](docs/backend/authentication-authorization.md)
+for the full access control matrix, architecture, and security notes.
+
 ## Contributing
 
 1. Fork the repo and create a branch from `main`.
