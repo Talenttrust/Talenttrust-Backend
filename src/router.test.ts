@@ -11,7 +11,7 @@ describe("Router", () => {
 
   it("routes /api to blue backend", async () => {
     const res = await request(routerApp).get("/api/v1/contracts");
-    expect(res.status).toBe(502); // no backend running -> correct proxy 502 response
+    expect(res.status).toBe(502); // Proxy correctly returns 502 when backend unavailable
   });
 
   it("health/router returns active", async () => {
