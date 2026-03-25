@@ -40,6 +40,35 @@ npm start
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
 
+## API Endpoints
+
+### Health Check
+- `GET /health` - Service health status
+
+### Contracts
+- `GET /api/v1/contracts` - List contracts (placeholder)
+
+### Contract Metadata
+- `POST /api/v1/contracts/:contractId/metadata` - Create metadata
+- `GET /api/v1/contracts/:contractId/metadata` - List metadata with pagination
+- `GET /api/v1/contracts/:contractId/metadata/:id` - Get single metadata
+- `PATCH /api/v1/contracts/:contractId/metadata/:id` - Update metadata
+- `DELETE /api/v1/contracts/:contractId/metadata/:id` - Delete metadata
+
+See [docs/backend/contract-metadata-api.md](docs/backend/contract-metadata-api.md) for detailed API documentation.
+
+## Authentication
+
+The API uses Bearer token authentication. Include the token in the Authorization header:
+
+```
+Authorization: Bearer <your-auth-token>
+```
+
+Demo tokens for testing:
+- `demo-admin-token` - Admin user with full access
+- `demo-user-token` - Regular user with limited access
+
 ## Contributing
 
 1. Fork the repo and create a branch from `main`.
