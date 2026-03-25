@@ -2,6 +2,16 @@
 
 Express API for the TalentTrust decentralized freelancer escrow protocol. Handles contract metadata, reputation, and integration with Stellar/Soroban.
 
+## Incident Response Playbook
+
+The backend now exposes responder-ready incident runbooks for outage triage, recovery, and postmortems.
+
+- `GET /api/v1/incident-response` returns the available runbook summaries
+- `GET /api/v1/incident-response/:runbookId` returns a full runbook
+- Supported runbooks: `api-outage`, `data-integrity`, `security-breach`
+
+Detailed reviewer-oriented documentation lives in [docs/backend/incident-response-playbook.md](/Users/mac/Documents/github/wave/Talenttrust-Backend/docs/backend/incident-response-playbook.md).
+
 ## Prerequisites
 
 - Node.js 18+
@@ -23,6 +33,9 @@ npm run build
 # Run tests
 npm test
 
+# Run tests with coverage
+npm test -- --coverage
+
 # Start dev server (with hot reload)
 npm run dev
 
@@ -39,6 +52,12 @@ npm start
 | `npm run dev`   | Run with ts-node-dev           |
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
+
+## Security Notes
+
+- Runbook identifiers are validated to accept only lowercase letters, numbers, and hyphens.
+- Recovery guidance explicitly avoids bypassing authentication, rate limiting, and audit controls.
+- Security-sensitive incidents require evidence preservation, least-privilege recovery access, and controlled communications.
 
 ## Contributing
 

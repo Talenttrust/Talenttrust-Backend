@@ -1,18 +1,19 @@
-import express, { Request, Response } from 'express';
+import { Server } from 'http';
 
-const app = express();
-const PORT = process.env.PORT || 3001;
+import { createApp } from './app';
 
-app.use(express.json());
+export const app = createApp();
 
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'talenttrust-backend' });
-});
+/**
+ * Starts the API server on the configured port.
+ */
+export function startServer(port: number | string = process.env.PORT || 3001): Server {
+  return app.listen(port, () => {
+    console.log(`TalentTrust API listening on http://localhost:${port}`);
+  });
+}
 
-app.get('/api/v1/contracts', (_req: Request, res: Response) => {
-  res.json({ contracts: [] });
-});
-
-app.listen(PORT, () => {
-  console.log(`TalentTrust API listening on http://localhost:${PORT}`);
-});
+/* istanbul ignore next */
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
