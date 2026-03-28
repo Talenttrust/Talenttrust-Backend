@@ -40,6 +40,10 @@ npm start
 | `npm test`      | Run Jest tests                 |
 | `npm run lint`  | Run ESLint                     |
 
+## Documentation
+
+- [SLA/SLO Definitions and Alert Thresholds](docs/backend/SLA_SLO.md)
+
 ## Contributing
 
 1. Fork the repo and create a branch from `main`.
