@@ -2,6 +2,18 @@
 
 Express API for the TalentTrust decentralized freelancer escrow protocol. Handles contract metadata, reputation, and integration with Stellar/Soroban.
 
+## Request tracing
+
+The backend now emits lightweight tracing spans for:
+
+- incoming API requests
+- contract repository lookups
+- Stellar RPC health checks
+
+Every request receives `x-trace-id` and `x-request-id` headers. If a client sends those headers, the backend preserves them so traces can be correlated across services.
+
+Detailed tracing notes live in [docs/backend/request-tracing.md](docs/backend/request-tracing.md).
+
 ## Prerequisites
 
 - Node.js 18+
