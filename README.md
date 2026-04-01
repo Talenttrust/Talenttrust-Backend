@@ -290,6 +290,10 @@ Validation middleware returns HTTP `400` with the shape:
 
 See `docs/backend/request-validation-framework.md` for implementation details and security notes.
 
+## Documentation
+
+- [SLA/SLO Definitions and Alert Thresholds](docs/backend/SLA_SLO.md)
+
 ## Contributing
 
 1. Fork the repo and create a branch: `git checkout -b feature/<ticket>-description`
