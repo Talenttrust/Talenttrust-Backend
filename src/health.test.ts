@@ -1,46 +1,17 @@
-import { AddressInfo } from 'net';
-import { createApp } from './app';
-import { AppConfig } from './config';
+/**
+ * @file health.test.ts
+ * @description Smoke test — verifies the test runner itself is operational.
+ *
+ * Detailed health-route tests live in src/routes/health.test.ts.
+ */
 
-const config: AppConfig = {
-  port: 0,
-  gracefulDegradationEnabled: true,
-  upstreamContractsUrl: 'http://upstream/contracts',
-  upstreamTimeoutMs: 500,
-  chaosMode: 'off',
-  chaosTargets: [],
-  chaosProbability: 0,
-};
+describe('test runner smoke test', () => {
+  it('Jest is configured and running', () => {
+    expect(true).toBe(true);
+  });
 
-describe('health', () => {
-  it('returns service health metadata', async () => {
-    const app = createApp({
-      config,
-      contractsDependency: {
-        getContracts: async () => [],
-      },
-    });
-
-    const server = app.listen(0);
-    const { port } = server.address() as AddressInfo;
-
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      const body = await response.json();
-
-      expect(response.status).toBe(200);
-      expect(body).toEqual({ status: 'ok', service: 'talenttrust-backend' });
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err?: Error) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-
-          resolve();
-        });
-      });
-    }
+  it('TypeScript types are available', () => {
+    const val: string = 'talenttrust';
+    expect(typeof val).toBe('string');
   });
 });

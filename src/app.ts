@@ -1,56 +1,46 @@
-import express, { Request, Response } from 'express';
-import { AppConfig } from './config';
-import { ChaosPolicy } from './chaos/chaosPolicy';
-import { ContractsClient } from './dependencies/contractsClient';
-import { Contract } from './types/contracts';
+/**
+ * @module app
+ * @description Express application factory.
+ *
+ * Separates app configuration from server bootstrap so the app can be
+ * imported in tests without binding to a port.
+ *
+ * @security
+ *  - express.json() body parser is scoped to this app instance only.
+ *  - All routes return JSON; no HTML rendering surface.
+ *  - Helmet-style headers should be added here when the dependency is
+ *    introduced (tracked in docs/backend/security.md).
+ */
 
-interface ContractsDependency {
-  getContracts(): Promise<Contract[]>;
-}
-
-interface CreateAppOptions {
-  config: AppConfig;
-  contractsDependency?: ContractsDependency;
-}
+import express, { Request, Response, NextFunction } from 'express';
+import { healthRouter } from './routes/health';
+import { contractsRouter } from './routes/contracts';
 
 /**
- * Creates the HTTP app with dependency resilience behavior and safe degraded responses.
+ * Creates and configures the Express application.
+ *
+ * @returns Configured Express app instance (not yet listening).
  */
-export function createApp(options: CreateAppOptions): express.Express {
+export function createApp(): express.Application {
   const app = express();
-  const contractsDependency =
-    options.contractsDependency ??
-    new ContractsClient(
-      {
-        upstreamContractsUrl: options.config.upstreamContractsUrl,
-        upstreamTimeoutMs: options.config.upstreamTimeoutMs,
-      },
-      new ChaosPolicy(options.config),
-    );
 
+  // ── Middleware ────────────────────────────────────────────────────────────
   app.use(express.json());
 
-  app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', service: 'talenttrust-backend' });
+  // ── Routes ────────────────────────────────────────────────────────────────
+  app.use('/health', healthRouter);
+  app.use('/api/v1/contracts', contractsRouter);
+
+  // ── 404 handler ──────────────────────────────────────────────────────────
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not Found' });
   });
 
-  app.get('/api/v1/contracts', async (_req: Request, res: Response) => {
-    try {
-      const contracts = await contractsDependency.getContracts();
-      res.json({ contracts, degraded: false, source: 'upstream' });
-    } catch (_error) {
-      if (!options.config.gracefulDegradationEnabled) {
-        res.status(503).json({ error: 'contracts_unavailable' });
-        return;
-      }
-
-      res.json({
-        contracts: [],
-        degraded: true,
-        source: 'fallback-empty',
-        reason: 'upstream_unavailable',
-      });
-    }
+  // ── Global error handler ─────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    console.error(err.stack);
+    res.status(500).json({ error: 'Internal Server Error' });
   });
 
   return app;
