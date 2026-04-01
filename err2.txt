@@ -1,0 +1,46 @@
+FAIL src/controllers/contracts.controller.test.ts
+  ContractsController fallback errors
+    × should catch error in getContracts and call next() (5 ms)
+    × should catch error in createContract and call next() (1 ms)
+
+  ● ContractsController fallback errors › should catch error in getContracts and call next()
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: [Error: DB Down]
+
+    Number of calls: 0
+
+    [0m [90m 33 |[39m     [36mawait[39m [33mContractsController[39m[33m.[39mgetContracts(mockRequest [36mas[39m [33mRequest[39m[33m,[39m mockResponse [36mas[39m [33mResponse[39m[33m,[39m mockNext)[33m;[39m
+     [90m 34 |[39m     
+    [31m[1m>[22m[39m[90m 35 |[39m     expect(mockNext)[33m.[39mtoHaveBeenCalledWith(mockError)[33m;[39m
+     [90m    |[39m                      [31m[1m^[22m[39m
+     [90m 36 |[39m   })[33m;[39m
+     [90m 37 |[39m
+     [90m 38 |[39m   it([32m'should catch error in createContract and call next()'[39m[33m,[39m [36masync[39m () [33m=>[39m {[0m
+
+      at Object.<anonymous> (src/controllers/contracts.controller.test.ts:35:22)
+
+  ● ContractsController fallback errors › should catch error in createContract and call next()
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: [Error: Creation failed]
+
+    Number of calls: 0
+
+    [0m [90m 42 |[39m     [36mawait[39m [33mContractsController[39m[33m.[39mcreateContract(mockRequest [36mas[39m [33mRequest[39m[33m,[39m mockResponse [36mas[39m [33mResponse[39m[33m,[39m mockNext)[33m;[39m
+     [90m 43 |[39m     
+    [31m[1m>[22m[39m[90m 44 |[39m     expect(mockNext)[33m.[39mtoHaveBeenCalledWith(mockError)[33m;[39m
+     [90m    |[39m                      [31m[1m^[22m[39m
+     [90m 45 |[39m   })[33m;[39m
+     [90m 46 |[39m })[33m;[39m
+     [90m 47 |[39m[0m
+
+      at Object.<anonymous> (src/controllers/contracts.controller.test.ts:44:22)
+
+Test Suites: 1 failed, 1 total
+Tests:       2 failed, 2 total
+Snapshots:   0 total
+Time:        2.312 s, estimated 3 s
+Ran all test suites matching /src\\controllers\\contracts.controller.test.ts/i.
