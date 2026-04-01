@@ -265,6 +265,31 @@ The API uses **Role-Based Access Control (RBAC)** with four roles: `admin`,
 See [docs/backend/authentication-authorization.md](docs/backend/authentication-authorization.md)
 for the full access control matrix, architecture, and security notes.
 
+## Request Validation Framework
+
+The API now includes a schema-based request validation framework for:
+
+- Route `params`
+- URL `query`
+- JSON request `body`
+
+Validation is strict by default:
+
+- Unknown fields are rejected.
+- Required fields are enforced.
+- Type and range/length constraints are validated.
+
+Validation middleware returns HTTP `400` with the shape:
+
+```json
+{
+	"error": "Validation failed",
+	"details": ["query.admin is not allowed"]
+}
+```
+
+See `docs/backend/request-validation-framework.md` for implementation details and security notes.
+
 ## Contributing
 
 1. Fork the repo and create a branch: `git checkout -b feature/<ticket>-description`
