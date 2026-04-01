@@ -1,50 +1,47 @@
-import express, { NextFunction, Request, Response } from 'express';
-import { AppError } from './errors/appError';
-import { notFoundHandler, errorHandler } from './middleware/errorHandlers';
-import { requestContext } from './middleware/requestContext';
-import { AppConfig } from './config';
-import { ContractsProvider, DefaultContractsProvider } from './dependencies/contractsProvider';
+/**
+ * @module app
+ * @description Express application factory.
+ *
+ * Separates app configuration from server bootstrap so the app can be
+ * imported in tests without binding to a port.
+ *
+ * @security
+ *  - express.json() body parser is scoped to this app instance only.
+ *  - All routes return JSON; no HTML rendering surface.
+ *  - Helmet-style headers should be added here when the dependency is
+ *    introduced (tracked in docs/backend/security.md).
+ */
 
-interface CreateAppOptions {
-  config: AppConfig;
-  contractsProvider?: ContractsProvider;
-}
+import express, { Request, Response, NextFunction } from 'express';
+import { healthRouter } from './routes/health';
+import { contractsRouter } from './routes/contracts';
 
 /**
- * Builds the application with centralized request context and error handling.
+ * Creates and configures the Express application.
+ *
+ * @returns Configured Express app instance (not yet listening).
  */
-export function createApp(options: CreateAppOptions): express.Express {
+export function createApp(): express.Application {
   const app = express();
-  const contractsProvider = options.contractsProvider ?? new DefaultContractsProvider();
 
-  app.use(requestContext);
+  // ── Middleware ────────────────────────────────────────────────────────────
   app.use(express.json());
 
-  app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', service: 'talenttrust-backend' });
+  // ── Routes ────────────────────────────────────────────────────────────────
+  app.use('/health', healthRouter);
+  app.use('/api/v1/contracts', contractsRouter);
+
+  // ── 404 handler ──────────────────────────────────────────────────────────
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not Found' });
   });
 
-  app.post('/api/v1/contracts/validate', (req: Request, res: Response, next: NextFunction) => {
-    const id = req.body?.id;
-    if (typeof id !== 'string' || id.trim().length === 0) {
-      next(new AppError(400, 'validation_error', 'Field "id" must be a non-empty string'));
-      return;
-    }
-
-    res.status(201).json({ id });
+  // ── Global error handler ─────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    console.error(err.stack);
+    res.status(500).json({ error: 'Internal Server Error' });
   });
-
-  app.get('/api/v1/contracts', async (_req: Request, res: Response, next: NextFunction) => {
-    try {
-      const contracts = await contractsProvider.listContracts();
-      res.json({ contracts });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.use(notFoundHandler);
-  app.use(errorHandler);
 
   return app;
 }

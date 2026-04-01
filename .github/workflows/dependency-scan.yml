@@ -1,0 +1,41 @@
+name: Dependency Scan
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Policy gate (production dependencies)
+        run: npm run security:audit
+
+      - name: Generate JSON report artifact
+        run: npm run security:audit:json > audit-report.json
+
+      - name: Dry-run remediation
+        run: npm run security:remediate:dry
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-report
+          path: audit-report.json
+

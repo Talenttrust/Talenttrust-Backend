@@ -1,37 +1,35 @@
 import { AddressInfo } from 'net';
 import { createApp } from './app';
 import { AppConfig } from './config';
-import { AppError } from './errors/appError';
 import { Contract } from './types/contracts';
 
-const config: AppConfig = {
+const baseConfig: AppConfig = {
   port: 0,
+  gracefulDegradationEnabled: true,
+  upstreamContractsUrl: 'http://upstream/contracts',
+  upstreamTimeoutMs: 500,
+  chaosMode: 'off',
+  chaosTargets: [],
+  chaosProbability: 0,
 };
 
-describe('Error handling integration', () => {
-  async function request(
-    path: string,
-    init?: RequestInit,
-    provider?: { listContracts: () => Promise<Contract[]> },
+describe('Contracts API integration', () => {
+  async function requestContracts(
+    configOverride: Partial<AppConfig>,
+    dependency: { getContracts: () => Promise<Contract[]> },
   ) {
     const app = createApp({
-      config,
-      contractsProvider: provider,
+      config: { ...baseConfig, ...configOverride },
+      contractsDependency: dependency,
     });
 
     const server = app.listen(0);
     const { port } = server.address() as AddressInfo;
 
     try {
-      const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
-      const body = (await response.json()) as {
-        error?: {
-          code: string;
-          message: string;
-          requestId: string;
-        };
-      };
-      return { status: response.status, body, requestId: response.headers.get('x-request-id') };
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/contracts`);
+      const body = await response.json();
+      return { status: response.status, body };
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err?: Error) => {
@@ -45,91 +43,46 @@ describe('Error handling integration', () => {
     }
   }
 
-  it('returns 404 with a consistent error shape for unknown routes', async () => {
-    const result = await request('/unknown');
-    const error = result.body.error;
+  it('returns upstream contracts when dependency succeeds', async () => {
+    const dependency = {
+      getContracts: async () => [{ id: 'ct_1', status: 'active' }],
+    };
 
-    expect(result.status).toBe(404);
-    expect(error).toBeDefined();
-    expect(error?.code).toBe('not_found');
-    expect(error?.message).toContain('Route not found');
-    expect(typeof error?.requestId).toBe('string');
-    expect(result.requestId).toBe(error?.requestId);
-  });
-
-  it('returns 400 validation_error with a consistent shape', async () => {
-    const result = await request('/api/v1/contracts/validate', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: '' }),
-    });
-
-    expect(result.status).toBe(400);
+    const result = await requestContracts({}, dependency);
+    expect(result.status).toBe(200);
     expect(result.body).toEqual({
-      error: {
-        code: 'validation_error',
-        message: 'Field "id" must be a non-empty string',
-        requestId: expect.any(String),
-      },
+      contracts: [{ id: 'ct_1', status: 'active' }],
+      degraded: false,
+      source: 'upstream',
     });
   });
 
-  it('returns 400 invalid_json when payload is malformed', async () => {
-    const result = await request('/api/v1/contracts/validate', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{"id":',
-    });
+  it('returns graceful fallback when dependency fails and degradation is enabled', async () => {
+    const dependency = {
+      getContracts: async () => {
+        throw new Error('upstream down');
+      },
+    };
 
-    expect(result.status).toBe(400);
+    const result = await requestContracts({ gracefulDegradationEnabled: true }, dependency);
+    expect(result.status).toBe(200);
     expect(result.body).toEqual({
-      error: {
-        code: 'invalid_json',
-        message: 'Malformed JSON payload',
-        requestId: expect.any(String),
-      },
+      contracts: [],
+      degraded: true,
+      source: 'fallback-empty',
+      reason: 'upstream_unavailable',
     });
   });
 
-  it('returns 503 dependency_unavailable for expected dependency failures', async () => {
-    const result = await request(
-      '/api/v1/contracts',
-      undefined,
-      {
-        listContracts: async () => {
-          throw new AppError(503, 'dependency_unavailable', 'Contracts upstream unavailable');
-        },
+  it('returns 503 when dependency fails and degradation is disabled', async () => {
+    const dependency = {
+      getContracts: async () => {
+        throw new Error('upstream down');
       },
-    );
+    };
 
+    const result = await requestContracts({ gracefulDegradationEnabled: false }, dependency);
     expect(result.status).toBe(503);
-    expect(result.body).toEqual({
-      error: {
-        code: 'dependency_unavailable',
-        message: 'Contracts upstream unavailable',
-        requestId: expect.any(String),
-      },
-    });
-  });
-
-  it('returns 500 internal_error without leaking internal details', async () => {
-    const result = await request(
-      '/api/v1/contracts',
-      undefined,
-      {
-        listContracts: async () => {
-          throw new Error('database credentials exposed');
-        },
-      },
-    );
-
-    expect(result.status).toBe(500);
-    expect(result.body).toEqual({
-      error: {
-        code: 'internal_error',
-        message: 'An unexpected error occurred',
-        requestId: expect.any(String),
-      },
-    });
+    expect(result.body).toEqual({ error: 'contracts_unavailable' });
   });
 });
