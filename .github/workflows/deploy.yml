@@ -1,0 +1,232 @@
+name: Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      version:
+        description: 'Version to deploy (tag or commit SHA)'
+        required: false
+        type: string
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # Determine target environment based on branch or manual input
+  determine-environment:
+    name: Determine Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+    steps:
+      - name: Set environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/develop" ]; then
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=none" >> $GITHUB_OUTPUT
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Build and test
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    if: needs.determine-environment.outputs.should-deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run tests
+        run: npm test -- --coverage
+
+      - name: Check test coverage
+        run: |
+          COVERAGE=$(npm test -- --coverage --coverageReporters=text-summary 2>&1 | grep "Lines" | awk '{print $3}' | sed 's/%//')
+          echo "Test coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 95" | bc -l) )); then
+            echo "::warning::Test coverage is below 95% (current: ${COVERAGE}%)"
+          fi
+
+      - name: Build application
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist/
+            package.json
+            package-lock.json
+          retention-days: 7
+
+  # Security scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    if: needs.determine-environment.outputs.should-deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Check for vulnerabilities
+        run: |
+          VULNS=$(npm audit --json | jq '.metadata.vulnerabilities.total')
+          if [ "$VULNS" -gt 0 ]; then
+            echo "::warning::Found $VULNS vulnerabilities"
+          fi
+
+  # Deployment validation
+  validate-deployment:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    needs: [determine-environment, build-and-test]
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate environment configuration
+        env:
+          NODE_ENV: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          node -e "
+          const { loadEnvironmentConfig } = require('./dist/config/environment');
+          const { validateDeploymentConfig } = require('./dist/deployment/validator');
+          
+          try {
+            const config = loadEnvironmentConfig();
+            const validation = validateDeploymentConfig(config);
+            
+            console.log('Environment:', config.environment);
+            console.log('Validation result:', validation.valid ? 'PASSED' : 'FAILED');
+            
+            if (validation.errors.length > 0) {
+              console.error('Errors:', validation.errors);
+              process.exit(1);
+            }
+            
+            if (validation.warnings.length > 0) {
+              console.warn('Warnings:', validation.warnings);
+            }
+          } catch (error) {
+            console.error('Validation failed:', error.message);
+            process.exit(1);
+          }
+          "
+
+  # Deploy to environment
+  deploy:
+    name: Deploy to ${{ needs.determine-environment.outputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [determine-environment, build-and-test, security-scan, validate-deployment]
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+
+      - name: Deploy to ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          echo "Deploying to ${{ needs.determine-environment.outputs.environment }}"
+          echo "Version: ${{ github.sha }}"
+          # Add actual deployment commands here (e.g., AWS, Azure, GCP, etc.)
+          # Example: aws s3 sync dist/ s3://bucket-name/
+          # Example: kubectl apply -f k8s/deployment.yaml
+
+      - name: Create deployment record
+        run: |
+          echo "Deployment completed at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          echo "Environment: ${{ needs.determine-environment.outputs.environment }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor: ${{ github.actor }}"
+
+  # Post-deployment health check
+  health-check:
+    name: Post-Deployment Health Check
+    runs-on: ubuntu-latest
+    needs: [determine-environment, deploy]
+    steps:
+      - name: Wait for deployment to stabilize
+        run: sleep 30
+
+      - name: Health check
+        run: |
+          echo "Running health check for ${{ needs.determine-environment.outputs.environment }}"
+          # Add actual health check commands here
+          # Example: curl -f https://api.example.com/health || exit 1
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Deployment to ${{ needs.determine-environment.outputs.environment }} successful"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment to ${{ needs.determine-environment.outputs.environment }} failed"
+          # Add notification logic (Slack, email, etc.)
