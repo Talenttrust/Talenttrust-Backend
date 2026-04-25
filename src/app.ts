@@ -17,6 +17,7 @@ import { healthRouter } from './routes/health';
 import contractsModuleRouter from './routes/contracts.routes';
 import reputationRouter from './routes/reputation.routes';
 import { requestIdMiddleware } from './middleware/requestId';
+import { apiVersionMiddleware } from './middleware/apiVersion';
 
 /**
  * Creates and configures the Express application.
@@ -32,8 +33,16 @@ export function createApp(): express.Application {
 
   // ── Routes ────────────────────────────────────────────────────────────────
   app.use('/health', healthRouter);
+
+  // v1 – deprecated; sunset 2026-11-01. Clients should migrate to /api/v2.
+  app.use('/api/v1', apiVersionMiddleware('v1'));
   app.use('/api/v1/contracts', contractsModuleRouter);
   app.use('/api/v1/reputation', reputationRouter);
+
+  // v2 – current stable version.
+  app.use('/api/v2', apiVersionMiddleware('v2'));
+  app.use('/api/v2/contracts', contractsModuleRouter);
+  app.use('/api/v2/reputation', reputationRouter);
 
   // ── 404 handler ──────────────────────────────────────────────────────────
   app.use((_req: Request, res: Response) => {
