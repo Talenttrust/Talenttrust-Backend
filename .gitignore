@@ -2,6 +2,13 @@ node_modules/
 dist/
 .env
 .env.local
+.env.*.local
 *.log
 .DS_Store
 coverage/
+.idea
+test_output.txt
+*.tgz
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/

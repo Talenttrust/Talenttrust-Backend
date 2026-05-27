@@ -1,3 +1,18 @@
+##
+# CI Pipeline — TalentTrust Backend
+#
+# Gates (all must pass before merge):
+#   1. lint      — ESLint with TypeScript rules
+#   2. test      — Jest + coverage (application code only; thresholds in jest.config.js)
+#   3. build     — TypeScript compilation (strict)
+#   4. security  — npm audit (fails on HIGH or CRITICAL vulnerabilities);
+#                  uploads npm-audit-report.json as a workflow artifact for
+#                  review and triage (retained 30 days, visible in Actions UI)
+#
+# Branch protection: configure GitHub to require all four status checks
+# before merging into `main`. See docs/backend/branch-protection.md.
+##
+
 name: CI
 
 on:
@@ -6,8 +21,15 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-progress runs for the same branch to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  # ── 1. Lint ────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +43,134 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
+      - name: Run ESLint
+        run: npm run lint
+
+  # ── 2. Test (with coverage) ────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+
+      - name: Run tests with coverage
+        run: npm run test:ci
+        env:
+          CI: "true"
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+  # ── 3. Build ───────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
         run: npm run build
 
-      - name: Run tests
-        run: npm test
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # ── 4. Security audit ─────────────────────────────────────────────────────
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    # Least-privilege: read-only checkout; no tokens needed for npm audit.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate JSON audit report
+        # Always write the report regardless of exit code so the artifact is
+        # available for triage even when the policy gate below fails.
+        # No registry credentials are passed; npm audit queries the public
+        # advisory database over HTTPS without authentication.
+        run: npm run security:audit:json > npm-audit-report.json || true
+
+      - name: Upload audit report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: npm-audit-report.json
+          retention-days: 30
+
+      - name: npm audit policy gate (HIGH + CRITICAL)
+        # This step enforces the hard failure threshold. It runs after the
+        # artifact is uploaded so reviewers always have the report available.
+        run: npm run audit:ci
+
+  # ── 5. OpenAPI Validation ──────────────────────────────────────────────────
+  openapi:
+    name: OpenAPI Spec Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate and Validate Spec
+        run: npm run test:docs

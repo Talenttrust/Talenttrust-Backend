@@ -1,0 +1,455 @@
+openapi: 3.0.0
+info:
+  version: 1.0.0
+  title: TalentTrust API
+  description: TalentTrust API Gateway and services documentation
+servers:
+  - url: /api/v1
+paths:
+  /contracts:
+    get:
+      summary: List contracts
+      responses:
+        "200":
+          description: List of contracts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Contract"
+    post:
+      summary: Create a contract
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContract"
+      responses:
+        "201":
+          description: Contract created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contract"
+
+  /contracts/{contractId}/metadata:
+    parameters:
+      - name: contractId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Create metadata
+      description: Creates a new metadata record for a contract.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContractMetadata'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '400':
+          description: Bad Request
+        '401':
+          description: Unauthorized
+        '409':
+          description: Conflict
+    get:
+      summary: List metadata
+      description: Retrieves paginated metadata records for a contract.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: key
+          in: query
+          schema:
+            type: string
+        - name: data_type
+          in: query
+          schema:
+            type: string
+            enum: [string, number, boolean, json]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ContractMetadata'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+        '401':
+          description: Unauthorized
+
+  /contracts/{contractId}/metadata/{id}:
+    parameters:
+      - name: contractId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get single metadata
+      description: Retrieves a specific metadata record by ID.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '400':
+          description: Not Found
+        '401':
+          description: Unauthorized
+    patch:
+      summary: Update metadata
+      description: Updates an existing metadata record.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateContractMetadata'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '400':
+          description: Bad Request
+        '401':
+          description: Unauthorized
+    delete:
+      summary: Delete metadata
+      description: Soft deletes a metadata record.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: No Content
+        '401':
+          description: Unauthorized
+
+  /reputation/{id}:
+    get:
+      summary: Get freelancer reputation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Freelancer reputation profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      freelancerId:
+                        type: string
+                      rating:
+                        type: number
+                      reviewCount:
+                        type: number
+    put:
+      summary: Update freelancer reputation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateReputation"
+      responses:
+        "200":
+          description: Updated reputation profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: talenttrust-backend
+  /audit/export:
+    get:
+      summary: Export audit logs
+      description: Streams a filtered NDJSON audit export as a downloadable attachment for compliance workflows.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [INFO, WARNING, CRITICAL]
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: resource
+          in: query
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: NDJSON export stream
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '429':
+          description: Rate limited
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Contract:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        budget:
+          type: number
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateContract:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 5
+          maxLength: 100
+          example: DeFi Bridge Integration
+        description:
+          type: string
+          minLength: 10
+          example: Integrate the Stellar bridge with our DeFi protocol
+        freelancerId:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        budget:
+          type: number
+          minimum: 0
+          exclusiveMinimum: true
+          example: 500
+      required:
+        - title
+        - description
+        - budget
+
+    ContractMetadata:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        contract_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+        value:
+          type: string
+        data_type:
+          type: string
+          enum: [string, number, boolean, json]
+        is_sensitive:
+          type: boolean
+        created_by:
+          type: string
+          format: uuid
+        updated_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateContractMetadata:
+      type: object
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[a-zA-Z0-9_-]+$
+          example: payment_status
+        value:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          example: pending
+        data_type:
+          type: string
+          enum: [string, number, boolean, json]
+          default: string
+          example: string
+        is_sensitive:
+          type: boolean
+          default: false
+          example: false
+      required:
+        - key
+        - value
+
+    UpdateContractMetadata:
+      type: object
+      properties:
+        value:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          example: completed
+        is_sensitive:
+          type: boolean
+          example: false
+      additionalProperties: false
+
+    UpdateReputation:
+      type: object
+      properties:
+        reviewerId:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        rating:
+          type: number
+          minimum: 1
+          maximum: 5
+          example: 5
+        comment:
+          type: string
+          example: Excellent freelancer!
+      required:
+        - reviewerId
+        - rating
