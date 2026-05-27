@@ -113,6 +113,52 @@ Schema migrations run automatically on startup via `runMigrations()` in `src/db/
 
 ---
 
+## WAL Mode Tradeoffs
+
+SQLite is configured with **WAL (Write-Ahead Logging)** journal mode and `synchronous=NORMAL` for optimal concurrency and performance.
+
+### Configuration
+
+| Pragma | Setting | Description |
+|--------|---------|-------------|
+| `journal_mode` | `WAL` | Enables write-ahead logging for better concurrent read/write |
+| `synchronous` | `NORMAL` | Reduces fsync calls; safe with WAL mode |
+| `busy_timeout` | `5000` (configurable via `DB_BUSY_TIMEOUT`) | Wait time in ms before throwing SQLITE_BUSY |
+
+### Durability vs Performance
+
+**WAL mode benefits:**
+- Readers don't block writers and writers don't block readers
+- Better concurrency for read-heavy workloads typical in API servers
+- Reduced disk I/O due to batching of commits
+
+**Tradeoffs:**
+- **Durability**: With `synchronous=NORMAL`, SQLite may lose the last few transactions if the OS crashes (but not if only the application crashes). The WAL file is synced at checkpoints.
+- **Extra files**: Creates `-wal` and `-shm` files alongside the database file
+- **Network filesystems**: WAL mode may not work reliably on NFS or network shares
+
+### When to use FULL synchronous
+
+For mission-critical deployments where every transaction must survive OS crashes, set `synchronous=FULL` at the cost of:
+- Higher latency per write (additional fsync calls)
+- Lower write throughput under heavy load
+
+To change:
+```typescript
+// In database.ts, after opening connection:
+instance.pragma("synchronous = FULL");
+```
+
+### busy_timeout
+
+When multiple processes access the database, SQLite may return `SQLITE_BUSY`. The `busy_timeout` pragma makes SQLite wait and retry before failing:
+
+- Default: `5000` ms (5 seconds)
+- Override via environment: `DB_BUSY_TIMEOUT=10000`
+- Set to `0` to fail immediately on contention
+
+---
+
 ## Security Notes
 
 | Concern           | Mitigation                                                                                                 |

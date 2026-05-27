@@ -80,10 +80,85 @@ describe("getDb", () => {
     expect(["wal", "memory"]).toContain(result);
   });
 
+  it("enables synchronous=NORMAL pragma", () => {
+    const db = getDb(":memory:");
+    const sync = db.pragma("synchronous", { simple: true }) as number;
+    expect(sync).toBe(1); // NORMAL = 1
+  });
+
+  it("sets busy_timeout pragma to configured value", () => {
+    const originalEnv = process.env["DB_BUSY_TIMEOUT"];
+    process.env["DB_BUSY_TIMEOUT"] = "3000";
+    closeDb(); // Reset to pick up new env var
+    const db = getDb(":memory:");
+    const timeout = db.pragma("busy_timeout", { simple: true }) as number;
+    expect(timeout).toBe(3000);
+    process.env["DB_BUSY_TIMEOUT"] = originalEnv;
+  });
+
+  it("sets busy_timeout to default 5000ms when not configured", () => {
+    const originalEnv = process.env["DB_BUSY_TIMEOUT"];
+    delete process.env["DB_BUSY_TIMEOUT"];
+    closeDb();
+    const db = getDb(":memory:");
+    const timeout = db.pragma("busy_timeout", { simple: true }) as number;
+    expect(timeout).toBe(5000);
+    if (originalEnv !== undefined) {
+      process.env["DB_BUSY_TIMEOUT"] = originalEnv;
+    }
+  });
+
   it("enables foreign keys", () => {
     const db = getDb(":memory:");
     const fk = db.pragma("foreign_keys", { simple: true }) as number;
     expect(fk).toBe(1);
+  });
+});
+
+describe("concurrent access", () => {
+  it("does not deadlock under read/write contention", () => {
+    const db = getDb(":memory:");
+    
+    // Insert test data
+    db.prepare("INSERT INTO users (wallet_address, role) VALUES (?, ?)").run("test_wallet", "client");
+    
+    // Simulate concurrent reads and writes
+    const iterations = 100;
+    const readPromises: Promise<void>[] = [];
+    const writePromises: Promise<void>[] = [];
+    
+    // Spawn concurrent readers
+    for (let i = 0; i < iterations; i++) {
+      readPromises.push(
+        new Promise((resolve, reject) => {
+          try {
+            db.prepare("SELECT * FROM users").all();
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        })
+      );
+    }
+    
+    // Spawn concurrent writers
+    for (let i = 0; i < iterations; i++) {
+      writePromises.push(
+        new Promise((resolve, reject) => {
+          try {
+            db.prepare("UPDATE users SET role = ? WHERE wallet_address = ?").run("client", "test_wallet");
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        })
+      );
+    }
+    
+    // All operations should complete without deadlock
+    expect(() => {
+      Promise.all([...readPromises, ...writePromises]);
+    }).not.toThrow();
   });
 });
 

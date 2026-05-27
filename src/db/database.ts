@@ -36,7 +36,13 @@ export function getDb(dbPath?: string): Database.Database {
     path.join(process.cwd(), "talenttrust.db");
 
   instance = new Database(resolvedPath);
+
+  // Apply idempotent pragmas for performance and concurrency
   instance.pragma("journal_mode = WAL"); // Better concurrency
+  instance.pragma("synchronous = NORMAL"); // Balance durability and performance
+  const busyTimeout = parseInt(process.env["DB_BUSY_TIMEOUT"] ?? "5000", 10);
+  instance.pragma(`busy_timeout = ${busyTimeout}`); // Configurable timeout (default 5000ms)
+
   instance.pragma("foreign_keys = ON"); // Enforce FK constraints
 
   runMigrations(instance);
