@@ -119,8 +119,8 @@ describe("concurrent access", () => {
   it("does not deadlock under read/write contention", () => {
     const db = getDb(":memory:");
     
-    // Insert test data
-    db.prepare("INSERT INTO users (wallet_address, role) VALUES (?, ?)").run("test_wallet", "client");
+    // Insert test data using correct schema columns
+    db.prepare("INSERT INTO users (id, username, email, role, created_at) VALUES (?, ?, ?, ?, ?)").run("test-id-1", "testuser", "test@example.com", "client", new Date().toISOString());
     
     // Simulate concurrent reads and writes
     const iterations = 100;
@@ -146,7 +146,7 @@ describe("concurrent access", () => {
       writePromises.push(
         new Promise((resolve, reject) => {
           try {
-            db.prepare("UPDATE users SET role = ? WHERE wallet_address = ?").run("client", "test_wallet");
+            db.prepare("UPDATE users SET role = ? WHERE id = ?").run("client", "test-id-1");
             resolve();
           } catch (err) {
             reject(err);
