@@ -11,7 +11,15 @@ export function notFoundHandler(req: Request, _res: Response, next: NextFunction
 /**
  * Maps all errors to a consistent API envelope and status code.
  */
-export function errorHandler(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(error: unknown, req: Request, res: Response, _next: NextFunction): void {
+  if (res.headersSent) {
+    return;
+  }
+
+  if ((req as any).streamError) {
+    error = (req as any).streamError;
+  }
+
   const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
 
   if (error instanceof SyntaxError && 'status' in error) {

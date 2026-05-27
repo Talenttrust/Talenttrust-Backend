@@ -1,193 +1,79 @@
-# Request Limits Security Implementation
+# Request Limits Security Architecture
 
-## Overview
+This document describes the design and configuration of the streaming request body-size limit enforcer implemented in TalentTrust.
 
-This document outlines the security implementation of strict request body size limits and content-type enforcement middleware for the Talenttrust Backend.
+## 1. Threat Model & Security Goals
 
-## Security Features
+### Threats Mitigated
+- **Denial of Service (DoS) / Memory Exhaustion**: Attackers sending exceptionally large payloads (e.g. gigabytes of data via chunked transfer encoding) to endpoints. Traditional body-parsers buffer the entire body into memory before returning a size limit error, leading to memory exhaustion and application crashes.
+- **Resource Deprivation**: Large file uploads occupying worker threads, event loop ticks, or connection pools.
+- **Information Leakage**: Verbose HTTP error responses revealing the platform's internal paths, stack traces, or dependencies.
 
-### 1. Request Body Size Limits
+### Security Goals
+- **Early Abort**: Intercept requests early in the HTTP lifecycle—prior to body parsing—and immediately sever connections for oversized payloads.
+- **Header & Stream Enforcement**: Validate both `Content-Length` headers and actual byte counts during streaming (to defend against chunked encoding and tampered/missing headers).
+- **Safe Responses**: Return a sanitized, static `413 Payload Too Large` error, hiding all attacker-controlled variables and internal details.
+- **Fail-Safe Startup Configuration**: Parse and validate all request limit settings at server start to prevent running with invalid or insecure limits.
 
-**Purpose**: Prevent large-payload DoS attacks by limiting the maximum size of incoming request bodies.
+---
 
-**Implementation**:
-- Default limit: 1MB (1,048,576 bytes)
-- Configurable via `MAX_REQUEST_BODY_SIZE` environment variable
-- Validates `Content-Length` header before processing
-- Returns HTTP 413 (Payload Too Large) for oversized requests
+## 2. Design & Architecture
 
-**Security Benefits**:
-- Prevents memory exhaustion attacks
-- Reduces attack surface for large payload vulnerabilities
-- Protects against bandwidth exhaustion attacks
+The request limits enforcement consists of a global Express middleware registered at the top of the middleware stack.
 
-### 2. Content-Type Enforcement
-
-**Purpose**: Ensure requests use appropriate content types, preventing ambiguous parsing and injection attacks.
-
-**Implementation**:
-- Default: JSON-only (`application/json`)
-- Configurable via `ALLOWED_CONTENT_TYPES` environment variable
-- Validates media type (ignores charset parameters)
-- Excludes GET/HEAD requests from validation
-- Returns HTTP 415 (Unsupported Media Type) for invalid types
-
-**Security Benefits**:
-- Prevents content-type confusion attacks
-- Reduces risk of parsing vulnerabilities
-- Enforces strict API contract compliance
-
-### 3. Path Exclusions
-
-**Purpose**: Allow specific endpoints to bypass validation for legitimate use cases.
-
-**Implementation**:
-- Default exclusions: `/health`, `/metrics`
-- Configurable via `REQUEST_LIMITS_EXCLUDE_PATHS` environment variable
-- Supports path prefix matching
-
-**Security Considerations**:
-- Excluded paths should be carefully reviewed
-- Monitor excluded endpoints for abuse
-- Consider rate limiting for excluded paths
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MAX_REQUEST_BODY_SIZE` | `1048576` | Maximum request body size in bytes |
-| `ENFORCE_JSON_CONTENT_TYPE` | `true` | Enable/disable content-type enforcement |
-| `ALLOWED_CONTENT_TYPES` | `application/json` | Comma-separated allowed content types |
-| `REQUEST_LIMITS_EXCLUDE_PATHS` | `/health,/metrics` | Comma-separated paths to exclude |
-
-### Security Recommendations
-
-1. **Production Settings**:
-   ```bash
-   MAX_REQUEST_BODY_SIZE=1048576  # 1MB limit
-   ENFORCE_JSON_CONTENT_TYPE=true
-   ALLOWED_CONTENT_TYPES=application/json
-   REQUEST_LIMITS_EXCLUDE_PATHS=/health,/metrics
-   ```
-
-2. **High-Security Environments**:
-   ```bash
-   MAX_REQUEST_BODY_SIZE=524288   # 512KB limit
-   ENFORCE_JSON_CONTENT_TYPE=true
-   ALLOWED_CONTENT_TYPES=application/json
-   REQUEST_LIMITS_EXCLUDE_PATHS=/health
-   ```
-
-## Error Handling
-
-### Standardized Error Responses
-
-All validation errors return consistent error payloads:
-
-```json
-{
-  "error": {
-    "code": "payload_too_large" | "unsupported_media_type",
-    "message": "Human-readable error description",
-    "requestId": "unique-request-identifier"
-  }
-}
+```mermaid
+graph TD
+    A[Incoming Request] --> B{Path Excluded?}
+    B -- Yes --> C[Bypass Validation & Process Route]
+    B -- No --> D{Content-Length > Limit?}
+    D -- Yes --> E[Abort: 413 Payload Too Large]
+    D -- No / Absent --> F[Attach Stream Listener & Call next()]
+    F --> G[Data Chunk Received]
+    G --> H{Bytes Count > Limit?}
+    H -- Yes --> I[Destroy Stream req.destroy & Set streamError]
+    H -- No --> J[Continue Stream Parsing]
+    I --> K[Body Parser / Router Fails]
+    K --> L[Global Error Handler Catches streamError & returns 413]
 ```
 
-### Error Codes
+### Raw Stream Interception
+The `requestLimitsMiddleware` is registered *before* `express.json()` in the middleware pipeline:
+```typescript
+app.use(requestLimitsMiddleware);
+app.use(express.json());
+```
+This allows the middleware to check `Content-Length` headers and attach event listeners to the request stream before any other middleware buffers the data.
 
-- `payload_too_large`: HTTP 413 - Request exceeds size limit
-- `unsupported_media_type`: HTTP 415 - Invalid content-type
+### Double-Garded Enforcement
+1. **Header Verification**: If the client provides a `Content-Length` header exceeding the limit, the request is immediately rejected without reading a single byte from the socket.
+2. **Stream Counting**: For chunked transfer encoding (where `Content-Length` is absent) or header tampering, the middleware monitors incoming `'data'` events and maintains a running counter of the bytes read. If the counter exceeds the route-specific limit, the middleware detaches all listeners, calls `req.destroy()`, and records a `streamError` on the request.
 
-## Testing
+### Stream Destruction & Error Handling
+Calling `req.destroy()` terminates the incoming readable stream and closes the socket, immediately halting the upload. 
+When the next body-parsing middleware tries to consume the destroyed stream, it fails and propagates the failure to the global error handler. The error handler intercepts the custom `req.streamError` property and responds to the client with a safe 413 error status.
 
-### Test Coverage
+---
 
-- Unit tests for all middleware functions
-- Integration tests with full application
-- Environment configuration tests
-- Error response format validation
-- Path exclusion validation
+## 3. Configuration & Startup Validation
 
-### Security Test Scenarios
+All request limits are configurable via environment variables and validated at startup using a Zod schema in `src/config/env.schema.ts`. If an environment variable is invalid, the application fails to start.
 
-1. **Size Limit Tests**:
-   - Normal-sized requests (should pass)
-   - Oversized requests (should fail)
-   - Missing Content-Length header (should pass if body is small)
+### Environment Variables
+| Variable Name | Description | Default | Validation |
+|---|---|---|---|
+| `MAX_REQUEST_BODY_SIZE` | Global fallback maximum request body size (in bytes). | `1048576` (1MB) | Positive integer |
+| `ENFORCE_JSON_CONTENT_TYPE` | Enforces JSON content-type on writing requests (POST/PUT/PATCH/DELETE). | `true` | Boolean (`true`/`false`) |
+| `ALLOWED_CONTENT_TYPES` | Comma-separated list of allowed content types. | `application/json` | Array of strings |
+| `REQUEST_LIMITS_EXCLUDE_PATHS` | Comma-separated list of paths excluded from limits. | `/health, /metrics` | Array of strings |
+| `ROUTE_BODY_LIMITS` | Comma-separated list of route-specific limits in `route:limit` format. | (none) | Map of `path: positive_integer` (e.g. `/api/v1/contracts:2048`) |
 
-2. **Content-Type Tests**:
-   - Valid JSON content-type (should pass)
-   - Invalid content-types (should fail)
-   - Missing content-type (should fail)
-   - Content-type with charset (should pass)
+---
 
-3. **Exclusion Tests**:
-   - Excluded paths with invalid data (should pass)
-   - Non-excluded paths with invalid data (should fail)
+## 4. Safe Error Responses
 
-## Performance Considerations
-
-### Minimal Overhead
-
-- Header-only validation when possible
-- Early rejection of invalid requests
-- Efficient string comparison for content-types
-- Path prefix matching for exclusions
-
-### Memory Usage
-
-- No buffering of request bodies
-- Validation occurs before body parsing
-- Configurable limits prevent memory exhaustion
-
-## Monitoring and Alerting
-
-### Recommended Metrics
-
-1. **Request Validation Metrics**:
-   - Count of rejected requests by error type
-   - Average request size
-   - Request size distribution
-
-2. **Security Metrics**:
-   - Rate of payload_too_large errors
-   - Rate of unsupported_media_type errors
-   - Geographic analysis of rejected requests
-
-### Alerting Rules
-
-- High rate of 413/415 errors (potential attack)
-- Sudden increase in average request size
-- Repeated violations from specific IP ranges
-
-## Deployment Notes
-
-### Gradual Rollout
-
-1. Start with permissive limits in staging
-2. Monitor error rates and adjust thresholds
-3. Deploy to production with monitoring
-4. Tighten limits based on observed patterns
-
-### Rollback Plan
-
-- Environment variables can be quickly adjusted
-- Middleware can be disabled via configuration
-- Previous behavior can be restored by setting high limits
-
-## Compliance
-
-This implementation helps with:
-- **OWASP Top 10**: Addresses A05 (Security Misconfiguration) and A04 (Insecure Design)
-- **PCI DSS**: Limits data exposure through size restrictions
-- **GDPR**: Prevents bulk data extraction attacks
-
-## Future Enhancements
-
-1. **Dynamic Limits**: Per-endpoint size limits
-2. **Rate Limiting Integration**: Combined size and rate validation
-3. **Machine Learning**: Adaptive limit adjustment based on traffic patterns
-4. **Advanced Content-Type**: Schema validation integration
+TalentTrust adheres to a strict safe error message policy (defined in `src/errors/safeErrors.ts`). Under this policy:
+- No user-supplied content is reflected in error messages.
+- The machine-readable code returned is `payload_too_large` or `unsupported_media_type`.
+- The human-readable messages returned are static strings:
+  - `payload_too_large` -> `"Payload Too Large"`
+  - `unsupported_media_type` -> `"Unsupported Media Type"`

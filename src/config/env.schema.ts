@@ -75,6 +75,56 @@ export const envSchema = z.object({
   ACTIVE_COLOR: z.enum(['blue', 'green']).default('blue'),
   BLUE_PORT: z.string().default('3001'),
   GREEN_PORT: z.string().default('3002'),
+
+  // Request Limits Configuration
+  MAX_REQUEST_BODY_SIZE: z.string()
+    .optional()
+    .transform((val) => val === undefined ? undefined : parseInt(val, 10))
+    .pipe(z.number().int().nonnegative().optional()),
+  
+  ENFORCE_JSON_CONTENT_TYPE: z.string()
+    .optional()
+    .transform((val) => val === undefined ? undefined : val !== 'false')
+    .pipe(z.boolean().optional()),
+
+  ALLOWED_CONTENT_TYPES: z.string()
+    .optional()
+    .transform((val) => val ? val.split(',').map(ct => ct.trim()) : undefined)
+    .pipe(z.array(z.string()).optional()),
+
+  REQUEST_LIMITS_EXCLUDE_PATHS: z.string()
+    .optional()
+    .transform((val) => val ? val.split(',').map(p => p.trim()) : undefined)
+    .pipe(z.array(z.string()).optional()),
+
+  ROUTE_BODY_LIMITS: z.string()
+    .optional()
+    .refine(val => {
+      if (!val) return true;
+      const pairs = val.split(',');
+      for (const pair of pairs) {
+        const parts = pair.split(':');
+        if (parts.length !== 2) return false;
+        const [path, limitStr] = parts;
+        if (!path.startsWith('/')) return false;
+        const limit = Number(limitStr);
+        if (!Number.isInteger(limit) || limit < 0) return false;
+      }
+      return true;
+    }, {
+      message: "ROUTE_BODY_LIMITS must be a comma-separated list of path:limit pairs (e.g. '/path:1024,/other:2048') with positive integer limits."
+    })
+    .transform(val => {
+      if (!val) return undefined;
+      const limits: Record<string, number> = {};
+      const pairs = val.split(',');
+      for (const pair of pairs) {
+        const [path, limitStr] = pair.split(':');
+        limits[path.trim()] = parseInt(limitStr.trim(), 10);
+      }
+      return limits;
+    })
+    .pipe(z.record(z.string(), z.number()).optional()),
 });
 
 

@@ -6,6 +6,7 @@
 
 import { NextFunction, Request, Response } from 'express';
 import { AppError } from '../errors/appError';
+import { validateEnv } from '../config/env.schema';
 
 /**
  * Configuration for request limits
@@ -19,6 +20,8 @@ export interface RequestLimitsConfig {
   allowedContentTypes?: string[];
   /** Paths to exclude from content-type enforcement */
   excludePaths?: string[];
+  /** Dynamic route-specific body size limits mapping */
+  routeBodyLimits?: Record<string, number>;
 }
 
 /**
@@ -29,24 +32,25 @@ const DEFAULT_CONFIG: Required<RequestLimitsConfig> = {
   enforceJsonContentType: true,
   allowedContentTypes: ['application/json'],
   excludePaths: ['/health', '/metrics'],
+  routeBodyLimits: {},
 };
 
 /**
  * Parses configuration from environment variables
  */
 function getConfigFromEnv(): RequestLimitsConfig {
-  return {
-    maxBodySize: process.env.MAX_REQUEST_BODY_SIZE 
-      ? parseInt(process.env.MAX_REQUEST_BODY_SIZE, 10) 
-      : DEFAULT_CONFIG.maxBodySize,
-    enforceJsonContentType: process.env.ENFORCE_JSON_CONTENT_TYPE !== 'false',
-    allowedContentTypes: process.env.ALLOWED_CONTENT_TYPES
-      ? process.env.ALLOWED_CONTENT_TYPES.split(',').map(ct => ct.trim())
-      : DEFAULT_CONFIG.allowedContentTypes,
-    excludePaths: process.env.REQUEST_LIMITS_EXCLUDE_PATHS
-      ? process.env.REQUEST_LIMITS_EXCLUDE_PATHS.split(',').map(p => p.trim())
-      : DEFAULT_CONFIG.excludePaths,
-  };
+  try {
+    const env = validateEnv();
+    return {
+      maxBodySize: env.MAX_REQUEST_BODY_SIZE ?? DEFAULT_CONFIG.maxBodySize,
+      enforceJsonContentType: env.ENFORCE_JSON_CONTENT_TYPE ?? DEFAULT_CONFIG.enforceJsonContentType,
+      allowedContentTypes: env.ALLOWED_CONTENT_TYPES ?? DEFAULT_CONFIG.allowedContentTypes,
+      excludePaths: env.REQUEST_LIMITS_EXCLUDE_PATHS ?? DEFAULT_CONFIG.excludePaths,
+      routeBodyLimits: env.ROUTE_BODY_LIMITS ?? DEFAULT_CONFIG.routeBodyLimits,
+    };
+  } catch (error) {
+    throw error;
+  }
 }
 
 /**
@@ -85,21 +89,25 @@ export function createRequestLimitsMiddleware(config: RequestLimitsConfig = {}) 
       return next();
     }
 
-    // Check content-length header against size limit
-    const contentLength = req.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > finalConfig.maxBodySize) {
-      return next(new AppError(
-        413,
-        'payload_too_large',
-        `Request body size ${contentLength} bytes exceeds maximum allowed size of ${finalConfig.maxBodySize} bytes`,
-      ));
+    // Determine the limit for this route
+    let limit = finalConfig.maxBodySize;
+    if (finalConfig.routeBodyLimits) {
+      // Sort keys by length descending to match most specific route first
+      const sortedRoutes = Object.keys(finalConfig.routeBodyLimits).sort((a, b) => b.length - a.length);
+      for (const route of sortedRoutes) {
+        if (req.path === route || req.path.startsWith(route + '/')) {
+          limit = finalConfig.routeBodyLimits[route];
+          break;
+        }
+      }
     }
 
-    // Enforce content-type validation for requests with body
+    // 1. Enforce content-type validation for requests with body (non-GET, non-HEAD)
     if (finalConfig.enforceJsonContentType && req.method !== 'GET' && req.method !== 'HEAD') {
       const contentType = req.get('content-type');
+      const hasBody = req.get('content-length') !== undefined || req.get('transfer-encoding') !== undefined;
       
-      if (!validateContentType(contentType, finalConfig.allowedContentTypes)) {
+      if (hasBody && !validateContentType(contentType, finalConfig.allowedContentTypes)) {
         return next(new AppError(
           415,
           'unsupported_media_type',
@@ -107,6 +115,54 @@ export function createRequestLimitsMiddleware(config: RequestLimitsConfig = {}) 
         ));
       }
     }
+
+    // 2. Check content-length header against size limit
+    const contentLengthStr = req.get('content-length');
+    if (contentLengthStr) {
+      const contentLength = parseInt(contentLengthStr, 10);
+      if (Number.isNaN(contentLength) || contentLength > limit) {
+        return next(new AppError(
+          413,
+          'payload_too_large',
+          'Payload Too Large'
+        ));
+      }
+    }
+
+    // 3. Monitor streaming body byte count for chunked uploads or header tampering
+    let bytesRead = 0;
+    let limitExceeded = false;
+
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('close', onClose);
+    };
+
+    const onData = (chunk: Buffer) => {
+      if (limitExceeded) return;
+      bytesRead += chunk.length;
+      if (bytesRead > limit) {
+        limitExceeded = true;
+        cleanup();
+        
+        // Track the error so it can be handled by the global error handler
+        (req as any).streamError = new AppError(413, 'payload_too_large', 'Payload Too Large');
+        
+        // Destroy request stream to halt upload
+        req.destroy();
+      }
+    };
+
+    const onEnd = () => cleanup();
+    const onError = () => cleanup();
+    const onClose = () => cleanup();
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('close', onClose);
 
     next();
   };

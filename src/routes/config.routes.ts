@@ -10,4 +10,8 @@ const router = Router();
  */
 router.get('/', ConfigController.getConfig);
 
+router.post('/', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 export default router;

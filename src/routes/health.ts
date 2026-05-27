@@ -38,3 +38,7 @@ registry.registerPath({
 healthRouter.get('/', (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', service: 'talenttrust-backend' });
 });
+
+healthRouter.post('/', (_req: Request, res: Response) => {
+  res.status(200).json({ status: 'ok', service: 'talenttrust-backend' });
+});
