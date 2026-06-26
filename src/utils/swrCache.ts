@@ -80,6 +80,40 @@ export class SWRCache {
   }
 
   /**
+   * Remove a single cache entry and any in-flight fetch bookkeeping for the same key.
+   *
+   * This does not cancel a fetch that is already running. It simply ensures
+   * future reads no longer see the cached value.
+   *
+   * @returns True when an entry was removed.
+   */
+  public delete(key: string): boolean {
+    this.activeFetches.delete(key);
+    return this.cache.delete(key);
+  }
+
+  /**
+   * Remove all entries whose keys start with the supplied prefix.
+   *
+   * Useful for contract-scoped invalidation when a single write should flush
+   * every derived cache entry for that contract.
+   *
+   * @returns Number of removed cache entries.
+   */
+  public deleteByPrefix(prefix: string): number {
+    let removed = 0;
+    for (const key of Array.from(this.cache.keys())) {
+      if (key.startsWith(prefix)) {
+        this.activeFetches.delete(key);
+        if (this.cache.delete(key)) {
+          removed += 1;
+        }
+      }
+    }
+    return removed;
+  }
+
+  /**
    * Retrieve data from cache or upstream fetcher using SWR strategy.
    *
    * @param key - The cache key. Use scoped keys (e.g. `resource:userId`) to prevent access control violations.

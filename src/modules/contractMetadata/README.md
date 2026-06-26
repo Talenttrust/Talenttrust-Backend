@@ -11,6 +11,24 @@ The Contract Metadata module provides CRUD operations for managing key-value pai
 - **Contract Owners**: Full access to metadata for contracts they created. Can see sensitive values unmasked.
 - **Others**: No access (403 Forbidden).
 
+## Caching
+
+List reads are wrapped in the shared SWR cache so repeated hot lookups can be
+served from memory while a background refresh revalidates the repository view.
+
+Cache scope is contract-specific and query-specific:
+- `contractId` is part of every cache key.
+- pagination and filter values are part of the key as well.
+- writes, updates, and deletes bump a contract-specific generation so stale
+  background revalidation results cannot be reused after a mutation.
+
+The cache can be tuned with environment variables:
+- `CONTRACT_METADATA_CACHE_TTL_MS` - fresh window before a read becomes stale
+- `CONTRACT_METADATA_CACHE_SWR_MS` - stale-while-revalidate window
+- `CONTRACT_METADATA_CACHE_MAX_ENTRIES` - in-memory cache cap
+
+Defaults are conservative: `5000` ms TTL, `30000` ms SWR, and `500` entries.
+
 ## Data Schema
 
 ### Contract Metadata

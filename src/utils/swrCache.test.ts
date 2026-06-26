@@ -282,6 +282,7 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
 
   it('cleans activeFetches bookkeeping when fetcher rejects and lets the next call refetch', async () => {
     jest.useRealTimers();
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
     const c = new SWRCache();
     const failing = jest.fn(
@@ -304,5 +305,42 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
     expect(recovered.source).toBe('upstream');
     expect(recovered.data).toBe('v-new');
     expect(recovered.degraded).toBe(false);
+  });
+});
+
+describe('SWRCache invalidation helpers', () => {
+  it('removes a single entry when delete is called', async () => {
+    const cache = new SWRCache();
+    const fetcher = jest.fn().mockResolvedValue('value');
+
+    await cache.get('key', fetcher, { ttlMs: 60_000, swrMs: 0 });
+    expect(cache.delete('key')).toBe(true);
+
+    const reread = await cache.get('key', jest.fn().mockResolvedValue('value-2'), {
+      ttlMs: 60_000,
+      swrMs: 0,
+    });
+
+    expect(reread.source).toBe('upstream');
+    expect(reread.data).toBe('value-2');
+  });
+
+  it('removes prefixed entries when deleteByPrefix is called', async () => {
+    const cache = new SWRCache();
+
+    await cache.get('contract-a:page=1', () => Promise.resolve('a1'), { ttlMs: 60_000, swrMs: 0 });
+    await cache.get('contract-a:page=2', () => Promise.resolve('a2'), { ttlMs: 60_000, swrMs: 0 });
+    await cache.get('contract-b:page=1', () => Promise.resolve('b1'), { ttlMs: 60_000, swrMs: 0 });
+
+    expect(cache.deleteByPrefix('contract-a:')).toBe(2);
+    expect(cache.size).toBe(1);
+
+    const reread = await cache.get('contract-a:page=1', () => Promise.resolve('a1-new'), {
+      ttlMs: 60_000,
+      swrMs: 0,
+    });
+
+    expect(reread.source).toBe('upstream');
+    expect(reread.data).toBe('a1-new');
   });
 });

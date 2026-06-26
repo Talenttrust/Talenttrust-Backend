@@ -1,6 +1,7 @@
 import { ContractMetadataService } from './contractMetadata.service';
 import { contractMetadataRepository } from './contractMetadata.repository';
 import { CreateContractMetadataRequest, UpdateContractMetadataRequest } from './contractMetadata.types';
+import { SWRCache } from '../../utils/swrCache';
 
 // Mock the repository
 jest.mock('./contractMetadata.repository');
@@ -313,6 +314,17 @@ describe('ContractMetadataService', () => {
 
   describe('delete', () => {
     it('should delete metadata successfully', async () => {
+      mockRepository.getById.mockResolvedValue({
+        id: '1',
+        contract_id: contractId,
+        key: 'key1',
+        value: 'value1',
+        data_type: 'string' as const,
+        is_sensitive: false,
+        created_by: userId,
+        created_at: new Date(),
+        updated_at: new Date()
+      });
       mockRepository.delete.mockResolvedValue(true);
 
       const result = await service.delete('1');
@@ -322,11 +334,200 @@ describe('ContractMetadataService', () => {
     });
 
     it('should return false if not found', async () => {
+      mockRepository.getById.mockResolvedValue(null);
       mockRepository.delete.mockResolvedValue(false);
 
       const result = await service.delete('nonexistent');
 
       expect(result).toBe(false);
     });
+  });
+});
+
+describe('ContractMetadataService cache behavior', () => {
+  let service: ContractMetadataService;
+  const contractId = 'cached-contract-id';
+  const userId = 'cached-user-id';
+  const regularUser = { id: userId, email: 'user@test.com', role: 'user' as const };
+  const cacheConfig = { ttlMs: 1_000, swrMs: 5_000, maxEntries: 10 };
+
+  const createService = (): ContractMetadataService =>
+    new ContractMetadataService({
+      repository: mockRepository,
+      cache: new SWRCache({ maxEntries: cacheConfig.maxEntries }),
+      cacheConfig,
+    });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers();
+    service = createService();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('should cache repeated list reads and refresh stale data in the background', async () => {
+    const initialRecord = {
+      id: 'cached-1',
+      contract_id: contractId,
+      key: 'key1',
+      value: 'initial-value',
+      data_type: 'string' as const,
+      is_sensitive: false,
+      created_by: userId,
+      created_at: new Date('2026-06-26T00:00:00.000Z'),
+      updated_at: new Date('2026-06-26T00:00:00.000Z'),
+    };
+    const refreshedRecord = {
+      ...initialRecord,
+      value: 'refreshed-value',
+      updated_at: new Date('2026-06-26T00:00:02.000Z'),
+    };
+
+    mockRepository.getByContractId
+      .mockResolvedValueOnce({
+        records: [initialRecord],
+        total: 1,
+        page: 1,
+        limit: 20,
+      })
+      .mockResolvedValueOnce({
+        records: [refreshedRecord],
+        total: 1,
+        page: 1,
+        limit: 20,
+      });
+
+    const first = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(first.records[0].value).toBe('initial-value');
+    expect(mockRepository.getByContractId).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(1_500);
+
+    const second = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(second.records[0].value).toBe('initial-value');
+    expect(second.records[0].value).not.toBe('refreshed-value');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockRepository.getByContractId).toHaveBeenCalledTimes(2);
+
+    const third = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(third.records[0].value).toBe('refreshed-value');
+  });
+
+  it('should invalidate cached list results after an update', async () => {
+    const existingRecord = {
+      id: 'cached-2',
+      contract_id: contractId,
+      key: 'key2',
+      value: 'before-update',
+      data_type: 'string' as const,
+      is_sensitive: false,
+      created_by: userId,
+      created_at: new Date('2026-06-26T00:00:00.000Z'),
+      updated_at: new Date('2026-06-26T00:00:00.000Z'),
+    };
+    const updatedRecord = {
+      ...existingRecord,
+      value: 'after-update',
+      updated_by: userId,
+      updated_at: new Date('2026-06-26T00:00:05.000Z'),
+    };
+
+    mockRepository.getByContractId
+      .mockResolvedValueOnce({
+        records: [existingRecord],
+        total: 1,
+        page: 1,
+        limit: 20,
+      })
+      .mockResolvedValueOnce({
+        records: [updatedRecord],
+        total: 1,
+        page: 1,
+        limit: 20,
+      });
+    mockRepository.getById.mockResolvedValue(existingRecord);
+    mockRepository.update.mockResolvedValue(updatedRecord);
+
+    const cachedBeforeUpdate = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(cachedBeforeUpdate.records[0].value).toBe('before-update');
+
+    const result = await service.update(
+      existingRecord.id,
+      { value: 'after-update' },
+      userId,
+      regularUser,
+    );
+
+    expect(result?.value).toBe('after-update');
+
+    const refreshed = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(refreshed.records[0].value).toBe('after-update');
+    expect(mockRepository.getByContractId).toHaveBeenCalledTimes(2);
+  });
+
+  it('should invalidate cached list results after creating a new record', async () => {
+    const existingRecord = {
+      id: 'cached-3',
+      contract_id: contractId,
+      key: 'key3',
+      value: 'before-create',
+      data_type: 'string' as const,
+      is_sensitive: false,
+      created_by: userId,
+      created_at: new Date('2026-06-26T00:00:00.000Z'),
+      updated_at: new Date('2026-06-26T00:00:00.000Z'),
+    };
+    const createdRecord = {
+      id: 'created-1',
+      contract_id: contractId,
+      key: 'key4',
+      value: 'after-create',
+      data_type: 'string' as const,
+      is_sensitive: false,
+      created_by: userId,
+      updated_by: undefined,
+      created_at: new Date('2026-06-26T00:00:03.000Z'),
+      updated_at: new Date('2026-06-26T00:00:03.000Z'),
+    };
+
+    mockRepository.getByContractId
+      .mockResolvedValueOnce({
+        records: [existingRecord],
+        total: 1,
+        page: 1,
+        limit: 20,
+      })
+      .mockResolvedValueOnce({
+        records: [existingRecord, createdRecord],
+        total: 2,
+        page: 1,
+        limit: 20,
+      });
+    mockRepository.getContractById.mockResolvedValue({ id: contractId } as any);
+    mockRepository.findByContractAndKey.mockResolvedValue(null);
+    mockRepository.create.mockResolvedValue(createdRecord);
+
+    const cachedBeforeCreate = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(cachedBeforeCreate.records).toHaveLength(1);
+
+    const result = await service.create(
+      contractId,
+      { key: 'key4', value: 'after-create', data_type: 'string', is_sensitive: false },
+      userId,
+    );
+
+    expect(result.key).toBe('key4');
+
+    const refreshed = await service.list(contractId, { page: 1, limit: 20 }, regularUser);
+    expect(refreshed.records).toHaveLength(2);
+    expect(refreshed.records[1].value).toBe('after-create');
+    expect(mockRepository.getByContractId).toHaveBeenCalledTimes(2);
   });
 });

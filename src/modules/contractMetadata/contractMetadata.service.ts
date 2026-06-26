@@ -1,56 +1,107 @@
 import { ContractMetadata } from '../../database/schema';
 import { contractMetadataRepository } from './contractMetadata.repository';
-import { CreateContractMetadataRequest, UpdateContractMetadataRequest, ContractMetadataResponse, ContractMetadataListResponse } from './contractMetadata.types';
+import {
+  CreateContractMetadataRequest,
+  UpdateContractMetadataRequest,
+  ContractMetadataResponse,
+  ContractMetadataListResponse,
+} from './contractMetadata.types';
 import { AuthenticatedRequest } from '../../middleware/auth';
+import { SWRCache, type CacheOptions } from '../../utils/swrCache';
+import {
+  contractMetadataCacheConfig,
+  type ContractMetadataCacheConfig,
+} from '../../config/contractMetadataCache';
+
+interface ContractMetadataRepositoryLike {
+  create(data: Omit<ContractMetadata, 'id' | 'created_at' | 'updated_at'>): Promise<ContractMetadata>;
+  getByContractId(
+    contractId: string,
+    options?: {
+      page?: string;
+      limit?: string;
+      key?: string;
+      data_type?: string;
+      includeDeleted?: boolean;
+    }
+  ): Promise<{ records: ContractMetadata[]; total: number; page: number; limit: number }>;
+  getById(id: string): Promise<ContractMetadata | null>;
+  update(
+    id: string,
+    updates: Partial<Pick<ContractMetadata, 'value' | 'is_sensitive' | 'updated_by'>>
+  ): Promise<ContractMetadata | null>;
+  delete(id: string): Promise<boolean>;
+  findByContractAndKey(contractId: string, key: string): Promise<ContractMetadata | null>;
+  getContractById(contractId: string): Promise<any>;
+}
+
+export interface ContractMetadataServiceOptions {
+  repository?: ContractMetadataRepositoryLike;
+  cache?: SWRCache;
+  cacheConfig?: ContractMetadataCacheConfig;
+}
 
 /**
- * Service layer for contract metadata operations
- * Handles business logic and authorization
+ * Service layer for contract metadata operations.
+ *
+ * Contract-scoped list reads are wrapped in the SWR cache so repeated hot
+ * lookups can be served from memory while a background refresh keeps the
+ * repository view current. Writes bump a contract-specific cache generation
+ * so stale revalidation results cannot be reused after a mutation.
  */
 export class ContractMetadataService {
+  private readonly repository: ContractMetadataRepositoryLike;
+  private readonly cache: SWRCache;
+  private readonly cacheOptions: CacheOptions;
+  private readonly cacheVersions = new Map<string, number>();
+
+  constructor(options: ContractMetadataServiceOptions = {}) {
+    const cacheConfig = options.cacheConfig ?? contractMetadataCacheConfig;
+
+    this.repository = options.repository ?? contractMetadataRepository;
+    this.cache = options.cache ?? new SWRCache({ maxEntries: cacheConfig.maxEntries });
+    this.cacheOptions = {
+      ttlMs: cacheConfig.ttlMs,
+      swrMs: cacheConfig.swrMs,
+    };
+  }
+
   /**
-   * Create a new contract metadata record
-   * @param contractId - Contract ID
-   * @param data - Metadata data to create
-   * @param userId - User ID creating the metadata
-   * @returns Created metadata response
-   * @throws Error if contract not found, duplicate key, or validation fails
+   * Create a new contract metadata record.
+   *
+   * The post-write invalidation bumps the contract's cache generation so any
+   * stale SWR entries that are still in flight are ignored by future reads.
    */
   async create(
     contractId: string,
     data: CreateContractMetadataRequest,
     userId: string
   ): Promise<ContractMetadataResponse> {
-    // Check if contract exists
-    const contract = await contractMetadataRepository.getContractById(contractId);
+    const contract = await this.repository.getContractById(contractId);
     if (!contract) {
       throw new Error('Contract not found');
     }
 
-    // Check for duplicate key
-    const existing = await contractMetadataRepository.findByContractAndKey(contractId, data.key);
+    const existing = await this.repository.findByContractAndKey(contractId, data.key);
     if (existing) {
       throw new Error('Metadata key already exists for this contract');
     }
 
-    const metadata = await contractMetadataRepository.create({
+    const metadata = await this.repository.create({
       contract_id: contractId,
       key: data.key,
       value: data.value,
       data_type: data.data_type || 'string',
       is_sensitive: data.is_sensitive || false,
-      created_by: userId
+      created_by: userId,
     });
 
+    this.invalidateContractListCache(contractId);
     return this.formatResponse(metadata);
   }
 
   /**
-   * Get metadata records for a contract
-   * @param contractId - Contract ID
-   * @param options - Pagination and filter options
-   * @param user - Authenticated user for permission checking
-   * @returns Paginated metadata list response
+   * Get metadata records for a contract.
    */
   async list(
     contractId: string,
@@ -66,33 +117,34 @@ export class ContractMetadataService {
       page: options.page?.toString(),
       limit: options.limit?.toString(),
       key: options.key,
-      data_type: options.data_type
+      data_type: options.data_type,
     };
-    const result = await contractMetadataRepository.getByContractId(contractId, queryOptions);
-    
-    const records = result.records.map(record => 
-      this.formatResponse(record, user)
+
+    const cacheKey = this.buildListCacheKey(contractId, queryOptions);
+    const result = await this.cache.get(
+      cacheKey,
+      () => this.repository.getByContractId(contractId, queryOptions),
+      this.cacheOptions,
     );
+
+    const records = result.data.records.map((record) => this.formatResponse(record, user));
 
     return {
       records,
-      total: result.total,
-      page: result.page,
-      limit: result.limit
+      total: result.data.total,
+      page: result.data.page,
+      limit: result.data.limit,
     };
   }
 
   /**
-   * Get a single metadata record by ID
-   * @param id - Metadata ID
-   * @param user - Authenticated user for permission checking
-   * @returns Metadata response or null if not found
+   * Get a single metadata record by ID.
    */
   async getById(
     id: string,
     user?: AuthenticatedRequest['user']
   ): Promise<ContractMetadataResponse | null> {
-    const metadata = await contractMetadataRepository.getById(id);
+    const metadata = await this.repository.getById(id);
     if (!metadata) {
       return null;
     }
@@ -101,13 +153,7 @@ export class ContractMetadataService {
   }
 
   /**
-   * Update a metadata record
-   * @param id - Metadata ID
-   * @param updates - Fields to update
-   * @param userId - User ID performing the update
-   * @param user - Authenticated user for permission checking
-   * @returns Updated metadata response or null if not found
-   * @throws Error if attempting to update immutable fields
+   * Update a metadata record and invalidate cached list views for the parent contract.
    */
   async update(
     id: string,
@@ -115,41 +161,51 @@ export class ContractMetadataService {
     userId: string,
     user?: AuthenticatedRequest['user']
   ): Promise<ContractMetadataResponse | null> {
-    const existing = await contractMetadataRepository.getById(id);
+    const existing = await this.repository.getById(id);
     if (!existing) {
       return null;
     }
 
-    const metadata = await contractMetadataRepository.update(id, {
+    const metadata = await this.repository.update(id, {
       ...updates,
-      updated_by: userId
+      updated_by: userId,
     });
 
-    return metadata ? this.formatResponse(metadata, user) : null;
+    if (metadata) {
+      this.invalidateContractListCache(existing.contract_id);
+      return this.formatResponse(metadata, user);
+    }
+
+    return null;
   }
 
   /**
-   * Soft delete a metadata record
-   * @param id - Metadata ID
-   * @returns True if deleted, false if not found
+   * Soft delete a metadata record and flush the parent contract's cache entries.
    */
   async delete(id: string): Promise<boolean> {
-    return await contractMetadataRepository.delete(id);
+    const existing = await this.repository.getById(id);
+    if (!existing) {
+      return false;
+    }
+
+    const deleted = await this.repository.delete(id);
+    if (deleted) {
+      this.invalidateContractListCache(existing.contract_id);
+    }
+
+    return deleted;
   }
 
   /**
-   * Format metadata record for API response
-   * @param metadata - Metadata record
-   * @param user - Authenticated user for sensitive data masking
-   * @returns Formatted response
+   * Format metadata record for API response.
    */
   private formatResponse(
     metadata: ContractMetadata,
     user?: AuthenticatedRequest['user']
   ): ContractMetadataResponse {
-    const shouldMaskValue = metadata.is_sensitive && 
-      user && 
-      metadata.created_by !== user.id && 
+    const shouldMaskValue = metadata.is_sensitive &&
+      user &&
+      metadata.created_by !== user.id &&
       user.role !== 'admin';
 
     return {
@@ -162,8 +218,51 @@ export class ContractMetadataService {
       created_by: metadata.created_by,
       updated_by: metadata.updated_by,
       created_at: metadata.created_at.toISOString(),
-      updated_at: metadata.updated_at.toISOString()
+      updated_at: metadata.updated_at.toISOString(),
     };
+  }
+
+  /**
+   * Build the cache key for a contract metadata list query.
+   *
+   * The contract id is part of the prefix and the query payload is serialized
+   * in a stable order, which keeps tenant/contract reads isolated.
+   */
+  private buildListCacheKey(
+    contractId: string,
+    queryOptions: {
+      page?: string;
+      limit?: string;
+      key?: string;
+      data_type?: string;
+    }
+  ): string {
+    return `${this.buildListCachePrefix(contractId)}${JSON.stringify({
+      page: queryOptions.page ?? '',
+      limit: queryOptions.limit ?? '',
+      key: queryOptions.key ?? '',
+      data_type: queryOptions.data_type ?? '',
+    })}`;
+  }
+
+  private buildListCachePrefix(contractId: string, version = this.getCacheVersion(contractId)): string {
+    return `contract-metadata:list:${contractId}:v${version}:`;
+  }
+
+  private getCacheVersion(contractId: string): number {
+    return this.cacheVersions.get(contractId) ?? 0;
+  }
+
+  /**
+   * Bump the contract-specific cache generation and drop the previous prefix.
+   *
+   * Any in-flight revalidation for the old generation can still resolve, but
+   * future reads will move to the new generation and bypass the stale payload.
+   */
+  private invalidateContractListCache(contractId: string): void {
+    const currentVersion = this.getCacheVersion(contractId);
+    this.cacheVersions.set(contractId, currentVersion + 1);
+    this.cache.deleteByPrefix(this.buildListCachePrefix(contractId, currentVersion));
   }
 }
 
