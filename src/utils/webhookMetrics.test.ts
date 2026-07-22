@@ -70,6 +70,7 @@ describe('webhookMetrics DLQ counters', () => {
 
       const metrics = await webhookDlqRegistry.getMetricsAsJSON();
       const counter = metrics.find((m) => m.name === 'webhook_dlq_replays_total');
+      expect(counter).toBeDefined();
       const value = (counter!.values as any[]).find((v) => v.labels.outcome === 'failed');
       expect(value?.value).toBe(2);
     });
@@ -79,6 +80,7 @@ describe('webhookMetrics DLQ counters', () => {
 
       const metrics = await webhookDlqRegistry.getMetricsAsJSON();
       const counter = metrics.find((m) => m.name === 'webhook_dlq_replays_total');
+      expect(counter).toBeDefined();
       const value = (counter!.values as any[]).find(
         (v) => v.labels.outcome === 'idempotent_noop',
       );
@@ -90,6 +92,7 @@ describe('webhookMetrics DLQ counters', () => {
 
       const metrics = await webhookDlqRegistry.getMetricsAsJSON();
       const counter = metrics.find((m) => m.name === 'webhook_dlq_replays_total');
+      expect(counter).toBeDefined();
       const value = (counter!.values as any[]).find((v) => v.labels.outcome === 'error');
       expect(value?.value).toBe(1);
     });
