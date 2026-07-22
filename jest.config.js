@@ -63,6 +63,30 @@ module.exports = {
       functions: 0,
       branches: 0,
     },
+    './src/observability/metrics-service.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/observability/health-service.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/middleware/metricsAuth.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/utils/webhookMetrics.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
   },
   coverageReporters: ['text', 'lcov', 'json-summary'],
 };

@@ -1,4 +1,15 @@
-import { Counter } from 'prom-client';
+import { Counter, Registry } from 'prom-client';
+
+// ---------------------------------------------------------------------------
+// Isolated Registry for WebhookMetrics DLQ counters
+// ---------------------------------------------------------------------------
+
+/**
+ * Isolated prom-client Registry for webhook DLQ metrics.
+ * Using a dedicated registry prevents duplicate metric registration errors
+ * in test environments and allows test isolation via registry.clear().
+ */
+export const webhookDlqRegistry = new Registry();
 
 // ---------------------------------------------------------------------------
 // Existing Metrics (From Project Specifications)
@@ -12,6 +23,7 @@ export const webhookDlqOperationsTotal = new Counter({
   name: 'webhook_dlq_operations_total',
   help: 'Total number of webhook DLQ core operations.',
   labelNames: ['operation'],
+  registers: [webhookDlqRegistry],
 });
 
 /**
@@ -34,6 +46,7 @@ export const webhookDlqReplaysTotal = new Counter({
   name: 'webhook_dlq_replays_total',
   help: 'Total tracking counts of webhook DLQ manual or batch replay jobs executed.',
   labelNames: ['outcome'],
+  registers: [webhookDlqRegistry],
 });
 
 /**
