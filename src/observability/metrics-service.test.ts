@@ -147,4 +147,75 @@ describe('MetricsService — HTTP route labels', () => {
     expect(labels).toContain('other');
     expect(labels).not.toContain('/api/v1/resource-19/:id');
   });
+
+  it('tracks routes individually below the limit', async () => {
+    const { service, register } = makeService(100);
+
+    // Record 50 unique routes
+    for (let i = 0; i < 50; i += 1) {
+      recordHttpRequest(service, { routePath: `/route-${i}` });
+    }
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/route-0');
+    expect(labels).toContain('/route-49');
+    expect(labels).not.toContain('other');
+  });
+
+  it('collapses to "other" when limit is reached', async () => {
+    const { service, register } = makeService(2);
+
+    recordHttpRequest(service, { routePath: '/route1' });
+    recordHttpRequest(service, { routePath: '/route2' });
+    recordHttpRequest(service, { routePath: '/route3' }); // ← should be "other"
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('other');
+    expect(labels).not.toContain('/route3');
+  });
+
+  it('unmatched requests produce "unmatched" label regardless of limit', async () => {
+    const { service, register } = makeService(1);
+
+    // First, fill the limit
+    recordHttpRequest(service, { routePath: '/route1' });
+    // Now record unmatched
+    recordHttpRequest(service, { routePath: undefined, statusCode: 404 });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('unmatched');
+  });
+});
+
+describe('MetricsService — health status gauge', () => {
+  it('recordHealthStatus sets gauge to 2 for up', async () => {
+    const { service, register } = makeService();
+
+    service.recordHealthStatus('up');
+
+    const json = await register.getMetricsAsJSON();
+    const gauge = json.find((m) => m.name === 'service_health_status');
+    expect(gauge).toBeDefined();
+    expect((gauge!.values as any[])[0].value).toBe(2);
+  });
+
+  it('recordHealthStatus sets gauge to 1 for degraded', async () => {
+    const { service, register } = makeService();
+
+    service.recordHealthStatus('degraded');
+
+    const json = await register.getMetricsAsJSON();
+    const gauge = json.find((m) => m.name === 'service_health_status');
+    expect((gauge!.values as any[])[0].value).toBe(1);
+  });
+
+  it('recordHealthStatus sets gauge to 0 for down', async () => {
+    const { service, register } = makeService();
+
+    service.recordHealthStatus('down');
+
+    const json = await register.getMetricsAsJSON();
+    const gauge = json.find((m) => m.name === 'service_health_status');
+    expect((gauge!.values as any[])[0].value).toBe(0);
+  });
 });

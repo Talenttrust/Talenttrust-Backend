@@ -3,6 +3,7 @@
  * @description Unit tests for the /metrics bearer token middleware.
  */
 
+import * as crypto from "crypto";
 import express, { Request, Response } from "express";
 import request from "supertest";
 import { metricsAuthMiddleware } from "./metricsAuth";
@@ -94,6 +95,31 @@ describe("metricsAuthMiddleware", () => {
         .set("Authorization", "bearer super-secret-token");
       // Express lowercases header values but not scheme — 'bearer' != 'Bearer'
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe("constant-time comparison security", () => {
+    it("calls timingSafeEqual only when buffer lengths match", async () => {
+      const spy = jest.spyOn(crypto, "timingSafeEqual");
+      process.env.METRICS_AUTH_TOKEN = "token12";
+
+      // Length mismatch (7 vs 5) — should NOT call timingSafeEqual
+      await request(buildApp())
+        .get("/metrics")
+        .set("Authorization", "Bearer short");
+
+      expect(spy).not.toHaveBeenCalled();
+
+      spy.mockClear();
+
+      // Length match (7 vs 7) — should call timingSafeEqual
+      await request(buildApp())
+        .get("/metrics")
+        .set("Authorization", "Bearer token99");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      spy.mockRestore();
     });
   });
 });

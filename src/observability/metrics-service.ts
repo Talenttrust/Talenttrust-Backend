@@ -11,6 +11,21 @@ import { ServiceStatus } from './types';
 
 export type WebhookOutcome = 'success' | 'failure' | 'dlq';
 
+/**
+ * Canonical list of metric family names documented in docs/observability.md.
+ * This constant enables round-trip verification: tests assert that the set of
+ * metrics registered by MetricsService matches this list exactly.
+ */
+export const CATALOG_METRIC_NAMES: readonly string[] = [
+  'http_requests_total',
+  'http_request_duration_seconds',
+  'service_health_status',
+  'webhook_deliveries_total',
+  'webhook_dlq_depth',
+  'webhook_rate_limit_tokens',
+  'webhook_rate_limit_queue_depth',
+] as const;
+
 export interface MetricsServiceLike {
   contentType: string;
   trackHttpRequest: (req: Request, res: Response, next: NextFunction) => void;
