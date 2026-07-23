@@ -156,4 +156,39 @@ export class EscrowHooks {
     });
     return { channel, success: false, message: err.message };
   }
+
+  /**
+   * @notice Maps state transitions of contracts to KeyEscrowEvents and dispatches notifications.
+   *         Filters out unchanged and unknown/ignored states.
+   *
+   * @param oldStatus Starting contract status.
+   * @param newStatus Destination contract status.
+   * @param payload Context payload containing required identifiers.
+   * @returns Aggregated dispatch result, or null if no notification is triggered.
+   */
+  public static async onStateTransition(
+    oldStatus: string,
+    newStatus: string,
+    payload: EscrowEventPayload,
+  ): Promise<EscrowDispatchResult | null> {
+    if (!oldStatus || !newStatus || oldStatus === newStatus) {
+      return null;
+    }
+
+    let event: KeyEscrowEvent | null = null;
+
+    if (oldStatus === 'draft' && newStatus === 'active') {
+      event = KeyEscrowEvent.FUNDS_DEPOSITED; // funded
+    } else if (oldStatus === 'active' && newStatus === 'completed') {
+      event = KeyEscrowEvent.ESCROW_RESOLVED; // released
+    } else if (oldStatus === 'active' && newStatus === 'disputed') {
+      event = KeyEscrowEvent.DISPUTE_RAISED; // disputed
+    }
+
+    if (!event) {
+      return null;
+    }
+
+    return EscrowHooks.onEscrowEvent(event, payload);
+  }
 }

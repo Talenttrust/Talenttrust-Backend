@@ -39,3 +39,30 @@ Use environment variables to configure email transports:
 - Web notifications validate `userId` for basic sanity; authorization (session matching) should be enforced by callers to prevent IDOR.
 - Email addresses are redacted in logs to avoid leaking PII.
 - Secrets and API keys are redacted in logs.
+
+## Escrow Lifecycle Hook Dispatch
+The backend includes centralized dispatch hooks (`EscrowHooks`) that fan out escrow lifecycle events concurrently to all configured notification channels (e.g. Email and Web notification channels).
+
+### Lifecycle State Transitions
+The `EscrowHooks.onStateTransition` hook maps contract status changes to specific `KeyEscrowEvent` types:
+
+| Transition Type | Old Status | New Status | Event Triggered |
+|---|---|---|---|
+| **Funded** | `draft` | `active` | `KeyEscrowEvent.FUNDS_DEPOSITED` |
+| **Released** | `active` | `completed` | `KeyEscrowEvent.ESCROW_RESOLVED` |
+| **Disputed** | `active` | `disputed` | `KeyEscrowEvent.DISPUTE_RAISED` |
+
+Any other state transitions or unchanged statuses (e.g. `active` -> `active`) are ignored and do not trigger any notifications.
+
+### Payload Shape
+The event payload must conform to the `EscrowEventPayload` interface:
+```typescript
+interface EscrowEventPayload {
+  contractId: string; // The contract UUID
+  userEmail: string;  // PII-sensitive email of the recipient (redacted in logs)
+  userId: string;     // Recipient platform identifier
+  amount?: string;    // Optional contract budget/milestone amount
+  reason?: string;    // Optional reason context (e.g. for disputes)
+}
+```
+All dispatches are performed offline and deterministically in the test suite using injected fakes/mocks.

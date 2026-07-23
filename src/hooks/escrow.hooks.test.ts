@@ -1,3 +1,6 @@
+process.env.COMPLIANCE_AUDIT_SECRET = 'a'.repeat(32);
+process.env.NODE_ENV = 'test';
+
 // Mock the notification service module before any imports resolve so that
 // the module-level `notificationService` singleton (which calls validateEnv()
 // and opens a SQLite connection) is never constructed during tests.
@@ -8,10 +11,21 @@ jest.mock('../services/notification.service', () => ({
   },
 }));
 
-import { EscrowHooks, EscrowDispatchResult } from './escrow.hooks';
 import { KeyEscrowEvent } from '../types/notification.types';
-import { notificationService } from '../services/notification.service';
-import { logger } from '../logger';
+import type { EscrowDispatchResult } from './escrow.hooks';
+
+let EscrowHooks: any;
+let notificationService: any;
+let logger: any;
+
+beforeAll(async () => {
+  const hooksMod = await import('./escrow.hooks');
+  EscrowHooks = hooksMod.EscrowHooks;
+  const serviceMod = await import('../services/notification.service');
+  notificationService = serviceMod.notificationService;
+  const loggerMod = await import('../logger');
+  logger = loggerMod.logger;
+});
 
 /**
  * Baseline payload used across tests.  All PII-sensitive fields are
@@ -216,7 +230,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('does not throw — resolves with both failures', async () => {
       await expect(
         EscrowHooks.onEscrowEvent(KeyEscrowEvent.DISPUTE_RAISED, BASE_PAYLOAD),
-      ).resolves.not.toThrow();
+      ).resolves.toBeDefined();
     });
 
     it('returns allSucceeded:false, anySucceeded:false', async () => {
@@ -380,6 +394,97 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.channels).toHaveLength(2);
       expect(sendEmailSpy).toHaveBeenCalledTimes(1);
       expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ─── State Transitions (Lifecycle Hooks) ────────────────────────────────────
+
+  describe('onStateTransition — contract lifecycle transitions', () => {
+    it('dispatches FUNDS_DEPOSITED for draft -> active transition (funded)', async () => {
+      const result = await EscrowHooks.onStateTransition('draft', 'active', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.FUNDS_DEPOSITED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+          amount: BASE_PAYLOAD.amount,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+      expect(sendWebSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userId,
+        KeyEscrowEvent.FUNDS_DEPOSITED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+          amount: BASE_PAYLOAD.amount,
+        }),
+      );
+    });
+
+    it('dispatches ESCROW_RESOLVED for active -> completed transition (released)', async () => {
+      const result = await EscrowHooks.onStateTransition('active', 'completed', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.ESCROW_RESOLVED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches DISPUTE_RAISED for active -> disputed transition (disputed)', async () => {
+      const result = await EscrowHooks.onStateTransition('active', 'disputed', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.DISPUTE_RAISED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits no notifications for unchanged states', async () => {
+      const statuses = ['draft', 'active', 'completed', 'disputed', 'cancelled'];
+      for (const status of statuses) {
+        const result = await EscrowHooks.onStateTransition(status, status, BASE_PAYLOAD);
+        expect(result).toBeNull();
+      }
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+      expect(sendWebSpy).not.toHaveBeenCalled();
+    });
+
+    it('emits no notifications for unknown or ignored transitions', async () => {
+      const ignoredTransitions = [
+        { old: 'draft', new: 'completed' },
+        { old: 'completed', new: 'active' },
+        { old: 'unknown_state', new: 'active' },
+        { old: 'active', new: 'unknown_state' },
+      ];
+      for (const transition of ignoredTransitions) {
+        const result = await EscrowHooks.onStateTransition(transition.old, transition.new, BASE_PAYLOAD);
+        expect(result).toBeNull();
+      }
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+      expect(sendWebSpy).not.toHaveBeenCalled();
     });
   });
 });
