@@ -1,4 +1,5 @@
 import { SWRCache, CacheOptions, DEFAULT_MAX_ENTRIES } from './swrCache';
+import { logger } from '../logger';
 
 describe('SWRCache', () => {
   let cache: SWRCache;
@@ -111,7 +112,9 @@ describe('SWRCache', () => {
 
   describe('revalidation error', () => {
     it('does not throw to callers and retains stale value after background revalidation fails', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      const logSpy = jest.spyOn(logger, 'error').mockImplementation();
+      const onRevalidationError = jest.fn();
+      cache = new SWRCache({ onRevalidationError });
 
       const seedFetcher = jest.fn().mockResolvedValue('stale-data');
       const key = 'test:reval-error';
@@ -131,16 +134,25 @@ describe('SWRCache', () => {
 
       await Promise.resolve();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Background revalidation failed'),
-        'network down',
+      expect(logSpy).toHaveBeenCalledWith(
+        'SWR background revalidation failed',
+        expect.objectContaining({
+          cacheKey: '[REDACTED]',
+          err: expect.any(Error),
+        }),
+      );
+      expect(onRevalidationError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key,
+          error: expect.any(Error),
+        }),
       );
 
-      consoleSpy.mockRestore();
+      logSpy.mockRestore();
     });
 
     it('does not rethrow revalidation errors to stale callers', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      const logSpy = jest.spyOn(logger, 'error').mockImplementation();
 
       const fetcher = jest.fn().mockResolvedValue('original');
       const key = 'test:reval-no-throw';
@@ -157,7 +169,42 @@ describe('SWRCache', () => {
 
       await expect(errorPromise).resolves.toEqual(result);
 
-      consoleSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it('swallows callback errors after logging the revalidation failure', async () => {
+      const logSpy = jest.spyOn(logger, 'error').mockImplementation();
+      cache = new SWRCache({
+        onRevalidationError: () => {
+          throw new Error('metrics sink down');
+        },
+      });
+
+      await cache.get('callback:key', jest.fn().mockResolvedValue('old'), options);
+      jest.advanceTimersByTime(ttlMs + 10);
+
+      const result = await cache.get(
+        'callback:key',
+        jest.fn().mockRejectedValue(new Error('upstream down')),
+        options,
+      );
+
+      expect(result).toEqual({ data: 'old', degraded: true, source: 'cache_stale' });
+
+      await Promise.resolve();
+
+      expect(logSpy).toHaveBeenNthCalledWith(
+        1,
+        'SWR background revalidation failed',
+        expect.objectContaining({ cacheKey: '[REDACTED]', err: expect.any(Error) }),
+      );
+      expect(logSpy).toHaveBeenNthCalledWith(
+        2,
+        'SWR revalidation error callback failed',
+        expect.objectContaining({ cacheKey: '[REDACTED]', err: expect.any(Error) }),
+      );
+
+      logSpy.mockRestore();
     });
   });
 

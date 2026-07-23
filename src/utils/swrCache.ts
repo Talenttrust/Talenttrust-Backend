@@ -18,6 +18,9 @@
  * promise already pending resolves with the data it was awaiting.
  */
 
+import { logger } from '../logger';
+import { redactSecret } from './redact';
+
 export interface CacheOptions {
   /** Time-To-Live in milliseconds. Cache is considered fresh during this period. */
   ttlMs: number;
@@ -31,7 +34,26 @@ export interface SWRCacheOptions {
    * Must be a positive integer. Defaults to {@link DEFAULT_MAX_ENTRIES}.
    */
   maxEntries?: number;
+  /**
+   * Optional hook fired after a background SWR revalidation fails.
+   *
+   * Use this for metrics or alerts. The hook runs after the structured log is
+   * emitted, and any hook error is swallowed so stale callers never observe a
+   * background revalidation failure.
+   */
+  onRevalidationError?: SWRRevalidationErrorHandler;
 }
+
+export type SWRRevalidationErrorEvent = {
+  /** Cache key whose background revalidation failed. */
+  key: string;
+  /** Original error thrown by the upstream fetcher. */
+  error: unknown;
+};
+
+export type SWRRevalidationErrorHandler = (
+  event: SWRRevalidationErrorEvent,
+) => void;
 
 export interface SWRResult<T> {
   data: T;
@@ -68,6 +90,8 @@ export const DEFAULT_MAX_ENTRIES = 1000;
 export class SWRCache {
   /** Maximum number of entries permitted before LRU eviction is triggered. */
   public readonly maxEntries: number;
+  /** Optional observer for background revalidation failures. */
+  private readonly onRevalidationError: SWRRevalidationErrorHandler | undefined;
   /** Insertion-ordered Map keyed by `string`. Iteration yields least-recently-used first. */
   private cache = new Map<string, CacheEntry<unknown>>();
   /** In-flight fetch promises, decoupled from cache membership so eviction cannot corrupt them. */
@@ -85,6 +109,7 @@ export class SWRCache {
       );
     }
     this.maxEntries = supplied;
+    this.onRevalidationError = options.onRevalidationError;
   }
 
   /**
@@ -132,7 +157,7 @@ export class SWRCache {
           // logged inside revalidate()'s catch block; we attach a no-op catch
           // here to prevent Node from treating the unhandled rejection as a
           // fatal error and to avoid test runner leakage.
-          this.revalidate(key, fetcher).catch(() => undefined);
+          this.revalidate(key, fetcher, true).catch(() => undefined);
         }
         this.touch(key, entry);
         return { data: entry.data as T, degraded: true, source: 'cache_stale' };
@@ -208,18 +233,20 @@ export class SWRCache {
    * `.catch` so that the activeFetches bookkeeping is guaranteed even if
    * the upstream fetcher throws synchronously.
    */
-  private revalidate<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  private revalidate<T>(
+    key: string,
+    fetcher: () => Promise<T>,
+    isBackground = false,
+  ): Promise<T> {
     const fetchPromise = (async (): Promise<T> => {
       try {
         const newData = await fetcher();
         this.setEntry(key, { data: newData as unknown, updatedAt: Date.now() });
         return newData;
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error(
-          `[SWR Cache] Background revalidation failed for key: ${key}`,
-          (err as Error).message,
-        );
+        if (isBackground) {
+          this.handleRevalidationError(key, err);
+        }
         throw err;
       } finally {
         this.activeFetches.delete(key);
@@ -227,5 +254,36 @@ export class SWRCache {
     })();
     this.activeFetches.set(key, fetchPromise as Promise<unknown>);
     return fetchPromise;
+  }
+
+  /**
+   * Emit structured telemetry for background revalidation failures.
+   *
+   * The cache key is routed through the shared redaction helper before logging,
+   * because callers may include user IDs or access-control scope in cache keys.
+   * The optional observer receives the original key/error for local metrics, but
+   * observer failures are swallowed and logged so stale callers are insulated.
+   */
+  private handleRevalidationError(key: string, error: unknown): void {
+    const cacheKey = redactSecret(key);
+    const err =
+      error instanceof Error ? error : new Error(String(error ?? 'unknown'));
+
+    logger.error('SWR background revalidation failed', {
+      cacheKey,
+      err,
+    });
+
+    try {
+      this.onRevalidationError?.({ key, error });
+    } catch (callbackError) {
+      logger.error('SWR revalidation error callback failed', {
+        cacheKey,
+        err:
+          callbackError instanceof Error
+            ? callbackError
+            : new Error(String(callbackError ?? 'unknown')),
+      });
+    }
   }
 }
