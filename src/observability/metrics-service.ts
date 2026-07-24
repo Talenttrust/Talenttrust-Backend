@@ -203,7 +203,7 @@ export class MetricsService implements MetricsServiceLike {
   }
 
   private boundRouteLabel(route: string): string {
-    if (this.observedHttpRouteLabels.has(route)) {
+    if (route === UNMATCHED_ROUTE_LABEL || this.observedHttpRouteLabels.has(route)) {
       return route;
     }
 

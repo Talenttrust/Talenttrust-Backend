@@ -12,9 +12,9 @@ jest.mock('../services/notification.service', () => ({
 }));
 
 import { KeyEscrowEvent } from '../types/notification.types';
-import type { EscrowDispatchResult } from './escrow.hooks';
+import type { EscrowDispatchResult, EscrowHooks as EscrowHooksType } from './escrow.hooks';
 
-let EscrowHooks: any;
+let EscrowHooks: typeof EscrowHooksType;
 let notificationService: any;
 let logger: any;
 
