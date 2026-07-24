@@ -2,8 +2,31 @@ import { KeyEscrowEvent, EmailPayload, WebPayload } from '../types/notification.
 import { NotificationTransport, ConsoleTransport, NotificationResult, SMTPTransport, SESTransport, SendGridTransport } from './notification.transport';
 import { NotificationRepository } from '../repositories/notificationRepository';
 import { getDb } from '../db/database';
-import { validateEnv } from '../config/env.schema';
+import { EnvConfig, validateEnv } from '../config/env.schema';
 import { logger } from '../logger';
+
+/** Resolve the synchronous notification email transport from validated config. */
+export function createNotificationEmailTransport(env: EnvConfig = validateEnv()): NotificationTransport {
+  if (env.EMAIL_PROVIDER === 'smtp') {
+    if (!env.SMTP_HOST || !env.SMTP_PORT || !env.SMTP_FROM) {
+      throw new Error('SMTP email transport selected but SMTP_HOST, SMTP_PORT, and SMTP_FROM are required');
+    }
+    return new SMTPTransport({ host: env.SMTP_HOST, port: env.SMTP_PORT, user: env.SMTP_USER, password: env.SMTP_PASSWORD, from: env.SMTP_FROM, secure: env.SMTP_SECURE }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  if (env.EMAIL_PROVIDER === 'ses') {
+    if (!env.SMTP_FROM || !env.AWS_REGION || !env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
+      throw new Error('SES email transport selected but SMTP_FROM, AWS_REGION, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY are required');
+    }
+    return new SESTransport({ accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY, region: env.AWS_REGION, from: env.SMTP_FROM }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  if (env.EMAIL_PROVIDER === 'sendgrid') {
+    if (!env.SMTP_FROM || !env.SENDGRID_API_KEY) {
+      throw new Error('SendGrid email transport selected but SMTP_FROM and SENDGRID_API_KEY are required');
+    }
+    return new SendGridTransport({ apiKey: env.SENDGRID_API_KEY, from: env.SMTP_FROM }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  return ConsoleTransport;
+}
 
 /**
  * @title NotificationService
@@ -20,52 +43,12 @@ export class NotificationService {
   /**
    * Creates an email transport based on the environment configuration.
    */
-  private static createEmailTransport(): NotificationTransport {
-    const env = validateEnv();
-
-    if (env.EMAIL_PROVIDER === 'smtp') {
-      if (!env.SMTP_HOST || !env.SMTP_PORT || !env.SMTP_FROM) {
-        logger.warn('[NotificationService] SMTP configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SMTPTransport({
-        host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        user: env.SMTP_USER,
-        password: env.SMTP_PASSWORD,
-        from: env.SMTP_FROM,
-        secure: env.SMTP_SECURE,
-      });
-    } else if (env.EMAIL_PROVIDER === 'ses') {
-      if (!env.SMTP_FROM) {
-        logger.warn('[NotificationService] SES configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SESTransport({
-        accessKeyId: env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-        region: env.AWS_REGION,
-        from: env.SMTP_FROM,
-      });
-    } else if (env.EMAIL_PROVIDER === 'sendgrid') {
-      if (!env.SMTP_FROM) {
-        logger.warn('[NotificationService] SendGrid configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SendGridTransport({
-        apiKey: env.SENDGRID_API_KEY,
-        from: env.SMTP_FROM,
-      });
-    }
-    return ConsoleTransport;
-  }
-
   constructor(options?: {
     emailTransport?: NotificationTransport;
     webTransport?: NotificationTransport;
     repo?: NotificationRepository;
   }) {
-    this.emailTransport = options?.emailTransport ?? NotificationService.createEmailTransport();
+    this.emailTransport = options?.emailTransport ?? createNotificationEmailTransport();
     this.webTransport = options?.webTransport ?? ConsoleTransport;
     this.repo = options?.repo ?? new NotificationRepository(getDb(process.env['DB_PATH'] ?? ':memory:'));
   }

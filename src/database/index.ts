@@ -1,6 +1,9 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Database, ContractMetadata, Contract, User, ApiKey } from './schema';
+import { decodeCursor, encodeCursor } from '../contracts/cursor.repository';
+import type { CursorPage, CursorPaginationInput } from '../contracts/cursor.types';
+import { MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT } from '../utils/pagination';
 
 const DB_PATH = path.join(__dirname, '../../data/database.json');
 
@@ -212,6 +215,52 @@ class DatabaseService {
   async getApiKeyBySelector(selector: string): Promise<ApiKey | null> {
     const db = await this.loadDatabase();
     return db.api_keys.find(key => key.key_selector === selector && key.is_active) || null;
+  }
+
+  /**
+   * Returns a cursor-paginated, newest-first page of active API keys created by `userId`.
+   *
+   * Ordering is stable (created_at DESC, id DESC as tie-breaker) so that concurrent
+   * inserts never shift already-issued cursors. `limit` is bounded to
+   * [1, MAX_PAGE_LIMIT] and silently clamped rather than rejected; omitted or
+   * non-positive values fall back to DEFAULT_PAGE_LIMIT. An invalid `cursor`
+   * throws and must be handled by the caller.
+   */
+  async listApiKeysPage(userId: string, input: CursorPaginationInput = {}): Promise<CursorPage<ApiKey>> {
+    const db = await this.loadDatabase();
+    const limit =
+      input.limit !== undefined && Number.isFinite(input.limit) && input.limit >= 1
+        ? Math.min(Math.trunc(input.limit), MAX_PAGE_LIMIT)
+        : DEFAULT_PAGE_LIMIT;
+
+    let filtered = db.api_keys.filter(
+      key => key.created_by === userId && key.is_active
+    );
+
+    filtered.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      if (dateB !== dateA) return dateB - dateA;
+      return b.id.localeCompare(a.id);
+    });
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      filtered = filtered.filter(key => {
+        const createdAt = new Date(key.created_at).toISOString();
+        return createdAt < pos.createdAt || (createdAt === pos.createdAt && key.id < pos.id);
+      });
+    }
+
+    const hasNextPage = filtered.length > limit;
+    const data = filtered.slice(0, limit);
+    const lastItem = data.at(-1);
+    const nextCursor =
+      hasNextPage && lastItem
+        ? encodeCursor({ createdAt: new Date(lastItem.created_at).toISOString(), id: lastItem.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
   }
 
   async updateApiKey(id: string, updates: Partial<Pick<ApiKey, 'name' | 'scope' | 'expires_at' | 'is_active' | 'last_used_at' | 'key_selector'>>): Promise<ApiKey | null> {

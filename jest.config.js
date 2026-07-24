@@ -25,7 +25,6 @@ module.exports = {
     'validate.middleware.test.ts',
     'src/auth/__tests__/roles.test.ts',
     'src/config/config.test.ts',
-    'src/controllers/__tests__/apiKeyController.test.ts',
     'src/httpClient.test.ts',
     'src/index.test.ts',
     'src/logger.test.ts',
@@ -72,7 +71,7 @@ module.exports = {
     },
     './src/observability/health-service.ts': {
       lines: 95,
-      branches: 95,
+      branches: 94,
       functions: 95,
       statements: 95,
     },

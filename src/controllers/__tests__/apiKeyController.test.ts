@@ -92,6 +92,134 @@ describe('API Key Controller', () => {
 
       expect(response.status).toBe(401);
     });
+
+    it('should include pagination metadata on an unfilled first page', async () => {
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.hasNextPage).toBe(false);
+      expect(response.body.nextCursor).toBeNull();
+      expect(response.body.limit).toBe(20);
+    });
+  });
+
+  describe('GET /api/v1/api-keys — pagination', () => {
+    const { createApiKey } = require('../../auth/apiKeys');
+
+    /** Creates `count` sequential keys for `test-user`, oldest first. */
+    async function seedKeys(count: number): Promise<void> {
+      for (let i = 0; i < count; i++) {
+        await createApiKey({
+          name: `Key ${i}`,
+          scope: ['contracts:read'],
+          createdBy: 'test-user'
+        });
+      }
+    }
+
+    it('returns an empty page when the user has no keys', async () => {
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.apiKeys).toEqual([]);
+      expect(response.body.total).toBe(0);
+      expect(response.body.hasNextPage).toBe(false);
+      expect(response.body.nextCursor).toBeNull();
+    });
+
+    it('paginates across pages without duplicates or omissions', async () => {
+      await seedKeys(5);
+
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+
+      do {
+        const response: any = await request(app)
+          .get('/api/v1/api-keys')
+          .query({ limit: 2, ...(cursor ? { cursor } : {}) })
+          .set('Authorization', `Bearer ${userToken}`);
+
+        expect(response.status).toBe(200);
+        expect(response.body.apiKeys.length).toBeLessThanOrEqual(2);
+        seen.push(...response.body.apiKeys.map((k: { id: string }) => k.id));
+        cursor = response.body.nextCursor ?? undefined;
+        pages++;
+      } while (cursor && pages < 10);
+
+      expect(seen).toHaveLength(5);
+      expect(new Set(seen).size).toBe(5); // no duplicates across pages
+    });
+
+    it('returns hasNextPage=false and nextCursor=null exactly at the page boundary', async () => {
+      await seedKeys(4);
+
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .query({ limit: 4 })
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.apiKeys).toHaveLength(4);
+      expect(response.body.hasNextPage).toBe(false);
+      expect(response.body.nextCursor).toBeNull();
+    });
+
+    it('clamps an over-limit request to the maximum page size instead of erroring', async () => {
+      await seedKeys(3);
+
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .query({ limit: 100000 })
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.limit).toBe(100);
+      expect(response.body.apiKeys).toHaveLength(3);
+    });
+
+    it('rejects a malformed cursor with 400', async () => {
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .query({ cursor: 'not-a-valid-cursor!!!' })
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(400);
+      expect(response.body).toHaveProperty('error');
+    });
+
+    it('rejects a well-formed but tampered cursor payload with 400', async () => {
+      const tampered = Buffer.from(JSON.stringify({ foo: 'bar' }), 'utf8').toString('base64url');
+
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .query({ cursor: tampered })
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(400);
+    });
+
+    it('keeps the owner filter applied across pages (does not leak other users keys)', async () => {
+      await seedKeys(2);
+      await createApiKey({
+        name: 'Other User Key',
+        scope: ['contracts:read'],
+        createdBy: 'someone-else'
+      });
+
+      const response = await request(app)
+        .get('/api/v1/api-keys')
+        .query({ limit: 10 })
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.apiKeys).toHaveLength(2);
+      expect(response.body.apiKeys.every((k: { name: string }) => k.name !== 'Other User Key')).toBe(true);
+    });
   });
 
   describe('GET /api/v1/api-keys/:id', () => {
@@ -150,7 +278,8 @@ describe('API Key Controller', () => {
     it('should rotate API key', async () => {
       const response = await request(app)
         .post(`/api/v1/api-keys/${keyId}/rotate`)
-        .set('Authorization', `Bearer ${userToken}`);
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({});
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('message');
@@ -163,14 +292,16 @@ describe('API Key Controller', () => {
     it('should return 404 for non-existent key', async () => {
       const response = await request(app)
         .post('/api/v1/api-keys/non-existent/rotate')
-        .set('Authorization', `Bearer ${userToken}`);
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({});
 
       expect(response.status).toBe(404);
     });
 
     it('should require authentication', async () => {
       const response = await request(app)
-        .post(`/api/v1/api-keys/${keyId}/rotate`);
+        .post(`/api/v1/api-keys/${keyId}/rotate`)
+        .send({});
 
       expect(response.status).toBe(401);
     });

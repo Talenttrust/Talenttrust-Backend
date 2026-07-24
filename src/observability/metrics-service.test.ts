@@ -14,7 +14,7 @@ function recordHttpRequest(
   request: {
     method?: string;
     baseUrl?: string;
-    routePath?: string;
+    routePath?: string | RegExp | string[];
     statusCode?: number;
   },
 ) {
@@ -217,5 +217,144 @@ describe('MetricsService — health status gauge', () => {
     const json = await register.getMetricsAsJSON();
     const gauge = json.find((m) => m.name === 'service_health_status');
     expect((gauge!.values as any[])[0].value).toBe(0);
+  });
+});
+
+describe('MetricsService — rate limit sampling', () => {
+  it('starts rate limit metrics sampling', () => {
+    const { service } = makeService();
+    const stopSampling = jest.fn();
+    const limiter = { startMetricsSampling: jest.fn().mockReturnValue(stopSampling) };
+
+    service.startRateLimitMetricsSampling(limiter, 5000);
+
+    expect(limiter.startMetricsSampling).toHaveBeenCalledTimes(1);
+    expect(limiter.startMetricsSampling).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      5000,
+    );
+  });
+
+  it('warns on duplicate startRateLimitMetricsSampling', () => {
+    const { service } = makeService();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const limiter = { startMetricsSampling: jest.fn().mockReturnValue(jest.fn()) };
+
+    service.startRateLimitMetricsSampling(limiter);
+    service.startRateLimitMetricsSampling(limiter);
+
+    expect(warnSpy).toHaveBeenCalledWith('[MetricsService] Rate limit metrics sampling already active.');
+    expect(limiter.startMetricsSampling).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
+
+  it('stops rate limit metrics sampling', () => {
+    const { service } = makeService();
+    const stopSampling = jest.fn();
+    const limiter = { startMetricsSampling: jest.fn().mockReturnValue(stopSampling) };
+
+    service.startRateLimitMetricsSampling(limiter);
+    service.stopRateLimitMetricsSampling();
+
+    expect(stopSampling).toHaveBeenCalledTimes(1);
+  });
+
+  it('stopRateLimitMetricsSampling is a no-op when not active', () => {
+    const { service } = makeService();
+
+    service.stopRateLimitMetricsSampling();
+
+    // no throw — just returns
+  });
+});
+
+describe('MetricsService — route edge cases', () => {
+  it('handles RegExp route path in formatExpressPath', async () => {
+    const { service, register } = makeService();
+
+    recordHttpRequest(service, { routePath: /^\/api\/v1\/health$/ });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/^\\/api\\/v1\\/health$/');
+  });
+
+  it('handles empty route path with baseUrl in joinRouteParts', async () => {
+    const { service, register } = makeService();
+
+    recordHttpRequest(service, { baseUrl: '/api/v1', routePath: '' });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/api/v1');
+  });
+
+  it('handles array route path in formatExpressPath', async () => {
+    const { service, register } = makeService();
+
+    recordHttpRequest(service, { routePath: ['/foo/:id', '/foo/:slug'] });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/foo/:id|/foo/:slug');
+  });
+
+  it('returns root for empty joined route', async () => {
+    const { service, register } = makeService();
+
+    recordHttpRequest(service, { baseUrl: '/', routePath: '' });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/');
+  });
+
+  it('adds leading slash to baseUrl when missing', async () => {
+    const { service, register } = makeService();
+
+    recordHttpRequest(service, { baseUrl: 'api', routePath: '/v1/health' });
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('/api/v1/health');
+  });
+
+  it('handles array route path where all parts are null', async () => {
+    const { service, register } = makeService();
+
+    const req = {
+      method: 'GET',
+      baseUrl: '',
+      route: { path: [undefined, undefined] },
+    } as unknown as Request;
+    const response = new EventEmitter() as Response & EventEmitter;
+    response.statusCode = 200;
+    const next = jest.fn() as NextFunction;
+
+    service.trackHttpRequest(req, response, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    response.emit('finish');
+
+    const labels = await routeLabels(register);
+    expect(labels).toContain('unmatched');
+  });
+});
+
+describe('MetricsService — constructor edge cases', () => {
+  it('creates its own registry when none is provided', () => {
+    const service = new MetricsService('test');
+
+    expect(service.contentType).toBeDefined();
+    expect(service.getMetrics()).toBeDefined();
+  });
+
+  it('sanitizes service name prefix with special characters', () => {
+    const register = new Registry();
+    const service = new MetricsService('my-service@2.0!', register);
+
+    expect(service.getMetrics()).toBeDefined();
+  });
+
+  it('uses "service" fallback when sanitized prefix is empty', () => {
+    const register = new Registry();
+    const service = new MetricsService('', register);
+
+    expect(service.getMetrics()).toBeDefined();
   });
 });

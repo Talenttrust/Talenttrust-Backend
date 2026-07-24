@@ -11,18 +11,12 @@
 import {
   incrementDlqOperation,
   incrementDlqReplay,
+  webhookDlqOperationsTotal,
+  webhookDlqReplaysTotal,
   webhookDlqRegistry,
 } from './webhookMetrics';
 
 describe('webhookMetrics DLQ counters', () => {
-  beforeEach(() => {
-    webhookDlqRegistry.clear();
-  });
-
-  afterEach(() => {
-    webhookDlqRegistry.clear();
-  });
-
   describe('incrementDlqOperation', () => {
     it('increments enqueue counter', async () => {
       incrementDlqOperation('enqueue');

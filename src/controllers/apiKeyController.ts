@@ -6,10 +6,11 @@
  * These endpoints should be protected by JWT authentication (not API key auth).
  */
 
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { createApiKey, rotateApiKey, deactivateApiKey } from '../auth/apiKeys';
 import { database } from '../database';
 import { AuthenticatedRequest } from '../auth/authenticate';
+import { decodeCursor } from '../contracts/cursor.repository';
 
 /**
  * Create a new API key.
@@ -80,7 +81,11 @@ export async function createApiKeyController(req: AuthenticatedRequest, res: Res
 
 /**
  * List API keys for the authenticated user.
- * 
+ *
+ * Cursor-paginated: `?limit=<n>` (1-100, default 20) bounds the page size and
+ * `?cursor=<opaque>` resumes from the previous page's `nextCursor`. Existing
+ * filters (owned-by-caller, active-only) apply identically across pages.
+ *
  * @route GET /api/v1/api-keys
  * @access Private (requires JWT authentication)
  */
@@ -91,13 +96,26 @@ export async function listApiKeysController(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    const db = await (database as any).loadDatabase();
-    const userKeys = db.api_keys.filter((key: any) => 
-      key.created_by === req.user!.userId && key.is_active
-    );
+    // Malformed/negative/over-max values are bounded rather than rejected —
+    // see DatabaseService#listApiKeysPage for the clamp policy.
+    const rawLimit = req.query['limit'];
+    const limit = rawLimit !== undefined ? Number(rawLimit) : undefined;
+
+    const rawCursor = req.query['cursor'];
+    const cursor = typeof rawCursor === 'string' && rawCursor.length > 0 ? rawCursor : undefined;
+    if (cursor !== undefined) {
+      try {
+        decodeCursor(cursor);
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message });
+        return;
+      }
+    }
+
+    const pageResult = await database.listApiKeysPage(req.user.userId, { limit, cursor });
 
     // Remove sensitive data
-    const safeKeys = userKeys.map((key: any) => ({
+    const safeKeys = pageResult.data.map((key) => ({
       id: key.id,
       name: key.name,
       scope: key.scope,
@@ -110,7 +128,10 @@ export async function listApiKeysController(req: AuthenticatedRequest, res: Resp
 
     res.json({
       apiKeys: safeKeys,
-      total: safeKeys.length
+      total: safeKeys.length,
+      nextCursor: pageResult.nextCursor,
+      hasNextPage: pageResult.hasNextPage,
+      limit: pageResult.limit
     });
   } catch (error) {
     console.error('Error listing API keys:', error);

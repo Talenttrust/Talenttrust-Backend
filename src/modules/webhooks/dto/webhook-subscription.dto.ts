@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CURSOR_DEFAULT_LIMIT, CURSOR_MAX_LIMIT, CURSOR_MAX_LENGTH } from '../../../contracts/cursor.types';
 
 export const createWebhookSubscriptionSchema = z.object({
   body: z.object({
@@ -36,5 +37,11 @@ export const listWebhookSubscriptionsQuerySchema = z.object({
       if (val === 'false') return false;
       return val;
     }, z.boolean().optional()),
+    cursor: z.string().max(CURSOR_MAX_LENGTH).optional(),
+    limit: z.preprocess((val) => {
+      if (val === undefined || val === null || val === '') return undefined;
+      const n = Number(val);
+      return Number.isFinite(n) ? n : val;
+    }, z.number().int().min(1).max(CURSOR_MAX_LIMIT).optional()),
   }).partial(),
 });

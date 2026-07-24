@@ -15,24 +15,24 @@ const strictLimiter = createRateLimiter(rateLimitConfig.strict);
 
 const loginSchema = z.object({
   body: z.object({
-    email: z.string().email(),
-    password: z.string().min(1),
-  }),
+    email: z.string().email().max(254),
+    password: z.string().min(8).max(128),
+  }).strict(),
 });
 
 const registerSchema = z.object({
   body: z.object({
-    email: z.string().email(),
-    password: z.string().min(8),
+    email: z.string().email().max(254),
+    password: z.string().min(8).max(128),
     username: z.string().min(2).max(50),
     role: z.enum(['client', 'freelancer', 'both']).optional(),
-  }),
+  }).strict(),
 });
 
 const refreshSchema = z.object({
   body: z.object({
-    refreshToken: z.string().min(1),
-  }),
+    refreshToken: z.string().min(1).max(1024),
+  }).strict(),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
