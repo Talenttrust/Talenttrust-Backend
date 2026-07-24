@@ -95,6 +95,29 @@ export const envSchema = z.object({
     })
     .default('https://rpc-testnet.stellar.org'),
 
+  // Stellar RPC transport timeout and retry knobs.  Mirrored in
+  // src/rpc/stellarConfig.ts so the transport can be loaded in isolation
+  // (e.g. tests that exercise the rpc client without booting the full app).
+  STELLAR_RPC_TIMEOUT_MS: z.string()
+    .default('5000')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().positive('STELLAR_RPC_TIMEOUT_MS must be greater than 0').max(120_000)),
+
+  STELLAR_RPC_MAX_RETRIES: z.string()
+    .default('3')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().min(0, 'STELLAR_RPC_MAX_RETRIES must be >= 0').max(10, 'STELLAR_RPC_MAX_RETRIES must be <= 10')),
+
+  STELLAR_RPC_RETRY_BASE_DELAY_MS: z.string()
+    .default('200')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().nonnegative('STELLAR_RPC_RETRY_BASE_DELAY_MS must be >= 0').max(60_000)),
+
+  STELLAR_RPC_RETRY_MAX_DELAY_MS: z.string()
+    .default('2000')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().nonnegative('STELLAR_RPC_RETRY_MAX_DELAY_MS must be >= 0').max(60_000)),
+
 
   // Router / Blue-Green Deployment Configuration
   ACTIVE_COLOR: z.enum(['blue', 'green']).default('blue'),
