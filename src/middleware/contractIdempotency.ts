@@ -41,10 +41,11 @@ function sha256Hex(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
-function getUserScopeId(req: Request): string {
+function getUserScopeId(req: Request): string | null {
   const anyReq = req as any;
   // Prefer user.id from this repo's JWT middleware (req.user.id == decoded.sub)
-  return anyReq?.user?.id ?? anyReq?.user?.userId ?? anyReq?.user?.sub ?? 'unknown-user';
+  // Never fall back to a shared scope - return null if no authenticated user exists
+  return anyReq?.user?.id ?? anyReq?.user?.userId ?? anyReq?.user?.sub ?? null;
 }
 
 function buildScopedKey(userScopeId: string, idempotencyKey: string): string {
@@ -74,6 +75,19 @@ export function contractCreateIdempotencyMiddleware(): (req: Request, res: Respo
     }
 
     const userScopeId = getUserScopeId(req);
+    
+    // Fail closed: reject unauthenticated requests to prevent shared-scope collisions
+    if (userScopeId === null) {
+      res.status(401).json({
+        error: {
+          code: 'unauthorized',
+          message: 'Authentication required for idempotent contract creation',
+          requestId,
+        },
+      });
+      return;
+    }
+    
     const scopedKey = buildScopedKey(userScopeId, idempotencyKeyHeader);
     const currentPayloadHash = computePayloadHash(req.body);
 
