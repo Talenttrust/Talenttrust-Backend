@@ -4,10 +4,30 @@
  *
  * Never log raw HMAC signatures, signing secrets, or nonces.  Pass any
  * string through `redactSecret` before including it in a log record.
+ *
+ * Sensitive key patterns (case-insensitive):
+ *   `secret` | `signature` | `token` | `key` | `password` | `authorization` | `nonce` | `cookie`
+ *
+ * Sensitive HTTP header names (case-insensitive):
+ *   `authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-api-secret`,
+ *   `x-auth-token`, `x-access-token`, `proxy-authorization`,
+ *   `x-forwarded-for`, `x-real-ip`
  */
 
+/** Fixed redaction marker substituted for every sensitive value. */
 const REDACTED = '[REDACTED]';
+
+/**
+ * Case-insensitive regex matching key names that indicate sensitive content.
+ * Matches any key containing one of: secret, signature, token, key, password,
+ * authorization, nonce, cookie.
+ */
 const SENSITIVE_KEY_PATTERN = /secret|signature|token|key|password|authorization|nonce|cookie/i;
+
+/**
+ * Known sensitive HTTP header names. Comparison is performed after
+ * lowercasing the header name.
+ */
 const SENSITIVE_HEADER_NAMES = new Set([
   'authorization',
   'cookie',
@@ -20,6 +40,8 @@ const SENSITIVE_HEADER_NAMES = new Set([
   'x-forwarded-for',
   'x-real-ip',
 ]);
+
+/** Maximum character length for non-sensitive string header values in logs. */
 const DEFAULT_HEADER_VALUE_MAX_LENGTH = 200;
 
 /**

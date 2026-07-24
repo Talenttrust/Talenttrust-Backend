@@ -17,7 +17,11 @@ export const webhookDlqRegistry = new Registry();
 
 /**
  * Total count of standard webhook DLQ lifecycle operations.
- * Labels cover: 'enqueue', 'drop_overflow', 'drop_poison'
+ *
+ * Metric name: `webhook_dlq_operations_total`
+ * Label: `operation` — one of: `'enqueue' | 'drop_overflow' | 'drop_poison'`
+ * Cardinality: bounded to exactly 3 label values.
+ * No raw URLs, hostnames, or arbitrary strings are accepted as label values.
  */
 export const webhookDlqOperationsTotal = new Counter({
   name: 'webhook_dlq_operations_total',
@@ -40,7 +44,11 @@ export function incrementDlqOperation(operation: 'enqueue' | 'drop_overflow' | '
 
 /**
  * Total tracking counts of manual or batch DLQ replay operations.
- * Labels cover: 'success', 'failed', 'idempotent_noop', 'error'
+ *
+ * Metric name: `webhook_dlq_replays_total`
+ * Label: `outcome` — one of: `'success' | 'failed' | 'idempotent_noop' | 'error'`
+ * Cardinality: bounded to exactly 4 label values.
+ * No raw URLs, hostnames, or arbitrary strings are accepted as label values.
  */
 export const webhookDlqReplaysTotal = new Counter({
   name: 'webhook_dlq_replays_total',
