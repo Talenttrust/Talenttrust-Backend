@@ -1,280 +1,104 @@
 import { EmailPayload, WebPayload } from '../types/notification.types';
 import { WebhookService } from './webhook.service';
 import { logger } from '../logger';
-import { redactSecret } from '../utils/redact';
+import {
+  assertSafeEmailHeaders,
+  EmailMessage,
+  EmailTransport,
+  isValidRecipientEmail,
+  redactEmailAddress,
+  SendGridEmailTransport,
+  SesEmailTransport,
+  SmtpEmailTransport,
+} from '../queue/processors/email.transport';
 
-/**
- * Result returned by transports to indicate success/failure and optional message.
- */
+/** Result returned by notification transports. */
 export interface NotificationResult {
   success: boolean;
   message?: string;
 }
 
-/**
- * Pluggable transport interface for sending notifications.
- *
- * Implementations may support one or both methods depending on capabilities.
- */
+/** Pluggable transport interface for notification delivery. */
 export interface NotificationTransport {
   sendEmail?: (payload: EmailPayload) => Promise<NotificationResult>;
   sendWebNotification?: (payload: WebPayload) => Promise<NotificationResult>;
 }
 
-/**
- * Simple console transport used as the default fallback in tests and local dev.
- */
+/** Explicit no-network transport for local development and tests. */
 export const ConsoleTransport: NotificationTransport = {
-  async sendEmail(payload: EmailPayload) {
-    logger.info('[ConsoleTransport:Email] Sending', {
-      toRedacted: redactEmail(payload.to),
-    });
+  async sendEmail(payload: EmailPayload): Promise<NotificationResult> {
+    if (!isValidRecipientEmail(payload.to)) return { success: false, message: 'Invalid email address' };
+    try {
+      assertSafeEmailHeaders(payload);
+    } catch (error) {
+      return { success: false, message: (error as Error).message };
+    }
+    logger.debug('[ConsoleTransport:Email] Sending', { toRedacted: redactEmailAddress(payload.to) });
     return { success: true };
   },
-
-  async sendWebNotification(payload: WebPayload) {
-    logger.info('[ConsoleTransport:Web] Sending', {
-      userIdRedacted: payload.userId,
-    });
+  async sendWebNotification(payload: WebPayload): Promise<NotificationResult> {
+    logger.debug('[ConsoleTransport:Web] Sending', { userId: payload.userId });
     return { success: true };
   },
 };
 
-/**
- * Webhook transport reuses the WebhookService to sign and retry deliveries.
- * The transport sends the provided payload to the configured `url`.
- */
+/** Webhook transport reuses WebhookService signing and retry behaviour. */
 export class WebhookTransport implements NotificationTransport {
-  private webhookService: WebhookService;
-  private url: string;
-  private secret?: string;
+  constructor(private readonly webhookService: WebhookService, private readonly url: string, private readonly secret?: string) {}
 
-  constructor(webhookService: WebhookService, url: string, secret?: string) {
-    this.webhookService = webhookService;
-    this.url = url;
-    this.secret = secret;
-  }
-
-  async sendWebNotification(payload: WebPayload) {
-    const id = `${payload.userId}:${Date.now()}`;
+  async sendWebNotification(payload: WebPayload): Promise<NotificationResult> {
     try {
-      await this.webhookService.send({
-        id,
-        url: this.url,
-        data: payload,
-        retryCount: 0,
-        webhookSecret: this.secret,
-      });
+      await this.webhookService.send({ id: `${payload.userId}:${Date.now()}`, url: this.url, data: payload, retryCount: 0, webhookSecret: this.secret });
       return { success: true };
-    } catch (err: unknown) {
-      return { success: false, message: (err as Error).message };
+    } catch (error) {
+      return { success: false, message: (error as Error).message };
     }
   }
 }
 
-/**
- * Redacts an email address for logging by replacing the local part.
- */
-function redactEmail(email: string): string {
-  if (!email) return '[REDACTED]';
-  const atIndex = email.indexOf('@');
-  if (atIndex === -1) return '[REDACTED]';
-  return `[REDACTED]@${email.slice(atIndex + 1)}`;
-}
+type Provider = Pick<EmailTransport, 'send'>;
 
 /**
- * Guards against email header injection by checking for CRLF characters.
+ * Adapts a real queue email provider to the NotificationTransport contract.
+ * It validates a single recipient and rejects CR/LF header injection before
+ * dispatch. Provider errors are converted to a failed result for caller retry.
  */
-function isSafeEmail(payload: EmailPayload): boolean {
-  const unsafeChars = /[\r\n]/;
-  return !(
-    unsafeChars.test(payload.to) ||
-    (payload.subject && unsafeChars.test(payload.subject)) ||
-    (payload.body && unsafeChars.test(payload.body))
-  );
-}
-
-function failFastGuard(transportName: string, missing: string[]): void {
-  if (missing.length > 0) {
-    throw new Error(
-      `[${transportName}] Missing required configuration: ${missing.join(', ')}. ` +
-      'Set the required environment variables before starting the server.',
-    );
-  }
-}
-
-/**
- * SMTP-based email transport with fail-fast configuration guard.
- */
-export class SMTPTransport implements NotificationTransport {
-  private config: {
-    host: string;
-    port: number;
-    user?: string;
-    password?: string;
-    from: string;
-    secure?: boolean;
-  };
-
-  constructor(config: {
-    host: string;
-    port: number;
-    user?: string;
-    password?: string;
-    from: string;
-    secure?: boolean;
-  }) {
-    const missing: string[] = [];
-    if (!config.host) missing.push('SMTP_HOST');
-    if (!config.port) missing.push('SMTP_PORT');
-    if (!config.from) missing.push('SMTP_FROM');
-    failFastGuard('SMTPTransport', missing);
-    this.config = config;
-  }
+class ProviderEmailNotificationTransport implements NotificationTransport {
+  constructor(private readonly provider: Provider, private readonly name: string) {}
 
   async sendEmail(payload: EmailPayload): Promise<NotificationResult> {
-    logger.debug('[SMTPTransport] Preparing email', {
-      toRedacted: redactEmail(payload.to),
-      fromRedacted: redactEmail(this.config.from),
-    });
-
-    if (!isSafeEmail(payload)) {
-      logger.warn('[SMTPTransport] Rejected email with unsafe characters (header injection attempt)');
-      return { success: false, message: 'Unsafe email payload' };
-    }
-
+    if (!isValidRecipientEmail(payload.to)) return { success: false, message: 'Invalid email address' };
     try {
-      // TODO: In production, install and use nodemailer here
-      // import nodemailer from 'nodemailer';
-      // const transporter = nodemailer.createTransport({...});
-      // await transporter.sendMail({
-      //   from: this.config.from,
-      //   to: payload.to,
-      //   subject: payload.subject,
-      //   text: payload.body,
-      // });
-      
-      logger.info('[SMTPTransport] Sending email (placeholder)', {
-        toRedacted: redactEmail(payload.to),
-      });
-
+      assertSafeEmailHeaders(payload);
+      await this.provider.send(payload as EmailMessage, logger);
       return { success: true };
-    } catch (err: unknown) {
-      logger.error('[SMTPTransport] Failed to send email', {
-        err,
-        toRedacted: redactEmail(payload.to),
-      });
-      return { success: false, message: (err as Error).message };
+    } catch (error) {
+      logger.error(`[${this.name}] Email delivery failed`, { err: error, toRedacted: redactEmailAddress(payload.to) });
+      return { success: false, message: (error as Error).message };
     }
   }
 }
 
-/**
- * AWS SES email transport (placeholder implementation).
- */
-export class SESTransport implements NotificationTransport {
-  private config: {
-    accessKeyId?: string;
-    secretAccessKey?: string;
-    region?: string;
-    from: string;
-  };
-
-  constructor(config: {
-    accessKeyId?: string;
-    secretAccessKey?: string;
-    region?: string;
-    from: string;
-  }) {
-    const missing: string[] = [];
-    if (!config.from) missing.push('SMTP_FROM (SES sender)');
-    if (!config.region) missing.push('AWS_REGION');
-    failFastGuard('SESTransport', missing);
-    this.config = config;
-  }
-
-  async sendEmail(payload: EmailPayload): Promise<NotificationResult> {
-    logger.debug('[SESTransport] Preparing email', {
-      toRedacted: redactEmail(payload.to),
-      fromRedacted: redactEmail(this.config.from),
-      region: this.config.region,
-    });
-
-    if (!isSafeEmail(payload)) {
-      logger.warn('[SESTransport] Rejected email with unsafe characters (header injection attempt)');
-      return { success: false, message: 'Unsafe email payload' };
-    }
-
-    try {
-      // TODO: In production, install and use @aws-sdk/client-ses
-      // import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
-      // const client = new SESClient({...});
-      // await client.send(new SendEmailCommand({...}));
-      
-      logger.info('[SESTransport] Sending email (placeholder)', {
-        toRedacted: redactEmail(payload.to),
-      });
-
-      return { success: true };
-    } catch (err: unknown) {
-      logger.error('[SESTransport] Failed to send email', {
-        err,
-        toRedacted: redactEmail(payload.to),
-      });
-      return { success: false, message: (err as Error).message };
-    }
+/** Real SMTP notification transport. A provider may be injected for tests. */
+export class SMTPTransport extends ProviderEmailNotificationTransport {
+  constructor(config: { host: string; port: number; user?: string; password?: string; from: string; secure?: boolean }, timeoutMs = 10_000, provider?: Provider) {
+    if (!config.host || !config.port || !config.from) throw new Error('SMTP_HOST, SMTP_PORT, and SMTP_FROM are required');
+    super(provider ?? new SmtpEmailTransport(config, timeoutMs), 'SMTPTransport');
   }
 }
 
-/**
- * SendGrid email transport (placeholder implementation).
- */
-export class SendGridTransport implements NotificationTransport {
-  private config: {
-    apiKey?: string;
-    from: string;
-  };
-
-  constructor(config: {
-    apiKey?: string;
-    from: string;
-  }) {
-    const missing: string[] = [];
-    if (!config.apiKey) missing.push('SENDGRID_API_KEY');
-    if (!config.from) missing.push('SMTP_FROM (SendGrid sender)');
-    failFastGuard('SendGridTransport', missing);
-    this.config = config;
+/** Real AWS SES notification transport. A provider may be injected for tests. */
+export class SESTransport extends ProviderEmailNotificationTransport {
+  constructor(config: { accessKeyId?: string; secretAccessKey?: string; region: string; from: string }, timeoutMs = 10_000, provider?: Provider) {
+    if (!config.region || !config.from) throw new Error('AWS_REGION and SMTP_FROM are required');
+    super(provider ?? new SesEmailTransport(config, timeoutMs), 'SESTransport');
   }
+}
 
-  async sendEmail(payload: EmailPayload): Promise<NotificationResult> {
-    logger.debug('[SendGridTransport] Preparing email', {
-      toRedacted: redactEmail(payload.to),
-      fromRedacted: redactEmail(this.config.from),
-      apiKeyRedacted: redactSecret(this.config.apiKey),
-    });
-
-    if (!isSafeEmail(payload)) {
-      logger.warn('[SendGridTransport] Rejected email with unsafe characters (header injection attempt)');
-      return { success: false, message: 'Unsafe email payload' };
-    }
-
-    try {
-      // TODO: In production, install and use @sendgrid/mail
-      // import sgMail from '@sendgrid/mail';
-      // sgMail.setApiKey(this.config.apiKey!);
-      // await sgMail.send({...});
-      
-      logger.info('[SendGridTransport] Sending email (placeholder)', {
-        toRedacted: redactEmail(payload.to),
-      });
-
-      return { success: true };
-    } catch (err: unknown) {
-      logger.error('[SendGridTransport] Failed to send email', {
-        err,
-        toRedacted: redactEmail(payload.to),
-      });
-      return { success: false, message: (err as Error).message };
-    }
+/** Real SendGrid notification transport. A provider may be injected for tests. */
+export class SendGridTransport extends ProviderEmailNotificationTransport {
+  constructor(config: { apiKey: string; from: string }, timeoutMs = 10_000, provider?: Provider) {
+    if (!config.apiKey || !config.from) throw new Error('SENDGRID_API_KEY and SMTP_FROM are required');
+    super(provider ?? new SendGridEmailTransport(config, timeoutMs), 'SendGridTransport');
   }
 }

@@ -23,8 +23,11 @@ import { createRequestLimitsMiddleware } from './middleware/requestLimits';
 
 import contractsModuleRouter from './routes/contracts.routes';
 import eventsRouter from './routes/events.routes';
+import { createMetricsRouter } from './routes/metrics.routes';
+import { metricsAuthMiddleware } from './middleware/metricsAuth';
 
 import reputationRouter from './routes/reputation.routes';
+import apiKeysRouter from './routes/apiKeys.routes';
 import configRouter from './routes/config.routes';
 import dependencyScanRouter from './routes/dependency-scan.routes';
 import { adminRouter } from './routes/admin.routes';
@@ -86,12 +89,14 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/health', readinessHealthRouter);
   app.use('/api/config', configRouter);
   app.use('/api/v1', eventsRouter);
+  app.use('/api/v1', apiKeysRouter);
   app.use('/api/v1/contracts', contractsModuleRouter);
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
   app.use('/api/v1/admin', adminRouter);
   app.use('/api/v1/admin/deploy', deployRouter);
   app.use('/api/v1/webhook-subscriptions', webhookSubscriptionRouter);
+  app.use('/api/v1/metrics', metricsAuthMiddleware, createMetricsRouter(metricsService));
 
   if (includeTerminalHandlers) {
     attachTerminalHandlers(app);
