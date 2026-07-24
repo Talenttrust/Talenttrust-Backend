@@ -31,18 +31,11 @@ export async function processContractProcessing(
     throw new Error('Invalid contract ID');
   }
 
-  // Validate action type
-  const validActions = ['create', 'update', 'finalize'];
-  if (!validActions.includes(payload.action)) {
-    log.warn('Contract processing rejected: invalid action', { action: payload.action });
-    throw new Error(`Invalid action: ${payload.action}`);
-  }
-
   // contractId is treated as an internal identifier — log at debug only
   log.debug('Contract processing started', { contractId: payload.contractId });
   log.info('Processing contract operation', { action: payload.action });
 
-  // Process based on action type
+  // Process based on action type — unknown actions fall through to default
   switch (payload.action) {
     case 'create':
       return await createContract(payload, log);
@@ -50,8 +43,10 @@ export async function processContractProcessing(
       return await updateContract(payload, log);
     case 'finalize':
       return await finalizeContract(payload, log);
-    default:
+    default: {
+      log.warn('Contract processing rejected: unsupported action', { action: payload.action });
       throw new Error(`Unsupported action: ${payload.action}`);
+    }
   }
 }
 
