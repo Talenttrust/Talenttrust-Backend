@@ -3,14 +3,14 @@
  * @description API key authentication utilities for TalentTrust.
  *
  * Provides secure API key generation, validation, and management.
- * API keys are hashed at rest using SHA-256 with a salt.
+ * API keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a salt.
  *
  * API keys are expected in the `X-API-Key` header:
  *   X-API-Key: <api-key>
  *
  * Security notes:
  *   - API keys are cryptographically generated using random bytes
- *   - Keys are hashed at rest using SHA-256 with a unique salt
+ *   - Keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a unique salt
  *   - Each key has optional expiration and scoping
  *   - Keys can be rotated and deactivated
  *   - Last usage is tracked for audit purposes
