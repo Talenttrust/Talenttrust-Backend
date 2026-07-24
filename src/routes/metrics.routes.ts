@@ -23,18 +23,20 @@
  *  - Numeric values are bounded to prevent gauge/counter corruption.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response } from "express";
 import {
-  validateMetricsInput,
   WebhookDeliveryInputSchema,
   WebhookDlqDepthInputSchema,
   HealthStatusInputSchema,
   DlqOperationInputSchema,
   DlqReplayInputSchema,
-  MetricsValidationFailure,
-} from '../observability/metrics-validation';
-import { MetricsServiceLike } from '../observability/metrics-service';
-import { incrementDlqOperation, incrementDlqReplay } from '../utils/webhookMetrics';
+} from "../observability/metrics-validation";
+import { MetricsServiceLike } from "../observability/metrics-service";
+import {
+  incrementDlqOperation,
+  incrementDlqReplay,
+} from "../utils/webhookMetrics";
+import { validateMetricsRequestBody } from "./metrics-validation-handler";
 
 /**
  * Format a validation failure into the project's standard error envelope.
@@ -47,8 +49,8 @@ function validationErrorResponse(
   return res.status(400).json({
     error: {
       code: failure.code,
-      message: 'Request validation failed',
-      requestId: requestId ?? res.locals.requestId ?? 'unknown',
+      message: "Request validation failed",
+      requestId: requestId ?? res.locals.requestId ?? "unknown",
       details: failure.issues,
     },
   });
@@ -60,7 +62,9 @@ function validationErrorResponse(
  * @param metricsService - The MetricsService instance used to record metrics.
  *   Pass a mock in tests.
  */
-export function createMetricsRouter(metricsService: MetricsServiceLike): Router {
+export function createMetricsRouter(
+  metricsService: MetricsServiceLike,
+): Router {
   const router = Router();
 
   /**
@@ -69,10 +73,14 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
    *
    * Body: { outcome: 'success' | 'failure' | 'dlq' }
    */
-  router.post('/webhook/delivery', (req: Request, res: Response) => {
-    const validation = validateMetricsInput(WebhookDeliveryInputSchema, req.body);
-    if (!validation.ok) {
-      return validationErrorResponse(res, validation);
+  router.post("/webhook/delivery", (req: Request, res: Response) => {
+    const validation = validateMetricsRequestBody(
+      req,
+      res,
+      WebhookDeliveryInputSchema,
+    );
+    if (!validation) {
+      return;
     }
 
     try {
@@ -81,9 +89,9 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
     } catch {
       return res.status(500).json({
         error: {
-          code: 'internal_error',
-          message: 'Failed to record webhook delivery metric',
-          requestId: res.locals.requestId ?? 'unknown',
+          code: "internal_error",
+          message: "Failed to record webhook delivery metric",
+          requestId: res.locals.requestId ?? "unknown",
         },
       });
     }
@@ -95,10 +103,14 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
    *
    * Body: { depth: number }  (integer, 0..10_000_000)
    */
-  router.post('/webhook/dlq-depth', (req: Request, res: Response) => {
-    const validation = validateMetricsInput(WebhookDlqDepthInputSchema, req.body);
-    if (!validation.ok) {
-      return validationErrorResponse(res, validation);
+  router.post("/webhook/dlq-depth", (req: Request, res: Response) => {
+    const validation = validateMetricsRequestBody(
+      req,
+      res,
+      WebhookDlqDepthInputSchema,
+    );
+    if (!validation) {
+      return;
     }
 
     try {
@@ -107,9 +119,9 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
     } catch {
       return res.status(500).json({
         error: {
-          code: 'internal_error',
-          message: 'Failed to set DLQ depth metric',
-          requestId: res.locals.requestId ?? 'unknown',
+          code: "internal_error",
+          message: "Failed to set DLQ depth metric",
+          requestId: res.locals.requestId ?? "unknown",
         },
       });
     }
@@ -121,10 +133,14 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
    *
    * Body: { status: 'up' | 'degraded' | 'down' }
    */
-  router.post('/health-status', (req: Request, res: Response) => {
-    const validation = validateMetricsInput(HealthStatusInputSchema, req.body);
-    if (!validation.ok) {
-      return validationErrorResponse(res, validation);
+  router.post("/health-status", (req: Request, res: Response) => {
+    const validation = validateMetricsRequestBody(
+      req,
+      res,
+      HealthStatusInputSchema,
+    );
+    if (!validation) {
+      return;
     }
 
     try {
@@ -133,9 +149,9 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
     } catch {
       return res.status(500).json({
         error: {
-          code: 'internal_error',
-          message: 'Failed to record health status metric',
-          requestId: res.locals.requestId ?? 'unknown',
+          code: "internal_error",
+          message: "Failed to record health status metric",
+          requestId: res.locals.requestId ?? "unknown",
         },
       });
     }
@@ -147,10 +163,14 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
    *
    * Body: { operation: 'enqueue' | 'drop_overflow' | 'drop_poison' }
    */
-  router.post('/dlq/operation', (req: Request, res: Response) => {
-    const validation = validateMetricsInput(DlqOperationInputSchema, req.body);
-    if (!validation.ok) {
-      return validationErrorResponse(res, validation);
+  router.post("/dlq/operation", (req: Request, res: Response) => {
+    const validation = validateMetricsRequestBody(
+      req,
+      res,
+      DlqOperationInputSchema,
+    );
+    if (!validation) {
+      return;
     }
 
     try {
@@ -159,9 +179,9 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
     } catch {
       return res.status(500).json({
         error: {
-          code: 'internal_error',
-          message: 'Failed to record DLQ operation metric',
-          requestId: res.locals.requestId ?? 'unknown',
+          code: "internal_error",
+          message: "Failed to record DLQ operation metric",
+          requestId: res.locals.requestId ?? "unknown",
         },
       });
     }
@@ -173,10 +193,14 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
    *
    * Body: { outcome: 'success' | 'failed' | 'idempotent_noop' | 'error' }
    */
-  router.post('/dlq/replay', (req: Request, res: Response) => {
-    const validation = validateMetricsInput(DlqReplayInputSchema, req.body);
-    if (!validation.ok) {
-      return validationErrorResponse(res, validation);
+  router.post("/dlq/replay", (req: Request, res: Response) => {
+    const validation = validateMetricsRequestBody(
+      req,
+      res,
+      DlqReplayInputSchema,
+    );
+    if (!validation) {
+      return;
     }
 
     try {
@@ -185,9 +209,9 @@ export function createMetricsRouter(metricsService: MetricsServiceLike): Router 
     } catch {
       return res.status(500).json({
         error: {
-          code: 'internal_error',
-          message: 'Failed to record DLQ replay metric',
-          requestId: res.locals.requestId ?? 'unknown',
+          code: "internal_error",
+          message: "Failed to record DLQ replay metric",
+          requestId: res.locals.requestId ?? "unknown",
         },
       });
     }
