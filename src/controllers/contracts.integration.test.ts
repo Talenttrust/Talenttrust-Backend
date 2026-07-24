@@ -167,6 +167,96 @@ describe('GET /api/v1/contracts', () => {
       .set(auth(adminToken()));
     expect(res.status).toBe(400);
   });
+
+  // ─── Cursor pagination tests ──────────────────────────────────────────────
+
+  it('returns cursor page when using limit without page param', async () => {
+    await createContractAsAdmin();
+    const res = await request(app)
+      .get('/api/v1/contracts?limit=5')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('success');
+    expect(Array.isArray(res.body.data.data)).toBe(true);
+    expect(res.body.data).toHaveProperty('nextCursor');
+    expect(res.body.data).toHaveProperty('hasNextPage');
+    expect(res.body.data).toHaveProperty('limit');
+  });
+
+  it('traverses all pages with cursor without skipping or duplicating', async () => {
+    const count = 7;
+    for (let i = 0; i < count; i++) {
+      await createContractAsAdmin();
+    }
+
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let pageNum = 0;
+    const pageSize = 3;
+
+    while (true) {
+      const qs = cursor
+        ? `/api/v1/contracts?limit=${pageSize}&cursor=${encodeURIComponent(cursor)}`
+        : `/api/v1/contracts?limit=${pageSize}`;
+      const res = await request(app).get(qs).set(auth(adminToken()));
+      expect(res.status).toBe(200);
+      const page = res.body.data;
+      for (const c of page.data) {
+        expect(seen.has(c.id)).toBe(false);
+        seen.add(c.id);
+      }
+      pageNum++;
+      if (!page.hasNextPage) break;
+      cursor = page.nextCursor;
+      if (pageNum > count) throw new Error('Infinite pagination loop');
+    }
+
+    expect(seen.size).toBe(count);
+  });
+
+  it('returns 400 when cursor limit exceeds 100', async () => {
+    const res = await request(app)
+      .get('/api/v1/contracts?limit=101')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for an invalid cursor', async () => {
+    const res = await request(app)
+      .get('/api/v1/contracts?cursor=garbage')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(400);
+    expect(res.body.status).toBe('error');
+  });
+
+  it('returns cursor page with empty data set', async () => {
+    const res = await request(app)
+      .get('/api/v1/contracts?limit=5')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body.data.data).toHaveLength(0);
+    expect(res.body.data.nextCursor).toBeNull();
+    expect(res.body.data.hasNextPage).toBe(false);
+  });
+
+  it('returns empty page for a cursor past the last item', async () => {
+    await createContractAsAdmin();
+    await createContractAsAdmin();
+
+    const first = await request(app)
+      .get('/api/v1/contracts?limit=2')
+      .set(auth(adminToken()));
+    expect(first.status).toBe(200);
+
+    if (first.body.data.nextCursor) {
+      const second = await request(app)
+        .get(`/api/v1/contracts?limit=2&cursor=${encodeURIComponent(first.body.data.nextCursor)}`)
+        .set(auth(adminToken()));
+      expect(second.status).toBe(200);
+      expect(second.body.data.data).toHaveLength(0);
+      expect(second.body.data.hasNextPage).toBe(false);
+    }
+  });
 });
 
 // ─── POST /api/v1/contracts ───────────────────────────────────────────────────
