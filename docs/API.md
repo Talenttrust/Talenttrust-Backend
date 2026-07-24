@@ -223,6 +223,18 @@ Promotes the green instance to active status.
 
 Reverts traffic to the blue instance. Idempotent if already blue (returns `200 OK`).
 
+## Webhooks API
+
+The Webhooks API provides endpoints for managing webhook subscriptions, recording delivery metrics, and replaying failed deliveries. See [webhooks.md](webhooks.md) for comprehensive documentation covering all webhook subscription management, signature verification, and admin operations.
+
+### Quick Links
+
+- **Subscription Management** — Create, list, retrieve, update, and delete webhook subscriptions
+- **Metrics Recording** — Record webhook delivery outcomes and DLQ depth
+- **Admin Operations** — Replay dead-letter queue entries with controlled concurrency
+
+For full endpoint reference, error codes, request/response shapes, and signature verification examples, see [webhooks.md](webhooks.md).
+
 ## Contracts API
 
 ### Overview
