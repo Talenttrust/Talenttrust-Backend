@@ -97,7 +97,11 @@ router.get(
       const page = await repo.findAllPaginated(filter, { cursor: cursorStr, limit: limit as number | undefined });
       res.status(200).json({
         status: 'success',
-        data: list.map(sanitizeSubscription),
+        data: page.items.map(sanitizeSubscription),
+        meta: {
+          nextCursor: page.nextCursor ?? null,
+          limit: limit ? Number(limit) : undefined,
+        },
       });
     } catch (error) {
       next(error);

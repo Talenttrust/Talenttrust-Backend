@@ -131,7 +131,7 @@ describe("metricsAuthMiddleware", () => {
       // Length match (7 vs 7) — should call timingSafeEqual
       await request(buildApp())
         .get("/metrics")
-        .set("Authorization", "Bearer token99");
+        .set("Authorization", "Bearer ***")
 
       expect(mockTimingSafeEqual).toHaveBeenCalledTimes(1);
     });

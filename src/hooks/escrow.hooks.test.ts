@@ -14,7 +14,11 @@ jest.mock('../services/notification.service', () => ({
 import { KeyEscrowEvent } from '../types/notification.types';
 import type { EscrowChannelResult, EscrowDispatchResult } from './escrow.hooks';
 
-let EscrowHooks: typeof EscrowHooksType;
+import { EscrowHooks } from './escrow.hooks';
+// If you need the constructor type:
+let EscrowHooksClass: typeof EscrowHooks;
+// If you need an instance type:
+let escrowHooks: EscrowHooks;
 let notificationService: any;
 let logger: any;
 

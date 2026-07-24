@@ -205,7 +205,7 @@ describe('POST /auth/login', () => {
       .send({ email: creds.email, password: 'wrong' });
     const unknownUser = await request(app)
       .post('/auth/login')
-      .send({ email: 'nobody@example.com', password: 'anything1' });
+      .send({ email: 'nobody@example.com', password: 'WrongPass123!' })
 
     expect(wrongPass.body.error.message).toBe(unknownUser.body.error.message);
   });
