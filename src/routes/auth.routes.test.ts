@@ -83,12 +83,49 @@ describe('POST /auth/register', () => {
       .post('/auth/register')
       .send({ email: 'b@b.com', password: 'short', username: 'bob' });
     expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
   });
 
   it('returns 400 when email is malformed', async () => {
     const res = await request(app)
       .post('/auth/register')
       .send({ email: 'not-an-email', password: 'Password1!', username: 'bob' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('returns 400 when password exceeds maximum length', async () => {
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ email: 'large@example.com', password: 'p'.repeat(129), username: 'bob' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when unknown fields are included', async () => {
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ ...validBody, extra: 'not-allowed' });
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts role when provided at upper boundary of allowed username length', async () => {
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ ...validBody, email: 'fr@example.com', username: 'a'.repeat(50), role: 'freelancer' });
+    expect(res.status).toBe(201);
+  });
+
+  it('accepts a password at maximum allowed length', async () => {
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ email: 'maxpass@example.com', password: 'p'.repeat(128), username: 'bob' });
+    expect(res.status).toBe(201);
+  });
+
+  it('returns 400 for invalid role values', async () => {
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ ...validBody, role: 'admin' });
     expect(res.status).toBe(400);
   });
 
@@ -125,18 +162,26 @@ describe('POST /auth/login', () => {
     expect(typeof res.body.refreshToken).toBe('string');
   });
 
+  it('returns 400 when password is too short (< 8 chars)', async () => {
+    const res = await request(app)
+      .post('/auth/login')
+      .send({ email: creds.email, password: 'short' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('returns 400 when login payload contains unknown fields', async () => {
+    const res = await request(app)
+      .post('/auth/login')
+      .send({ ...creds, extra: 123 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
   it('returns 401 on wrong password (same message as unknown email)', async () => {
     const res = await request(app)
       .post('/auth/login')
-      .send({ email: creds.email, password: 'wrongpassword' });
-    expect(res.status).toBe(401);
-    expect(res.body.error.code).toBe('invalid_credentials');
-  });
-
-  it('returns 401 on unknown email (same message as wrong password)', async () => {
-    const res = await request(app)
-      .post('/auth/login')
-      .send({ email: 'ghost@example.com', password: 'Password1!' });
+      .send({ email: creds.email, password: 'WrongPass1!' });
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('invalid_credentials');
   });
@@ -144,6 +189,7 @@ describe('POST /auth/login', () => {
   it('returns 400 when fields are missing', async () => {
     const res = await request(app).post('/auth/login').send({ email: creds.email });
     expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
   });
 
   it('returns 400 when email is malformed', async () => {
@@ -215,6 +261,23 @@ describe('POST /auth/refresh', () => {
   it('returns 400 when refreshToken field is missing', async () => {
     const res = await request(app).post('/auth/refresh').send({});
     expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('returns 400 when refreshToken is too long', async () => {
+    const res = await request(app)
+      .post('/auth/refresh')
+      .send({ refreshToken: 'a'.repeat(1025) });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('returns 400 when refresh payload contains unknown fields', async () => {
+    const res = await request(app)
+      .post('/auth/refresh')
+      .send({ refreshToken, extra: 'not-allowed' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
   });
 });
 

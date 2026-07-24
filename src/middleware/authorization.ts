@@ -45,6 +45,7 @@ import jwt from "jsonwebtoken";
 import { isAuthorized, isValidRole } from "../lib/authorization";
 import type { Action, User, Resource, Role, AuthenticatedRequest } from "../lib/types";
 import { JWT_VERIFY_OPTIONS } from "../auth/jwtConfig";
+import { extractBearerToken, sendUnauthorized, sendForbidden } from "../lib/authHelpers";
 
 // ─── JWT configuration ────────────────────────────────────────────────────────
 
@@ -64,29 +65,7 @@ interface JwtPayload {
   exp?:  number;
 }
 
-// ─── Error response helpers ───────────────────────────────────────────────────
 
-function unauthorized(res: Response, message = "Unauthorized"): void {
-  const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(401).json({
-    error: {
-      code: 'unauthorized',
-      message,
-      requestId,
-    },
-  });
-}
-
-function forbidden(res: Response, message = "Forbidden"): void {
-  const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(403).json({
-    error: {
-      code: 'forbidden',
-      message,
-      requestId,
-    },
-  });
-}
 
 // ─── requireAuth ─────────────────────────────────────────────────────────────
 
@@ -117,14 +96,12 @@ export function requireAuth(
   res: Response,
   next: NextFunction
 ): void {
-  const authHeader = req.headers.authorization;
+  const token = extractBearerToken(req);
 
-  if (!authHeader?.startsWith("Bearer ")) {
-    unauthorized(res, "Missing or malformed Authorization header.");
+  if (!token) {
+    sendUnauthorized(res, "Missing or malformed Authorization header.");
     return;
   }
-
-  const token = authHeader.slice(7); // strip "Bearer "
 
   try {
     // jwt.verify throws for any invalid token (bad signature, expired,
@@ -135,13 +112,13 @@ export function requireAuth(
 
     // Guard required claims — a well-formed token always carries these.
     if (!decoded.sub || !decoded.email) {
-      unauthorized(res, "Token is missing required claims.");
+      sendUnauthorized(res, "Token is missing required claims.");
       return;
     }
 
     // Re-validate the role claim against the platform allowlist.
     if (!isValidRole(decoded.role)) {
-      unauthorized(res, "Token carries an unrecognised role.");
+      sendUnauthorized(res, "Token carries an unrecognised role.");
       return;
     }
 
@@ -154,11 +131,11 @@ export function requireAuth(
     next();
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      unauthorized(res, "Token has expired.");
+      sendUnauthorized(res, "Token has expired.");
       return;
     }
     // Covers JsonWebTokenError (bad signature, malformed) and NotBeforeError.
-    unauthorized(res, "Invalid token.");
+    sendUnauthorized(res, "Invalid token.");
   }
 }
 
@@ -183,12 +160,12 @@ export function requireRole(...allowedRoles: Role[]) {
     next: NextFunction
   ): void {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
     if (!allowedRoles.includes(req.user.role)) {
-      forbidden(res, "You do not have permission to access this resource.");
+      sendForbidden(res, "You do not have permission to access this resource.");
       return;
     }
 
@@ -239,7 +216,7 @@ export function requirePermission(
     next: NextFunction
   ): Promise<void> {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
@@ -280,7 +257,7 @@ export function requirePermission(
           action,
           resourceOwnerId,
         }));
-        forbidden(res, "You do not have permission to perform this action.");
+        sendForbidden(res, "You do not have permission to perform this action.");
         return;
       }
 

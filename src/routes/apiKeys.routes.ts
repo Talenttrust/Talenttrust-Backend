@@ -56,9 +56,18 @@ router.post(
 
 /**
  * @route   GET /api/v1/api-keys
- * @desc    List all API keys for the authenticated user
+ * @desc    List active API keys for the authenticated user, newest first.
+ *          Cursor-paginated via opaque `nextCursor` tokens so results stay
+ *          stable across pages even as new keys are created concurrently.
  * @access  Private (requires JWT authentication)
+ * @query   limit  - Page size, 1-100 (default 20). Out-of-range values are
+ *                   clamped rather than rejected.
+ * @query   cursor - Opaque cursor from the previous page's `nextCursor`.
+ *                   Omit for the first page. A malformed cursor returns 400.
  * @example
+ * // Request
+ * GET /api/v1/api-keys?limit=20
+ *
  * // Response
  * {
  *   "apiKeys": [
@@ -73,7 +82,10 @@ router.post(
  *       "isActive": true
  *     }
  *   ],
- *   "total": 1
+ *   "total": 1,
+ *   "nextCursor": null,
+ *   "hasNextPage": false,
+ *   "limit": 20
  * }
  */
 router.get(

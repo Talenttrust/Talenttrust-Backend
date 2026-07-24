@@ -1,11 +1,17 @@
 import Database, { type Database as DatabaseInstance } from 'better-sqlite3';
 import crypto from 'crypto';
 import { WebhookSubscription, CreateWebhookSubscriptionDto, UpdateWebhookSubscriptionDto } from '../types/webhook.types';
+import type { CursorPaginationInput, CursorPage } from '../contracts/cursor.types';
+import { encodeCursor, decodeCursor, parseLimit } from '../contracts/cursor.repository';
 
 export interface WebhookSubscriptionRepository {
   create(dto: CreateWebhookSubscriptionDto): Promise<WebhookSubscription>;
   findById(id: string): Promise<WebhookSubscription | undefined>;
   findAll(filter?: { consumerId?: string; eventType?: string; active?: boolean }): Promise<WebhookSubscription[]>;
+  findAllPaginated(
+    filter: { consumerId?: string; eventType?: string; active?: boolean },
+    input: CursorPaginationInput,
+  ): Promise<CursorPage<WebhookSubscription>>;
   update(id: string, dto: UpdateWebhookSubscriptionDto): Promise<WebhookSubscription>;
   delete(id: string): Promise<boolean>;
 }
@@ -56,6 +62,56 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     const rows = this.db.prepare(sql).all(...params) as any[];
     console.log("REPOSITORY FINDALL ROWS:", rows);
     return rows.map(this.mapRow);
+  }
+
+  async findAllPaginated(
+    filter: { consumerId?: string; eventType?: string; active?: boolean },
+    input: CursorPaginationInput,
+  ): Promise<CursorPage<WebhookSubscription>> {
+    const limit = parseLimit(input.limit);
+
+    let sql = 'SELECT * FROM webhook_subscriptions';
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filter?.consumerId) {
+      conditions.push('consumer_id = ?');
+      params.push(filter.consumerId);
+    }
+    if (filter?.eventType) {
+      conditions.push('event_type = ?');
+      params.push(filter.eventType);
+    }
+    if (filter?.active !== undefined) {
+      conditions.push('active = ?');
+      params.push(filter.active ? 1 : 0);
+    }
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      conditions.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      params.push(pos.createdAt, pos.createdAt, pos.id);
+    }
+
+    if (conditions.length) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?';
+    params.push(limit + 1);
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    const hasNextPage = rows.length > limit;
+    const pageRows = hasNextPage ? rows.slice(0, limit) : rows;
+    const data = pageRows.map(this.mapRow);
+
+    const lastRow = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasNextPage && lastRow
+        ? encodeCursor({ createdAt: lastRow.created_at, id: lastRow.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
   }
 
   async update(id: string, dto: UpdateWebhookSubscriptionDto): Promise<WebhookSubscription> {

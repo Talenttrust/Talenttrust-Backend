@@ -8,8 +8,19 @@ import {
 } from 'prom-client';
 
 import { ServiceStatus } from './types';
+import {
+  assertDlqDepth,
+  assertServiceStatus,
+  assertWebhookOutcome,
+  WebhookOutcome as ValidatedWebhookOutcome,
+} from './metrics-validation';
 
-export type WebhookOutcome = 'success' | 'failure' | 'dlq';
+/**
+ * Re-exported from metrics-validation to preserve existing import paths.
+ * The canonical definition lives in metrics-validation.ts where all metric
+ * input types are colocated.
+ */
+export type WebhookOutcome = ValidatedWebhookOutcome;
 
 /**
  * Canonical list of metric family names documented in docs/observability.md.
@@ -164,18 +175,26 @@ export class MetricsService implements MetricsServiceLike {
   }
 
   recordHealthStatus(status: ServiceStatus): void {
+    // Runtime guard: reject unknown status strings that bypass TypeScript types
+    // (e.g. from JSON-deserialized or cross-process call sites).
+    const validated = assertServiceStatus(status);
     this.serviceHealthStatus.set(
       { service: this.serviceName },
-      HEALTH_STATUS_VALUE[status],
+      HEALTH_STATUS_VALUE[validated],
     );
   }
 
   recordWebhookDelivery(outcome: WebhookOutcome): void {
-    this.webhookDeliveriesTotal.inc({ outcome });
+    // Runtime guard: reject unknown outcome strings.
+    const validated = assertWebhookOutcome(outcome);
+    this.webhookDeliveriesTotal.inc({ outcome: validated });
   }
 
   setWebhookDlqDepth(depth: number): void {
-    this.webhookDlqDepth.set(depth);
+    // Runtime guard: reject NaN, ±Infinity, negative values, and unreasonably
+    // large values that would indicate a bug or injection attempt.
+    const validated = assertDlqDepth(depth);
+    this.webhookDlqDepth.set(validated);
   }
 
   startRateLimitMetricsSampling(limiter: any, intervalMs: number = 10000): void {
@@ -203,6 +222,12 @@ export class MetricsService implements MetricsServiceLike {
   }
 
   private boundRouteLabel(route: string): string {
+    // Never collapse unmatched routes — they are not user-controlled and must
+    // always be tracked separately so operators can monitor 404 rates.
+    if (route === UNMATCHED_ROUTE_LABEL) {
+      return route;
+    }
+
     if (this.observedHttpRouteLabels.has(route)) {
       return route;
     }

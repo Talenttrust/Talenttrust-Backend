@@ -18,21 +18,14 @@
 import {
   incrementDlqOperation,
   incrementDlqReplay,
+  webhookDlqOperationsTotal,
+  webhookDlqReplaysTotal,
   webhookDlqRegistry,
-  // NOTE: If your source uses a different name for the delivery recorder,
-  // change `recordWebhookOutcome` below to match (e.g. `recordDeliveryOutcome`).
-  recordWebhookOutcome,
+  webhookDlqOperationsTotal,
+  webhookDlqReplaysTotal,
 } from './webhookMetrics';
 
 describe('webhookMetrics DLQ counters', () => {
-  beforeEach(() => {
-    webhookDlqRegistry.clear();
-  });
-
-  afterEach(() => {
-    webhookDlqRegistry.clear();
-  });
-
   describe('incrementDlqOperation', () => {
     it('increments enqueue counter', async () => {
       incrementDlqOperation('enqueue');

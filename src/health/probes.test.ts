@@ -443,7 +443,11 @@ describe("queueProbe", () => {
     process.env.QUEUE_PROBE_TIMEOUT_MS = "1";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
       getHealth: jest.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(resolve, 60_000))
+        // A never-resolving promise without a timer is sufficient to simulate
+        // an infinitely-slow getHealth(); using setTimeout(resolve, 60_000)
+        // would leave a live 60-second timer after the race resolves, causing
+        // Jest to report an open handle and exit with code 1.
+        () => new Promise(() => { /* never resolves */ })
       ),
     });
 
