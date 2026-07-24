@@ -74,6 +74,27 @@ export interface AuditEntry {
 /** Input required to create a new audit entry (hash fields are computed internally). */
 export type CreateAuditEntryInput = Omit<AuditEntry, 'id' | 'timestamp' | 'hash' | 'previousHash'>;
 
+/** Opaque cursor for pagination. Encodes position and filters. */
+export type AuditCursor = string;
+
+/** Internal cursor structure (encoded to base64 for API). */
+export interface CursorData {
+  /** ID of the last entry in the previous page. */
+  lastId: string;
+  /** Timestamp of the last entry for ordering stability. */
+  lastTimestamp: string;
+  /** Filters applied when this cursor was generated. */
+  filters: {
+    action?: AuditAction;
+    severity?: AuditSeverity;
+    actor?: string;
+    resource?: string;
+    resourceId?: string;
+    from?: string;
+    to?: string;
+  };
+}
+
 /** Query filters for retrieving audit log entries. */
 export interface AuditQuery {
   action?: AuditAction;
@@ -87,8 +108,10 @@ export interface AuditQuery {
   to?: string;
   /** Maximum number of results to return. Undefined means "no explicit limit". */
   limit?: number;
-  /** Zero-based offset for pagination. */
+  /** Zero-based offset for pagination (deprecated, use cursor instead). */
   offset?: number;
+  /** Opaque cursor for pagination. */
+  cursor?: AuditCursor;
 }
 
 /** Result of a chain integrity verification. */
@@ -100,4 +123,29 @@ export interface IntegrityReport {
   /** ID of the first corrupted entry, if any. */
   firstCorruptedId?: string;
   checkedAt: string;
+}
+
+/** Paginated audit query result. */
+export interface AuditQueryResult {
+  entries: AuditEntry[];
+  count: number;
+  limit: number;
+  /** Opaque cursor for the next page, if more results exist. */
+  nextCursor?: string;
+}
+
+/** Encodes cursor data to an opaque base64 string. */
+export function encodeCursor(data: CursorData): string {
+  const json = JSON.stringify(data);
+  return Buffer.from(json, 'utf-8').toString('base64');
+}
+
+/** Decodes an opaque base64 cursor string to cursor data. */
+export function decodeCursor(cursor: string): CursorData {
+  try {
+    const json = Buffer.from(cursor, 'base64').toString('utf-8');
+    return JSON.parse(json) as CursorData;
+  } catch (_error) {
+    throw new Error('Invalid cursor format');
+  }
 }

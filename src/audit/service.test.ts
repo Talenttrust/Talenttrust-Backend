@@ -44,6 +44,7 @@ import type {
   AuditQuery,
   CreateAuditEntryInput,
   IntegrityReport,
+  AuditQueryResult,
 } from './types';
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
@@ -112,6 +113,14 @@ function makeMockRepository(): MockRepository {
         valid: true,
         totalEntries: repo.appendedInputs.length,
         checkedAt: FROZEN_TIMESTAMP,
+      };
+    },
+    queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
+      const entries = repo.query(query);
+      return {
+        entries,
+        count: entries.length,
+        limit: query.limit ?? 50,
       };
     },
   };

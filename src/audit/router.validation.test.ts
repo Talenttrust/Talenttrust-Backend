@@ -89,9 +89,9 @@ describe.each([
 });
 
 describe('GET / vs GET /export limit clamping (each keeps its own max)', () => {
-  it('GET / clamps to 1000 even when a larger limit is requested', async () => {
+  it('GET / clamps to 100 even when a larger limit is requested', async () => {
     const res = await request(buildApp().app).get('/api/v1/audit?limit=999999').expect(200);
-    expect(res.body.limit).toBe(1000);
+    expect(res.body.limit).toBe(100);
   });
 
   it('GET /export accepts a limit above 1000 (its own higher max of 50000)', async () => {

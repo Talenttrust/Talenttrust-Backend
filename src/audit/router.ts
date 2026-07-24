@@ -19,6 +19,7 @@ import { pipeline } from 'stream/promises';
 import { auditService, AuditService } from './service';
 import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
 import type { AuditAction, AuditQuery, AuditSeverity } from './types';
+import { decodeCursor } from './types';
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -86,7 +87,7 @@ function parseAuditQuery(
   options: { defaultLimit?: number; maxLimit: number },
 ): { query: AuditQuery; limit?: number; offset: number } {
   const {
-    action, severity, actor, resource, resourceId,
+    action, severity, actor, resource, resourceId, cursor,
   } = req.query as Record<string, string | undefined>;
 
   if (action && !VALID_ACTIONS.has(action as AuditAction)) {
@@ -102,6 +103,15 @@ function parseAuditQuery(
   const from = parseOptionalIsoDate(req.query['from'] as string | undefined, 'from');
   const to = parseOptionalIsoDate(req.query['to'] as string | undefined, 'to');
 
+  // Validate cursor format if provided
+  if (cursor) {
+    try {
+      decodeCursor(cursor);
+    } catch (_error) {
+      throw new Error('Invalid cursor format');
+    }
+  }
+
   return {
     query: {
       ...(action && { action: action as AuditAction }),
@@ -113,6 +123,7 @@ function parseAuditQuery(
       ...(to && { to }),
       ...(limit !== undefined && { limit }),
       offset,
+      ...(cursor && { cursor }),
     },
     limit,
     offset,
@@ -147,14 +158,29 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const exportMiddleware = options.exportMiddleware ?? [];
 
   router.get('/', ...accessMiddleware, (req: Request, res: Response): void => {
-    const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 100, maxLimit: 1000 });
+    const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });
     if (!parsed) {
       return;
     }
 
-    const { query, limit = 100, offset } = parsed;
-    const entries = service.query(query);
-    res.json({ entries, count: entries.length, limit, offset });
+    const { query } = parsed;
+    
+    // Use cursor-based pagination if cursor is provided, otherwise use legacy offset
+    if (query.cursor) {
+      const result = service.queryWithCursor(query);
+      res.json({ 
+        entries: result.entries, 
+        count: result.count, 
+        limit: result.limit,
+        nextCursor: result.nextCursor,
+      });
+    } else {
+      // Legacy offset-based pagination for backward compatibility
+      const limit = query.limit ?? 50;
+      const offset = query.offset ?? 0;
+      const entries = service.query(query);
+      res.json({ entries, count: entries.length, limit, offset });
+    }
   });
 
 /**
