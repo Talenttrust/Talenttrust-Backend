@@ -328,6 +328,98 @@ MIGRATIONS.push({
   },
 });
 
+// Version 13: contract_metadata table for DatabaseService
+MIGRATIONS.push({
+  version: 13,
+  name: "create_contract_metadata_table",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS contract_metadata (
+        id          TEXT    PRIMARY KEY,
+        contract_id TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        value       TEXT    NOT NULL,
+        data_type   TEXT    NOT NULL CHECK (data_type IN ('string', 'number', 'boolean', 'json')),
+        is_sensitive INTEGER NOT NULL DEFAULT 0 CHECK (is_sensitive IN (0, 1)),
+        created_by  TEXT    NOT NULL,
+        updated_by  TEXT,
+        created_at  TEXT    NOT NULL,
+        updated_at  TEXT    NOT NULL,
+        deleted_at  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_contract_metadata_contract_id
+        ON contract_metadata(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_contract_metadata_key
+        ON contract_metadata(contract_id, key);
+    `);
+  },
+});
+
+// Version 14: db_contracts table — lightweight contract container for DatabaseService
+// (separate from the richer 'contracts' table that belongs to the escrow workflow)
+MIGRATIONS.push({
+  version: 14,
+  name: "create_db_contracts_table",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS db_contracts (
+        id         TEXT PRIMARY KEY,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      );
+    `);
+  },
+});
+
+// Version 15: db_users table — lightweight user records for DatabaseService
+// (separate from the richer 'users' table that has auth columns)
+MIGRATIONS.push({
+  version: 15,
+  name: "create_db_users_table",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS db_users (
+        id         TEXT PRIMARY KEY,
+        email      TEXT NOT NULL UNIQUE,
+        role       TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_db_users_email
+        ON db_users(lower(trim(email)));
+    `);
+  },
+});
+
+// Version 16: api_keys table for DatabaseService
+MIGRATIONS.push({
+  version: 16,
+  name: "create_api_keys_table",
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id           TEXT    PRIMARY KEY,
+        name         TEXT    NOT NULL,
+        key_hash     TEXT    NOT NULL,
+        key_selector TEXT,
+        scope        TEXT    NOT NULL DEFAULT '[]',
+        created_by   TEXT    NOT NULL,
+        created_at   TEXT    NOT NULL,
+        updated_at   TEXT    NOT NULL,
+        expires_at   TEXT,
+        last_used_at TEXT,
+        is_active    INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+      );
+      CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash
+        ON api_keys(key_hash);
+      CREATE INDEX IF NOT EXISTS idx_api_keys_key_selector
+        ON api_keys(key_selector);
+    `);
+  },
+});
+
 function ensureMigrationTable(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (

@@ -119,3 +119,153 @@ is rolled back and the migration is not recorded.
 - Do not log secrets from migrations; schema changes should not contain secret
   values.
 - Idempotency is provided by the `schema_version` table and checksum checks.
+
+## DatabaseService — JSON → SQLite migration (issue #643)
+
+### Background
+
+Prior to this change, `src/database/index.ts` persisted all `DatabaseService`
+data to `data/database.json` via full-file reads and writes.  This had two
+critical problems:
+
+1. **No concurrency control** — parallel writes would race and silently
+   overwrite each other's changes.
+2. **Schema drift** — the TypeScript interfaces in `src/database/schema.ts` were
+   not enforced at the storage layer, so bad data could accumulate undetected.
+
+`DatabaseService` is now backed by the shared SQLite connection (via
+`src/db/database.ts`) using the same prepared-statement API the rest of the
+codebase uses.
+
+### New tables (migrations 13 – 16)
+
+| Version | Table | Purpose |
+|---------|-------|---------|
+| 13 | `contract_metadata` | Key/value metadata for contracts (replaces the JSON array) |
+| 14 | `db_contracts` | Lightweight contract containers owned by DatabaseService |
+| 15 | `db_users` | User records owned by DatabaseService (email + role) |
+| 16 | `api_keys` | API key storage with hash, selector, scope, and active flag |
+
+`db_contracts` and `db_users` are intentionally separate from the richer
+`contracts` and `users` tables (used by the escrow workflow and auth layer
+respectively) to avoid colliding schema requirements.
+
+### One-shot import from an existing data/database.json
+
+If you have a production `data/database.json` file that was written by the old
+`DatabaseService`, you can import it with the following one-time script.  Run
+it once against your database **before** deploying the new code.
+
+```ts
+// scripts/import-json-db.ts
+import { readFileSync } from 'fs';
+import path from 'path';
+import { getDb, closeDb } from '../src/db/database';
+
+interface OldDatabase {
+  contract_metadata: Array<{
+    id: string; contract_id: string; key: string; value: string;
+    data_type: string; is_sensitive: boolean; created_by: string;
+    updated_by?: string; created_at: string; updated_at: string;
+    deleted_at?: string;
+  }>;
+  contracts: Array<{
+    id: string; created_by: string; created_at: string;
+    updated_at: string; deleted_at?: string;
+  }>;
+  users: Array<{
+    id: string; email: string; role: string;
+    created_at: string; updated_at: string;
+  }>;
+  api_keys: Array<{
+    id: string; name: string; key_hash: string; key_selector?: string;
+    scope: string[]; created_by: string; created_at: string;
+    updated_at: string; expires_at?: string; last_used_at?: string;
+    is_active: boolean;
+  }>;
+}
+
+const jsonPath = path.join(__dirname, '../data/database.json');
+const old = JSON.parse(readFileSync(jsonPath, 'utf-8')) as OldDatabase;
+const db = getDb();
+
+const insertMeta = db.prepare(`
+  INSERT OR IGNORE INTO contract_metadata
+    (id, contract_id, key, value, data_type, is_sensitive,
+     created_by, updated_by, created_at, updated_at, deleted_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const insertContract = db.prepare(`
+  INSERT OR IGNORE INTO db_contracts
+    (id, created_by, created_at, updated_at, deleted_at)
+  VALUES (?, ?, ?, ?, ?)
+`);
+const insertUser = db.prepare(`
+  INSERT OR IGNORE INTO db_users
+    (id, email, role, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?)
+`);
+const insertKey = db.prepare(`
+  INSERT OR IGNORE INTO api_keys
+    (id, name, key_hash, key_selector, scope, created_by,
+     created_at, updated_at, expires_at, last_used_at, is_active)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const run = db.transaction(() => {
+  for (const r of old.contract_metadata) {
+    insertMeta.run(r.id, r.contract_id, r.key, r.value, r.data_type,
+      r.is_sensitive ? 1 : 0, r.created_by, r.updated_by ?? null,
+      r.created_at, r.updated_at, r.deleted_at ?? null);
+  }
+  for (const c of old.contracts) {
+    insertContract.run(c.id, c.created_by, c.created_at, c.updated_at, c.deleted_at ?? null);
+  }
+  for (const u of old.users) {
+    insertUser.run(u.id, u.email, u.role, u.created_at, u.updated_at);
+  }
+  for (const k of old.api_keys) {
+    insertKey.run(k.id, k.name, k.key_hash, k.key_selector ?? null,
+      JSON.stringify(k.scope), k.created_by, k.created_at, k.updated_at,
+      k.expires_at ?? null, k.last_used_at ?? null, k.is_active ? 1 : 0);
+  }
+});
+
+run();
+closeDb();
+console.log('Import complete.');
+```
+
+Run with:
+
+```bash
+DB_PATH=talenttrust.db npx ts-node scripts/import-json-db.ts
+```
+
+`INSERT OR IGNORE` makes the import **idempotent** — running it twice will not
+create duplicates.
+
+### Verifying the import
+
+```bash
+sqlite3 talenttrust.db "SELECT COUNT(*) FROM contract_metadata;"
+sqlite3 talenttrust.db "SELECT COUNT(*) FROM db_contracts;"
+sqlite3 talenttrust.db "SELECT COUNT(*) FROM db_users;"
+sqlite3 talenttrust.db "SELECT COUNT(*) FROM api_keys;"
+```
+
+Compare the counts with the array lengths in `data/database.json` to confirm
+all rows were imported.
+
+### Reverting (emergency only)
+
+The new tables (`contract_metadata`, `db_contracts`, `db_users`, `api_keys`)
+are additive — they do not modify or drop existing tables.  If you need to
+roll back to the JSON implementation while keeping existing data:
+
+1. Deploy the previous code commit.
+2. Export current SQLite data back to JSON using the inverse of the import script.
+3. Write the resulting JSON to `data/database.json`.
+
+Migrations 13 – 16 will remain in `schema_version` and will be skipped on
+future startups (they are idempotent), so rolling forward again is safe.
