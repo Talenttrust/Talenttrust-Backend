@@ -2,10 +2,11 @@ import { Registry } from 'prom-client';
 import { EventEmitter } from 'events';
 import { NextFunction, Request, Response } from 'express';
 import { MetricsService } from './metrics-service';
+import { DEFAULT_HISTOGRAM_BUCKETS } from './observability-config';
 
-function makeService(httpRouteLabelLimit?: number) {
+function makeService(httpRouteLabelLimit?: number, histogramBuckets?: number[]) {
   const register = new Registry();
-  const service = new MetricsService('test', register, { httpRouteLabelLimit });
+  const service = new MetricsService('test', register, { httpRouteLabelLimit, histogramBuckets });
   return { service, register };
 }
 
@@ -356,5 +357,120 @@ describe('MetricsService — constructor edge cases', () => {
     const service = new MetricsService('', register);
 
     expect(service.getMetrics()).toBeDefined();
+  });
+});
+
+describe('MetricsService — histogram bucket configuration', () => {
+  /**
+   * Extract the finite numeric bucket boundaries from a histogram in the
+   * registry. prom-client represents the +Inf bucket with the string '+Inf'
+   * for the `le` label, and finite boundaries as their numeric value.
+   * We normalise everything to numbers and exclude +Inf.
+   */
+  async function getHistogramBuckets(register: Registry): Promise<number[]> {
+    const metrics = await register.getMetricsAsJSON();
+    const hist = metrics.find((m) => m.name === 'http_request_duration_seconds');
+    if (!hist) return [];
+
+    const seen = new Set<number>();
+    for (const v of hist.values as any[]) {
+      const le = v.labels?.le;
+      if (le === undefined || le === null) continue;
+      if (le === '+Inf') continue;
+      const numeric = Number(le);
+      if (!Number.isFinite(numeric)) continue;
+      seen.add(numeric);
+    }
+    return Array.from(seen).sort((a, b) => a - b);
+  }
+
+  /** Record one HTTP request against the service to populate bucket series. */
+  function observe(service: MetricsService, route = '/health'): void {
+    const response = new EventEmitter() as Response & EventEmitter;
+    response.statusCode = 200;
+    service.trackHttpRequest(
+      { method: 'GET', baseUrl: '', route: { path: route } } as unknown as Request,
+      response,
+      jest.fn() as NextFunction,
+    );
+    response.emit('finish');
+  }
+
+  it('uses DEFAULT_HISTOGRAM_BUCKETS when no histogramBuckets option is provided', async () => {
+    const { service, register } = makeService();
+    observe(service);
+
+    const buckets = await getHistogramBuckets(register);
+    expect(buckets).toEqual([...DEFAULT_HISTOGRAM_BUCKETS]);
+  });
+
+  it('uses custom histogramBuckets when a valid array is provided', async () => {
+    const customBuckets = [0.01, 0.1, 1, 10];
+    const { service, register } = makeService(undefined, customBuckets);
+    observe(service);
+
+    const buckets = await getHistogramBuckets(register);
+    expect(buckets).toEqual(customBuckets);
+  });
+
+  it('falls back to DEFAULT_HISTOGRAM_BUCKETS and emits a warning when invalid buckets are supplied', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Invalid: not strictly increasing
+    const { service, register } = makeService(undefined, [1, 0.5, 0.1]);
+    observe(service);
+
+    const buckets = await getHistogramBuckets(register);
+    expect(buckets).toEqual([...DEFAULT_HISTOGRAM_BUCKETS]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid histogramBuckets'),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it('falls back to defaults and warns when an empty bucket array is supplied', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { service, register } = makeService(undefined, []);
+    observe(service, '/test');
+
+    const buckets = await getHistogramBuckets(register);
+    expect(buckets).toEqual([...DEFAULT_HISTOGRAM_BUCKETS]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid histogramBuckets'));
+
+    warnSpy.mockRestore();
+  });
+
+  it('falls back to defaults and warns when buckets contain non-positive values', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { service, register } = makeService(undefined, [-0.1, 0.5, 1]);
+    observe(service, '/test');
+
+    const buckets = await getHistogramBuckets(register);
+    expect(buckets).toEqual([...DEFAULT_HISTOGRAM_BUCKETS]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid histogramBuckets'));
+
+    warnSpy.mockRestore();
+  });
+
+  it('correctly records observations into custom buckets', async () => {
+    const customBuckets = [0.1, 0.5, 1, 5];
+    const { service, register } = makeService(undefined, customBuckets);
+    observe(service, '/api');
+
+    const buckets = await getHistogramBuckets(register);
+    // Custom boundaries must be present
+    expect(buckets).toEqual(expect.arrayContaining(customBuckets));
+    // Must not include default-only boundaries that are absent from customBuckets
+    expect(buckets).not.toContain(0.005);
+    expect(buckets).not.toContain(2.5);
+
+    // Verify +Inf bucket is also emitted
+    const metrics = await register.getMetricsAsJSON();
+    const hist = metrics.find((m) => m.name === 'http_request_duration_seconds');
+    const leValues = (hist!.values as any[]).map((v) => v.labels?.le);
+    expect(leValues).toContain('+Inf');
   });
 });
