@@ -16,7 +16,15 @@
  * Eviction never blocks or corrupts in-flight coalesced revalidations:
  * `activeFetches` is tracked independently of cache membership and any
  * promise already pending resolves with the data it was awaiting.
+ *
+ * Background revalidation errors are routed through the structured logger
+ * (see {@link logger}) and an optional {@link SWRCacheOptions.onRevalidationError |
+ * onRevalidationError} callback, so operators can aggregate or alert on
+ * wedged caches. The cache never propagates background errors to callers;
+ * stale data continues to be served.
  */
+
+import { logger } from '../logger';
 
 export interface CacheOptions {
   /** Time-To-Live in milliseconds. Cache is considered fresh during this period. */
@@ -25,12 +33,37 @@ export interface CacheOptions {
   swrMs: number;
 }
 
+/**
+ * Callback invoked when a background revalidation fails.
+ * The cache swallows the error and continues to serve stale data; this hook
+ * exists so that callers can increment metrics or trigger alerts.
+ *
+ * @param key - The cache key whose revalidation failed.
+ * @param error - The error thrown by the upstream fetcher.
+ */
+export type OnRevalidationError = (key: string, error: unknown) => void;
+
 export interface SWRCacheOptions {
   /**
    * Maximum number of cached entries before LRU eviction kicks in.
    * Must be a positive integer. Defaults to {@link DEFAULT_MAX_ENTRIES}.
    */
   maxEntries?: number;
+
+  /**
+   * Optional callback fired when a background revalidation throws.
+   * The error is already logged via the structured logger; this hook lets
+   * consumers increment a metric, emit a counter, or trigger an alert.
+   * The cache continues to serve stale data regardless.
+   *
+   * @example
+   * ```typescript
+   * const cache = new SWRCache({
+   *   onRevalidationError: (key, err) => metrics.increment('swr.revalidation.error', { key }),
+   * });
+   * ```
+   */
+  onRevalidationError?: OnRevalidationError;
 }
 
 export interface SWRResult<T> {
@@ -72,6 +105,8 @@ export class SWRCache {
   private cache = new Map<string, CacheEntry<unknown>>();
   /** In-flight fetch promises, decoupled from cache membership so eviction cannot corrupt them. */
   private activeFetches = new Map<string, Promise<unknown>>();
+  /** Optional consumer-supplied hook for background revalidation failures. */
+  private readonly onRevalidationError?: OnRevalidationError;
 
   /**
    * @param options - Cache configuration. Defaults are applied when omitted.
@@ -85,6 +120,7 @@ export class SWRCache {
       );
     }
     this.maxEntries = supplied;
+    this.onRevalidationError = options.onRevalidationError;
   }
 
   /**
@@ -207,6 +243,11 @@ export class SWRCache {
    * We deliberately use try/catch/finally rather than chained `.then` /
    * `.catch` so that the activeFetches bookkeeping is guaranteed even if
    * the upstream fetcher throws synchronously.
+   *
+   * Background errors are routed through the structured logger at `error`
+   * level (including the cache key and the redacted error payload) and
+   * surfaced to the optional {@link OnRevalidationError} callback. They
+   * are never propagated to callers.
    */
   private revalidate<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
     const fetchPromise = (async (): Promise<T> => {
@@ -215,11 +256,17 @@ export class SWRCache {
         this.setEntry(key, { data: newData as unknown, updatedAt: Date.now() });
         return newData;
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error(
-          `[SWR Cache] Background revalidation failed for key: ${key}`,
-          (err as Error).message,
-        );
+        const errorContext: Record<string, unknown> = { cacheKey: key, err };
+        logger.error('SWR Cache: background revalidation failed', errorContext);
+
+        if (this.onRevalidationError) {
+          try {
+            this.onRevalidationError(key, err);
+          } catch (_cbErr) {
+            // Callback errors must never crash the cache or the process.
+          }
+        }
+
         throw err;
       } finally {
         this.activeFetches.delete(key);

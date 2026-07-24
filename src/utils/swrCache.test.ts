@@ -1,4 +1,5 @@
 import { SWRCache, CacheOptions, DEFAULT_MAX_ENTRIES } from './swrCache';
+import { setWriteRecordImpl, LogRecord } from '../logger';
 
 describe('SWRCache', () => {
   let cache: SWRCache;
@@ -110,9 +111,25 @@ describe('SWRCache', () => {
   });
 
   describe('revalidation error', () => {
-    it('does not throw to callers and retains stale value after background revalidation fails', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+    let logSpy: jest.Mock;
 
+    beforeEach(() => {
+      logSpy = jest.fn();
+      setWriteRecordImpl(logSpy);
+    });
+
+    afterEach(() => {
+      setWriteRecordImpl((record: LogRecord) => {
+        const line = JSON.stringify(record);
+        if (record.level === 'error') {
+          process.stderr.write(line + '\n');
+        } else {
+          process.stdout.write(line + '\n');
+        }
+      });
+    });
+
+    it('does not throw to callers and retains stale value after background revalidation fails', async () => {
       const seedFetcher = jest.fn().mockResolvedValue('stale-data');
       const key = 'test:reval-error';
 
@@ -131,17 +148,24 @@ describe('SWRCache', () => {
 
       await Promise.resolve();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Background revalidation failed'),
-        'network down',
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'error',
+          message: 'SWR Cache: background revalidation failed',
+          cacheKey: key,
+        }),
       );
 
-      consoleSpy.mockRestore();
+      const logRecord = logSpy.mock.calls[0][0];
+      expect(logRecord.err).toEqual(
+        expect.objectContaining({
+          type: 'Error',
+          message: 'network down',
+        }),
+      );
     });
 
     it('does not rethrow revalidation errors to stale callers', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-
       const fetcher = jest.fn().mockResolvedValue('original');
       const key = 'test:reval-no-throw';
 
@@ -156,8 +180,6 @@ describe('SWRCache', () => {
       expect(result).toEqual({ data: 'original', degraded: true, source: 'cache_stale' });
 
       await expect(errorPromise).resolves.toEqual(result);
-
-      consoleSpy.mockRestore();
     });
   });
 
@@ -488,5 +510,214 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
     expect(recovered.source).toBe('upstream');
     expect(recovered.data).toBe('v-new');
     expect(recovered.degraded).toBe(false);
+  });
+});
+
+describe('SWRCache structured error logging & onRevalidationError callback', () => {
+  let cache: SWRCache;
+  const ttlMs = 1000;
+  const swrMs = 5000;
+  const options: CacheOptions = { ttlMs, swrMs };
+  let logSpy: jest.Mock;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    logSpy = jest.fn();
+    setWriteRecordImpl(logSpy);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    setWriteRecordImpl((record: LogRecord) => {
+      const line = JSON.stringify(record);
+      if (record.level === 'error') {
+        process.stderr.write(line + '\n');
+      } else {
+        process.stdout.write(line + '\n');
+      }
+    });
+  });
+
+  it('emits a structured error log with cache key and serialised error on background revalidation failure', async () => {
+    cache = new SWRCache();
+    const seedFetcher = jest.fn().mockResolvedValue('stale');
+    const key = 'log:test';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('boom'));
+    await cache.get(key, failFetcher, options);
+
+    await Promise.resolve();
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const record: LogRecord = logSpy.mock.calls[0][0];
+    expect(record.level).toBe('error');
+    expect(record.message).toBe('SWR Cache: background revalidation failed');
+    expect(record.cacheKey).toBe(key);
+    expect(record.err).toEqual(
+      expect.objectContaining({ type: 'Error', message: 'boom' }),
+    );
+    expect(record.service).toBe('talenttrust-backend');
+  });
+
+  it('fires the onRevalidationError callback with key and original error', async () => {
+    const onRevalidationError = jest.fn();
+    cache = new SWRCache({ onRevalidationError });
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'cb:test';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const originalError = new Error('upstream timeout');
+    const failFetcher = jest.fn().mockRejectedValue(originalError);
+
+    const result = await cache.get(key, failFetcher, options);
+
+    expect(result).toEqual({ data: 'v1', degraded: true, source: 'cache_stale' });
+
+    await Promise.resolve();
+
+    expect(onRevalidationError).toHaveBeenCalledTimes(1);
+    expect(onRevalidationError).toHaveBeenCalledWith(key, originalError);
+  });
+
+  it('does not fire onRevalidationError when revalidation succeeds', async () => {
+    const onRevalidationError = jest.fn();
+    cache = new SWRCache({ onRevalidationError });
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'cb:success';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const okFetcher = jest.fn().mockResolvedValue('v2');
+    await cache.get(key, okFetcher, options);
+
+    await Promise.resolve();
+
+    expect(onRevalidationError).not.toHaveBeenCalled();
+  });
+
+  it('does not crash when onRevalidationError callback is omitted', async () => {
+    cache = new SWRCache();
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'no-cb:test';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('fail'));
+    const result = await cache.get(key, failFetcher, options);
+
+    expect(result).toEqual({ data: 'v1', degraded: true, source: 'cache_stale' });
+
+    await Promise.resolve();
+  });
+
+  it('catches callback errors so a throwing callback never crashes the cache', async () => {
+    const brokenCallback = jest.fn(() => {
+      throw new Error('callback exploded');
+    });
+    cache = new SWRCache({ onRevalidationError: brokenCallback });
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'cb:throw';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('upstream err'));
+    const result = await cache.get(key, failFetcher, options);
+
+    expect(result).toEqual({ data: 'v1', degraded: true, source: 'cache_stale' });
+
+    await Promise.resolve();
+
+    expect(brokenCallback).toHaveBeenCalledTimes(1);
+
+    // The cache must still be functional after a throwing callback.
+    // Advance past the SWR window so the next call is a full miss.
+    jest.advanceTimersByTime(ttlMs + swrMs + 100);
+    const recovered = await cache.get(key, () => Promise.resolve('v2'), options);
+    expect(recovered.source).toBe('upstream');
+    expect(recovered.data).toBe('v2');
+  });
+
+  it('fires the callback on concurrent stale callers only once (single revalidation)', async () => {
+    const onRevalidationError = jest.fn();
+    cache = new SWRCache({ onRevalidationError });
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'concurrent:cb';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('fail'));
+
+    const p1 = cache.get(key, failFetcher, options);
+    const p2 = cache.get(key, failFetcher, options);
+    const p3 = cache.get(key, failFetcher, options);
+
+    const results = await Promise.all([p1, p2, p3]);
+
+    expect(results.every((r) => r.degraded && r.data === 'v1')).toBe(true);
+
+    await Promise.resolve();
+
+    expect(failFetcher).toHaveBeenCalledTimes(1);
+    expect(onRevalidationError).toHaveBeenCalledTimes(1);
+    expect(onRevalidationError).toHaveBeenCalledWith(key, expect.any(Error));
+  });
+
+  it('background revalidation failure does not corrupt activeFetches bookkeeping', async () => {
+    cache = new SWRCache();
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'bookkeeping:test';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('fail'));
+    await cache.get(key, failFetcher, options);
+
+    await Promise.resolve();
+
+    // The next call should trigger a fresh fetch, not be stuck on activeFetches.
+    // Advance past the SWR window so the next call is a full miss.
+    jest.advanceTimersByTime(ttlMs + swrMs + 100);
+    const okFetcher = jest.fn().mockResolvedValue('v2');
+    const recovered = await cache.get(key, okFetcher, options);
+
+    expect(recovered.source).toBe('upstream');
+    expect(recovered.data).toBe('v2');
+    expect(okFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('no timers are leaked after background revalidation completes', async () => {
+    cache = new SWRCache();
+
+    const seedFetcher = jest.fn().mockResolvedValue('v1');
+    const key = 'timer:leak';
+
+    await cache.get(key, seedFetcher, options);
+    jest.advanceTimersByTime(ttlMs + 10);
+
+    const failFetcher = jest.fn().mockRejectedValue(new Error('fail'));
+    await cache.get(key, failFetcher, options);
+
+    await Promise.resolve();
+
+    // Verify no remaining active fetches for the key.
+    // Accessing the private map is acceptable in tests to verify cleanup.
+    expect((cache as unknown as { activeFetches: Map<string, unknown> }).activeFetches.has(key)).toBe(false);
   });
 });
