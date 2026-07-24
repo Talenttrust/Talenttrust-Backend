@@ -425,11 +425,6 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
   });
 
   it('does not corrupt in-flight revalidation when the cache entry is evicted mid-flight', async () => {
-    // Real timers here: we want to assert the revalidate promise resolves
-    // and writes back after eviction, even though the cache entry was
-    // displaced while the upstream request was still pending.
-    jest.useRealTimers();
-
     cache = new SWRCache({ maxEntries: 2 });
 
     // k1 has a short TTL; k2 has the long default so it stays fresh.
@@ -437,16 +432,13 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
     await cache.get('k2', () => Promise.resolve('v2'), { ttlMs: 60_000, swrMs: 0 });
     expect(cache.size).toBe(2);
 
-    // Wait past k1's TTL so it becomes stale.
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Advance past k1's TTL
+    jest.advanceTimersByTime(10);
 
-    // A slow revalidator for k1: returns 'v1-new' after 30ms.
-    const reFetcher = jest.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          setTimeout(() => resolve('v1-new'), 30);
-        }),
-    );
+    let resolveRevalidate!: (value: string) => void;
+    const reFetcher = jest.fn(() => new Promise<string>((res) => {
+      resolveRevalidate = res;
+    }));
 
     const staleCall = await cache.get('k1', reFetcher, { ttlMs: 1, swrMs: 60_000 });
     expect(staleCall.source).toBe('cache_stale');
@@ -459,8 +451,12 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
     await cache.get('k4', () => Promise.resolve('v4'), { ttlMs: 60_000, swrMs: 0 });
     expect(cache.size).toBeLessThanOrEqual(2);
 
-    // Wait long enough for the in-flight k1 revalidation to resolve.
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Resolve the in-flight revalidation
+    resolveRevalidate('v1-new');
+
+    // Allow promise microtasks to run
+    await Promise.resolve();
+    await Promise.resolve();
 
     // The revalidator was called exactly once (coalescing still held during
     // the eviction pressure) and its return value landed back in the cache.
@@ -478,20 +474,19 @@ describe('SWRCache with bounded LRU eviction (#416)', () => {
   });
 
   it('cleans activeFetches bookkeeping when fetcher rejects and lets the next call refetch', async () => {
-    jest.useRealTimers();
-
     const c = new SWRCache();
-    const failing = jest.fn(
-      () =>
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('upstream-down')), 10),
-        ),
-    );
+    let rejectFetcher!: (reason: Error) => void;
+    const failing = jest.fn(() => new Promise((_, rej) => {
+      rejectFetcher = rej;
+    }));
 
     // Two concurrent gets on the same key: the fetcher must only run once
     // (true coalescing), and BOTH callers reject from the same promise.
     const p1 = c.get('k', failing, { ttlMs: 60_000, swrMs: 0 });
     const p2 = c.get('k', failing, { ttlMs: 60_000, swrMs: 0 });
+
+    rejectFetcher(new Error('upstream-down'));
+
     await expect(p1).rejects.toThrow('upstream-down');
     await expect(p2).rejects.toThrow('upstream-down');
     expect(failing).toHaveBeenCalledTimes(1);
