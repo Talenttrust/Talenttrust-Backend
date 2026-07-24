@@ -189,10 +189,8 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
 
   // Fallback: scan legacy keys that predate the key_selector index
   if (!dbKey) {
-    const db = await (database as any).loadDatabase();
-    dbKey = db.api_keys.find(
-      (k: ApiKey) => !k.key_selector && k.is_active
-    );
+    const legacyKeys = await database.getApiKeysWithoutSelector();
+    dbKey = legacyKeys.find((k: ApiKey) => k.is_active) ?? null;
   }
 
   if (!dbKey) {
