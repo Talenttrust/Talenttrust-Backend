@@ -442,9 +442,7 @@ describe("queueProbe", () => {
   it("returns not ok on timeout", async () => {
     process.env.QUEUE_PROBE_TIMEOUT_MS = "1";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
-      getHealth: jest.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(resolve, 60_000))
-      ),
+      getHealth: jest.fn().mockReturnValue(new Promise(() => {})),
     });
 
     const result = await queueProbe();

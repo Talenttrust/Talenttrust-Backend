@@ -161,6 +161,45 @@ describe('HealthService', () => {
     expect(report.dependencies[0].details).toBe('Dependency check failed');
   });
 
+  it('uses default dependencies and providers when none are supplied', async () => {
+    const service = new HealthService('talenttrust-backend');
+
+    const report = await service.getReport();
+
+    expect(report.service).toBe('talenttrust-backend');
+    expect(report.status).toBeDefined();
+    expect(report.signals.eventLoopLagMs).toBeGreaterThanOrEqual(0);
+    expect(report.signals.heapTotalBytes).toBeGreaterThan(0);
+    expect(report.uptimeSeconds).toBeGreaterThanOrEqual(0);
+  });
+
+  it('handles heapTotal of zero', async () => {
+    const service = new HealthService(
+      'talenttrust-backend',
+      [],
+      createProviders({
+        memoryUsage: () => ({
+          rss: 10,
+          heapTotal: 0,
+          heapUsed: 0,
+          external: 0,
+          arrayBuffers: 0,
+        }),
+      }),
+    );
+
+    const report = await service.getReport();
+
+    expect(report.signals.heapUsedRatio).toBe(0);
+    expect(report.status).toBe('up');
+  });
+
+  it('closes default provider resources', () => {
+    const service = new HealthService('talenttrust-backend', []);
+
+    service.close();
+  });
+
   it('healthReportToHttpStatus returns 200 for up', () => {
     expect(healthReportToHttpStatus('up')).toBe(200);
   });
