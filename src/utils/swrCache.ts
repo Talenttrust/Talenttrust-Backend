@@ -56,12 +56,33 @@ export const DEFAULT_MAX_ENTRIES = 1000;
  * while transparently updating from upstream in the background. Supports coalesced
  * concurrent requests to prevent upstream stampedes.
  *
+ * ### Key Behaviors
+ * - **Fresh hit**: If the cached entry's age is less than `ttlMs`, the cached value is returned immediately without calling the upstream fetcher.
+ * - **Stale hit**: If the cached entry's age is between `ttlMs` and `ttlMs + swrMs`, the stale cached value is returned immediately (with `degraded: true`) and a background revalidation fetch is triggered exactly once.
+ * - **Cache miss**: If no cached entry exists or it has completely expired (age >= `ttlMs + swrMs`), the cache blocks and awaits the upstream fetcher to populate the entry.
+ * - **Request coalescing**: Concurrent cache misses or concurrent stale hits for the same key are coalesced into a single upstream fetch, preventing cache stampedes.
+ * - **Error handling**: Failed background revalidations swallow the rejection to avoid throwing to stale callers, logging a message via `console.error` while the stale cached value is retained. Initial fetch failures or completely expired cache misses propagate their rejections to callers.
+ * - **LRU Eviction**: Bounded via a configurable capacity (`maxEntries`). Insertion-ordered Map tracking ensures the least-recently-used entry is evicted when the cap is exceeded.
+ *
+ * ### Testing with Fake Timers
+ * When unit testing code that uses `SWRCache`, control time deterministically with Jest fake timers:
+ * ```typescript
+ * beforeEach(() => {
+ *   jest.useFakeTimers();
+ * });
+ * afterEach(() => {
+ *   jest.useRealTimers();
+ * });
+ * // To simulate TTL expiration:
+ * jest.advanceTimersByTime(ttlMs + 10);
+ * ```
+ *
  * @example
  * ```typescript
- * const cache = new SWRCache();
+ * const cache = new SWRCache({ maxEntries: 1000 });
  * const result = await cache.get('user:123', fetchUser, { ttlMs: 5000, swrMs: 30000 });
  * if (result.degraded) {
- *   // Data is stale but available immediately
+ *   // Data is stale but available immediately; background refresh has been triggered.
  * }
  * ```
  */

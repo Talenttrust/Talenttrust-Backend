@@ -1,3 +1,16 @@
+/**
+ * @module utils/swrCache.test
+ * @description Deterministic unit tests for the SWRCache utility.
+ *
+ * This test suite verifies the core behavior of the Stale-While-Revalidate (SWR)
+ * in-memory cache layer, including fresh hits, stale hits, cache misses,
+ * concurrent request coalescing, background revalidation error handling, and
+ * bounded LRU eviction policy.
+ *
+ * Jest fake timers are used to control the TTL and SWR expiration windows
+ * deterministically without introducing real-world delays.
+ */
+
 import { SWRCache, CacheOptions, DEFAULT_MAX_ENTRIES } from './swrCache';
 
 describe('SWRCache', () => {
