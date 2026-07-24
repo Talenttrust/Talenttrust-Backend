@@ -330,4 +330,222 @@ describe('ContractsController', () => {
       });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // getContractsCursor
+  // -------------------------------------------------------------------------
+
+  describe('getContractsCursor', () => {
+    it('returns 200 with cursor page when no cursor is provided', async () => {
+      const fakePage = { data: [], nextCursor: null, hasNextPage: false, limit: 20 };
+      mockGetContractsPage.mockResolvedValue(fakePage);
+      mockRequest.query = {};
+
+      await controller.getContractsCursor(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockGetContractsPage).toHaveBeenCalledWith({ limit: 20, cursor: undefined });
+      expect(mockResponse.status).toHaveBeenCalledWith(200);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'success',
+        data: fakePage,
+      });
+    });
+
+    it('returns 200 with cursor page when a valid cursor is provided', async () => {
+      const fakePage = { data: [{ id: 'abc' }], nextCursor: null, hasNextPage: false, limit: 10 };
+      mockGetContractsPage.mockResolvedValue(fakePage);
+
+      const validCursor = Buffer.from(
+        JSON.stringify({ createdAt: '2024-01-01T00:00:00.000Z', id: 'abc-123' }),
+        'utf8',
+      ).toString('base64url');
+
+      mockRequest.query = { limit: '10', cursor: validCursor };
+
+      await controller.getContractsCursor(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockGetContractsPage).toHaveBeenCalledWith({ limit: 10, cursor: validCursor });
+      expect(mockResponse.status).toHaveBeenCalledWith(200);
+    });
+
+    it('returns 400 for a malformed cursor', async () => {
+      mockRequest.query = { cursor: 'not-a-valid-cursor' };
+
+      await controller.getContractsCursor(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'error',
+        message: expect.stringMatching(/invalid pagination cursor/i),
+      });
+    });
+
+    it('calls next() when service throws', async () => {
+      const mockError = new Error('DB Down');
+      mockGetContractsPage.mockRejectedValue(mockError);
+      mockRequest.query = {};
+
+      await controller.getContractsCursor(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockNext).toHaveBeenCalledWith(mockError);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // updateContract
+  // -------------------------------------------------------------------------
+
+  describe('updateContract', () => {
+    it('returns 200 on success', async () => {
+      const updatedContract = { id: 'abc', title: 'Updated', version: 1 };
+      mockRequest.params = { id: 'abc' };
+      mockRequest.body = { version: 0, title: 'Updated' };
+      mockUpdateContract.mockResolvedValue(updatedContract);
+
+      await controller.updateContract(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockUpdateContract).toHaveBeenCalledWith('abc', { version: 0, title: 'Updated' });
+      expect(mockResponse.status).toHaveBeenCalledWith(200);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'success',
+        data: updatedContract,
+        requestId: 'unknown',
+      });
+    });
+
+    it('returns 422 on ContractBoundsError', async () => {
+      mockRequest.params = { id: 'abc' };
+      mockRequest.body = { version: 0, budget: 999_000_000_000_000_000 };
+      mockUpdateContract.mockRejectedValue(
+        new ContractBoundsError('Budget exceeds maximum contract amount'),
+      );
+
+      await controller.updateContract(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockResponse.status).toHaveBeenCalledWith(422);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'error',
+        error: {
+          code: 'contract_bounds_error',
+          message: 'Budget exceeds maximum contract amount',
+          requestId: 'unknown',
+        },
+      });
+      expect(mockNext).not.toHaveBeenCalled();
+    });
+
+    it('delegates non-bounds errors to next()', async () => {
+      const mockError = new Error('Update failed');
+      mockRequest.params = { id: 'abc' };
+      mockUpdateContract.mockRejectedValue(mockError);
+
+      await controller.updateContract(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockNext).toHaveBeenCalledWith(mockError);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // deleteContract
+  // -------------------------------------------------------------------------
+
+  describe('deleteContract', () => {
+    it('returns 200 on success', async () => {
+      mockDeleteContract.mockResolvedValue(undefined);
+      mockRequest.params = { id: 'abc' };
+
+      await controller.deleteContract(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockDeleteContract).toHaveBeenCalledWith('abc');
+      expect(mockResponse.status).toHaveBeenCalledWith(200);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'success',
+        data: { message: 'Contract deleted successfully' },
+        requestId: 'unknown',
+      });
+    });
+
+    it('delegates errors to next()', async () => {
+      const mockError = new Error('Delete failed');
+      mockDeleteContract.mockRejectedValue(mockError);
+      mockRequest.params = { id: 'abc' };
+
+      await controller.deleteContract(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockNext).toHaveBeenCalledWith(mockError);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getContractStats
+  // -------------------------------------------------------------------------
+
+  describe('getContractStats', () => {
+    it('returns 200 with stats', async () => {
+      const stats = { total: 5, totalBudget: 10000, byStatus: { draft: 3, active: 2 } };
+      mockGetContractStats.mockResolvedValue(stats);
+
+      await controller.getContractStats(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockResponse.status).toHaveBeenCalledWith(200);
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        status: 'success',
+        data: stats,
+        requestId: 'unknown',
+      });
+    });
+
+    it('delegates errors to next()', async () => {
+      const mockError = new Error('Stats failed');
+      mockGetContractStats.mockRejectedValue(mockError);
+
+      await controller.getContractStats(
+        mockRequest as Request,
+        mockResponse as Response,
+        mockNext,
+      );
+
+      expect(mockNext).toHaveBeenCalledWith(mockError);
+    });
+  });
 });

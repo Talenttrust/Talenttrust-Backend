@@ -167,6 +167,77 @@ describe('GET /api/v1/contracts', () => {
       .set(auth(adminToken()));
     expect(res.status).toBe(400);
   });
+
+  it('returns 200 with empty data array when no contracts exist', async () => {
+    const res = await request(app)
+      .get('/api/v1/contracts')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: [],
+      meta: expect.objectContaining({
+        total: 0,
+        page: 1,
+        limit: expect.any(Number),
+        totalPages: 0,
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+  });
+
+  it('supports cursor-based pagination with valid cursor', async () => {
+    await createContractAsAdmin();
+    await createContractAsAdmin();
+    await createContractAsAdmin();
+
+    const first = await request(app)
+      .get('/api/v1/contracts?limit=2')
+      .set(auth(adminToken()));
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        data: expect.any(Array),
+        nextCursor: expect.any(String),
+        hasNextPage: true,
+        limit: 2,
+      }),
+    });
+
+    const cursor = first.body.data.nextCursor;
+
+    const second = await request(app)
+      .get(`/api/v1/contracts?limit=2&cursor=${cursor}`)
+      .set(auth(adminToken()));
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        data: expect.any(Array),
+        hasNextPage: expect.any(Boolean),
+      }),
+    });
+  });
+
+  it('returns 200 on success with expected envelope shape for paginated list', async () => {
+    await createContractAsAdmin();
+    const res = await request(app)
+      .get('/api/v1/contracts?page=1&limit=10')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.any(Array),
+      meta: expect.objectContaining({
+        page: 1,
+        limit: 10,
+        total: expect.any(Number),
+        totalPages: expect.any(Number),
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+  });
 });
 
 // ─── POST /api/v1/contracts ───────────────────────────────────────────────────
@@ -228,6 +299,104 @@ describe('POST /api/v1/contracts', () => {
       .send({ ...validPayload, budget: 999_000_000_000_000_000 });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({ code: 'validation_error' });
+  });
+
+  it('returns 400 when clientId is missing', async () => {
+    const { clientId: _c, ...noClient } = validPayload;
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send(noClient);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when clientId is not a valid UUID', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({ ...validPayload, clientId: 'not-a-uuid' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when description is missing', async () => {
+    const { description: _d, ...noDesc } = validPayload;
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send(noDesc);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when description is too short', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({ ...validPayload, description: 'Short' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when title is too short', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({ ...validPayload, title: 'Hi' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when budget is zero', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({ ...validPayload, budget: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when budget is missing', async () => {
+    const { budget: _b, ...noBudget } = validPayload;
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send(noBudget);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when freelancerId is not a valid UUID', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({ ...validPayload, freelancerId: 'not-a-uuid' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when milestone has negative amount', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send({
+        ...validPayload,
+        milestones: [{ title: 'Bad Milestone', description: 'Negative amount', amount: -100 }],
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 201 on success with expected envelope shape', async () => {
+    const res = await request(app)
+      .post('/api/v1/contracts')
+      .set({ ...auth(adminToken()), 'Idempotency-Key': randomUUID() })
+      .send(validPayload);
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        title: validPayload.title,
+        clientId: CLIENT_ID,
+        status: 'draft',
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+    expect(res.body.data).toHaveProperty('id');
+    expect(res.body.data).toHaveProperty('version', 0);
+    expect(res.body.data).toHaveProperty('createdAt');
   });
 
   it('returns 422 for milestone count exceeding maximum limit', async () => {
@@ -364,6 +533,31 @@ describe('GET /api/v1/contracts/:id', () => {
     expect(body).not.toContain(contractId);
     expect(body).not.toContain(CLIENT_ID);
   });
+
+  it('returns 404 for a non-existent id (non-UUID string)', async () => {
+    const res = await request(app)
+      .get('/api/v1/contracts/not-a-valid-uuid')
+      .set(auth(adminToken()));
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatchObject({ code: 'not_found' });
+  });
+
+  it('returns 200 on success with expected response shape', async () => {
+    const res = await request(app)
+      .get(`/api/v1/contracts/${contractId}`)
+      .set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        id: contractId,
+        title: 'Test Contract Title',
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+    expect(res.body.data).toHaveProperty('version');
+    expect(res.body.data).toHaveProperty('createdAt');
+  });
 });
 
 // ─── PATCH /api/v1/contracts/:id ─────────────────────────────────────────────
@@ -454,6 +648,47 @@ describe('PATCH /api/v1/contracts/:id', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({ code: 'validation_error' });
   });
+
+  it('returns 400 for negative version', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/contracts/${contractId}`)
+      .set(auth(adminToken()))
+      .send({ version: -1, title: 'Negative version' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for non-integer version', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/contracts/${contractId}`)
+      .set(auth(adminToken()))
+      .send({ version: 1.5, title: 'Float version' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for budget of zero on update', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/contracts/${contractId}`)
+      .set(auth(adminToken()))
+      .send({ version: contractVersion, budget: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 200 on success and response has expected envelope shape', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/contracts/${contractId}`)
+      .set(auth(adminToken()))
+      .send({ version: contractVersion, title: 'Shape Test Update' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        id: contractId,
+        title: 'Shape Test Update',
+        version: contractVersion + 1,
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+  });
 });
 
 // ─── DELETE /api/v1/contracts/:id ────────────────────────────────────────────
@@ -496,6 +731,27 @@ describe('DELETE /api/v1/contracts/:id', () => {
       .set(auth(adminToken()));
     expect(res.status).toBe(404);
   });
+
+  it('returns 404 for an already-deleted contract on second delete', async () => {
+    const id = await createContractAsAdmin();
+    const first = await request(app).delete(`/api/v1/contracts/${id}`).set(auth(adminToken()));
+    expect(first.status).toBe(200);
+
+    const second = await request(app).delete(`/api/v1/contracts/${id}`).set(auth(adminToken()));
+    expect(second.status).toBe(404);
+    expect(second.body.error).toMatchObject({ code: 'not_found' });
+  });
+
+  it('returns 200 on success and response has expected envelope shape', async () => {
+    const id = await createContractAsAdmin();
+    const res = await request(app).delete(`/api/v1/contracts/${id}`).set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: { message: 'Contract deleted successfully' },
+    });
+    expect(res.body).toHaveProperty('requestId');
+  });
 });
 
 // ─── GET /api/v1/contracts/stats ─────────────────────────────────────────────
@@ -511,6 +767,21 @@ describe('GET /api/v1/contracts/stats', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveProperty('total');
   });
+
+  it('returns expected envelope shape with stats data', async () => {
+    await createContractAsAdmin();
+    const res = await request(app).get('/api/v1/contracts/stats').set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        total: expect.any(Number),
+        totalBudget: expect.any(Number),
+        byStatus: expect.any(Object),
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
+  });
 });
 
 // ─── GET /api/v1/contracts/bounds ────────────────────────────────────────────
@@ -524,6 +795,19 @@ describe('GET /api/v1/contracts/bounds', () => {
   it('returns 200 for admin', async () => {
     const res = await request(app).get('/api/v1/contracts/bounds').set(auth(adminToken()));
     expect(res.status).toBe(200);
+  });
+
+  it('returns expected envelope shape with bounds data', async () => {
+    const res = await request(app).get('/api/v1/contracts/bounds').set(auth(adminToken()));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'success',
+      data: expect.objectContaining({
+        maxMilestonesPerContract: expect.any(Number),
+        maxContractAmountStroops: expect.any(Number),
+      }),
+    });
+    expect(res.body).toHaveProperty('requestId');
   });
 });
 
