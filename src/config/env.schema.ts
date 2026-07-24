@@ -208,6 +208,26 @@ export const envSchema = z.object({
 
   SENDGRID_API_KEY: z.string().optional(),
 }).superRefine((obj, ctx) => {
+  const requireForEmailProvider = (field: keyof typeof obj, message: string): void => {
+    if (!obj[field]) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message });
+    }
+  };
+
+  if (obj.EMAIL_PROVIDER === 'smtp') {
+    requireForEmailProvider('SMTP_HOST', 'SMTP_HOST is required when EMAIL_PROVIDER=smtp');
+    requireForEmailProvider('SMTP_PORT', 'SMTP_PORT is required when EMAIL_PROVIDER=smtp');
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=smtp');
+  } else if (obj.EMAIL_PROVIDER === 'ses') {
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_REGION', 'AWS_REGION is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_SECRET_ACCESS_KEY', 'AWS_SECRET_ACCESS_KEY is required when EMAIL_PROVIDER=ses');
+  } else if (obj.EMAIL_PROVIDER === 'sendgrid') {
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=sendgrid');
+    requireForEmailProvider('SENDGRID_API_KEY', 'SENDGRID_API_KEY is required when EMAIL_PROVIDER=sendgrid');
+  }
+
   if (obj.NODE_ENV === 'production') {
     if (!obj.JWT_SECRET) {
       ctx.addIssue({

@@ -6,9 +6,9 @@ This document describes the pluggable notification transports and retry/persiste
 - `NotificationTransport` is the pluggable interface implemented by providers.
 - `ConsoleTransport` is the default local/dev fallback (default).
 - `WebhookTransport` uses `WebhookService` to sign and retry deliveries to external HTTP endpoints.
-- `SMTPTransport` sends emails via SMTP (requires nodemailer in production).
-- `SESTransport` sends emails via AWS SES (requires @aws-sdk/client-ses in production).
-- `SendGridTransport` sends emails via SendGrid (requires @sendgrid/mail in production).
+- `SMTPTransport` sends emails through the configured SMTP server.
+- `SESTransport` sends emails through the AWS SES API.
+- `SendGridTransport` sends emails through the SendGrid v3 API.
 
 ## Configuration
 Use environment variables to configure email transports:
@@ -32,10 +32,15 @@ Use environment variables to configure email transports:
 
 ## Failure semantics
 - Transport methods return a `NotificationResult` with `success: boolean` and optional `message`.
+- A provider exception produces `{ success: false, message }`, allowing the caller or
+  queue to retry; it is never reported as a successful delivery.
+- Selecting a real provider without its required configuration fails at transport
+  construction. Only `EMAIL_PROVIDER=console` selects the console transport.
 - WebhookTransport reuses `WebhookService` which implements bounded retry and DLQ fallback.
 
 ## Security
-- Email `to` addresses are validated with a strict sanity check and header-injection (CR/LF) is rejected.
+- Email `to` addresses are validated as one RFC-shaped recipient; malformed,
+  multi-recipient, and header-injection (CR/LF) values are rejected before dispatch.
 - Web notifications validate `userId` for basic sanity; authorization (session matching) should be enforced by callers to prevent IDOR.
 - Email addresses are redacted in logs to avoid leaking PII.
 - Secrets and API keys are redacted in logs.
