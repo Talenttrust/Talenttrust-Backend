@@ -3,10 +3,15 @@
  * @description Unit tests for the /metrics bearer token middleware.
  */
 
-import * as crypto from "crypto";
+import crypto from "crypto";
 import express, { Request, Response } from "express";
 import request from "supertest";
 import { metricsAuthMiddleware } from "./metricsAuth";
+
+jest.mock("crypto", () => {
+  const actual = jest.requireActual<typeof import("crypto")>("crypto");
+  return { ...actual, timingSafeEqual: jest.fn(actual.timingSafeEqual) };
+});
 
 function buildApp() {
   const app = express();
@@ -100,7 +105,9 @@ describe("metricsAuthMiddleware", () => {
 
   describe("constant-time comparison security", () => {
     it("calls timingSafeEqual only when buffer lengths match", async () => {
-      const spy = jest.spyOn(crypto, "timingSafeEqual");
+      const timingSafeEqual = crypto.timingSafeEqual as jest.Mock;
+      timingSafeEqual.mockClear();
+
       process.env.METRICS_AUTH_TOKEN = "token12";
 
       // Length mismatch (7 vs 5) — should NOT call timingSafeEqual
@@ -108,18 +115,16 @@ describe("metricsAuthMiddleware", () => {
         .get("/metrics")
         .set("Authorization", "Bearer short");
 
-      expect(spy).not.toHaveBeenCalled();
+      expect(timingSafeEqual).not.toHaveBeenCalled();
 
-      spy.mockClear();
+      timingSafeEqual.mockClear();
 
       // Length match (7 vs 7) — should call timingSafeEqual
       await request(buildApp())
         .get("/metrics")
         .set("Authorization", "Bearer token99");
 
-      expect(spy).toHaveBeenCalledTimes(1);
-
-      spy.mockRestore();
+      expect(timingSafeEqual).toHaveBeenCalledTimes(1);
     });
   });
 });

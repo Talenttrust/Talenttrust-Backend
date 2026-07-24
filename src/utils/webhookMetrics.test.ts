@@ -6,12 +6,16 @@
 import {
   incrementDlqOperation,
   incrementDlqReplay,
+  webhookDlqOperationsTotal,
+  webhookDlqReplaysTotal,
   webhookDlqRegistry,
 } from './webhookMetrics';
 
 describe('webhookMetrics DLQ counters', () => {
   beforeEach(() => {
     webhookDlqRegistry.clear();
+    webhookDlqRegistry.registerMetric(webhookDlqOperationsTotal);
+    webhookDlqRegistry.registerMetric(webhookDlqReplaysTotal);
   });
 
   describe('incrementDlqOperation', () => {
