@@ -12,7 +12,7 @@ jest.mock('../services/notification.service', () => ({
 }));
 
 import { KeyEscrowEvent } from '../types/notification.types';
-import type { EscrowDispatchResult } from './escrow.hooks';
+import type { EscrowChannelResult, EscrowDispatchResult } from './escrow.hooks';
 
 let EscrowHooks: any;
 let notificationService: any;
@@ -140,8 +140,8 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.allSucceeded).toBe(false);
       expect(result.anySucceeded).toBe(true);
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({
         channel: 'email',
@@ -200,8 +200,8 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.allSucceeded).toBe(false);
       expect(result.anySucceeded).toBe(true);
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({ channel: 'email', success: true });
       expect(webResult).toEqual({
@@ -249,8 +249,8 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({
         channel: 'email',
@@ -283,7 +283,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
       expect(emailResult).toEqual({
         channel: 'email',
         success: false,
@@ -301,7 +301,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
         BASE_PAYLOAD,
       );
 
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
       expect(webResult).toEqual({
         channel: 'web',
         success: false,
@@ -330,7 +330,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
       expect(emailResult?.success).toBe(false);
       expect(emailResult?.message).toBe('plain string error');
     });
@@ -343,7 +343,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
         BASE_PAYLOAD,
       );
 
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
       expect(webResult?.success).toBe(false);
       expect(webResult?.message).toBe('503');
     });
