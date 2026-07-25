@@ -18,8 +18,9 @@ import { Router, Request, Response, type RequestHandler } from 'express';
 import { pipeline } from 'stream/promises';
 import { auditService, AuditService } from './service';
 import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
-import type { AuditAction, AuditQuery, AuditSeverity } from './types';
+import type { AuditAction, AuditQuery, AuditSeverity, CreateAuditEntryInput } from './types';
 import { decodeCursor } from './types';
+import { idempotencyMiddleware } from '../middleware/idempotency';
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -156,6 +157,33 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const exportService = options.exportService ?? auditExportService;
   const accessMiddleware = options.accessMiddleware ?? [];
   const exportMiddleware = options.exportMiddleware ?? [];
+
+  /**
+   * POST /api/v1/audit
+   *
+   * Write an audit entry with idempotency support.
+   * Accepts an Idempotency-Key header to prevent duplicate entries.
+   */
+  router.post(
+    '/',
+    idempotencyMiddleware,
+    ...accessMiddleware,
+    (req: Request, res: Response): void => {
+      try {
+        const input = req.body as CreateAuditEntryInput;
+
+        if (!input.action || !input.severity || !input.actor || !input.resource || !input.resourceId) {
+          res.status(400).json({ error: 'Missing required fields: action, severity, actor, resource, resourceId' });
+          return;
+        }
+
+        const entry = service.log(input);
+        res.status(201).json(entry);
+      } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+      }
+    },
+  );
 
   router.get('/', ...accessMiddleware, (req: Request, res: Response): void => {
     const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });

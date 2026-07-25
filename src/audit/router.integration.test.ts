@@ -27,6 +27,8 @@ import { AuditService } from './service';
 import { AuditExportService } from './exportService';
 import { createAuditRouter } from './router';
 import { requireAuth, requireRole } from '../middleware/authorization';
+import { idempotencyMiddleware, clearIdempotencyStore } from '../middleware/idempotency';
+import { InMemoryIdempotencyStore } from '../db/idempotencyStore';
 import type { AuditEntry, CreateAuditEntryInput } from './types';
 import { encodeCursor, decodeCursor, type CursorData } from './types';
 
@@ -1104,5 +1106,123 @@ describe('GET /api/v1/audit — cursor pagination', () => {
     const res = await request(app).get('/api/v1/audit').expect(200);
     expect(res.body.count).toBe(1);
     expect(res.body.entries[0].actor).toBe('alice');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. POST /api/v1/audit — idempotent write endpoint
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('POST /api/v1/audit — idempotent write', () => {
+  let store: AuditStore;
+
+  beforeEach(() => {
+    store = new AuditStore();
+    clearIdempotencyStore();
+  });
+
+  function buildAppWithIdempotency(store: AuditStore) {
+    const service = new AuditService(store);
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v1/audit', createAuditRouter({ service }));
+    return { app, service };
+  }
+
+  it('creates an audit entry on POST without Idempotency-Key', async () => {
+    const { app } = buildAppWithIdempotency(store);
+    const input = makeInput();
+
+    const res = await request(app)
+      .post('/api/v1/audit')
+      .send(input)
+      .expect(201);
+
+    expect(res.body.id).toBeDefined();
+    expect(res.body.action).toBe(input.action);
+    expect(res.body.severity).toBe(input.severity);
+    expect(res.body.actor).toBe(input.actor);
+  });
+
+  it('returns 201 on first write with Idempotency-Key', async () => {
+    const { app } = buildAppWithIdempotency(store);
+    const input = makeInput();
+
+    const res = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-first')
+      .send(input)
+      .expect(201);
+
+    expect(res.body.id).toBeDefined();
+    expect(res.body.action).toBe(input.action);
+  });
+
+  it('returns 200 + replay response on identical retry with same Idempotency-Key', async () => {
+    const { app } = buildAppWithIdempotency(store);
+    const input = makeInput();
+
+    const first = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-replay')
+      .send(input)
+      .expect(201);
+
+    const replay = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-replay')
+      .send(input)
+      .expect(200);
+
+    expect(replay.body.id).toBe(first.body.id);
+    expect(replay.body.action).toBe(first.body.action);
+    expect(replay.body.idempotencyHeader).toBe('replay-detected');
+  });
+
+  it('rejects reused Idempotency-Key with different payload via 409', async () => {
+    const { app } = buildAppWithIdempotency(store);
+
+    await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-conflict')
+      .send(makeInput({ actor: 'alice' }))
+      .expect(201);
+
+    const conflict = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-conflict')
+      .send(makeInput({ actor: 'bob' }))
+      .expect(409);
+
+    expect(conflict.body.error.code).toBe('idempotency_payload_conflict');
+  });
+
+  it('returns 400 when required fields are missing', async () => {
+    const { app } = buildAppWithIdempotency(store);
+
+    const res = await request(app)
+      .post('/api/v1/audit')
+      .send({ action: 'CONTRACT_CREATED' })
+      .expect(400);
+
+    expect(res.body.error).toContain('Missing required fields');
+  });
+
+  it('allows different Idempotency-Keys for independent entries', async () => {
+    const { app } = buildAppWithIdempotency(store);
+
+    const first = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-a')
+      .send(makeInput({ actor: 'alice' }))
+      .expect(201);
+
+    const second = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-b')
+      .send(makeInput({ actor: 'bob' }))
+      .expect(201);
+
+    expect(first.body.id).not.toBe(second.body.id);
   });
 });
