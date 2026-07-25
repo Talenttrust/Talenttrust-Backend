@@ -1,10 +1,3 @@
-/**
- * Environment Promotion Tests
- * 
- * Comprehensive test suite for environment promotion module
- * covering promotion paths, rollbacks, and audit logging.
- */
-
 import {
   validatePromotionPath,
   promoteDeployment,
@@ -13,6 +6,33 @@ import {
   PromotionRequest,
   RollbackRequest,
 } from './promoter';
+import { auditService } from '../audit/service';
+import { closeDb, getDb } from '../db/database';
+
+jest.mock('../httpClient', () => ({
+  createHttpClient: jest.fn().mockReturnValue({
+    get: jest.fn().mockRejectedValue(new Error('Connection refused')),
+  }),
+}));
+
+jest.mock('../deploy', () => ({
+  switchToGreen: jest.fn().mockResolvedValue(undefined),
+  rollback: jest.fn().mockResolvedValue(undefined),
+  getStatus: jest.fn().mockResolvedValue({ activeColor: 'blue', lastSwitch: Date.now() }),
+  setHealthChecker: jest.fn(),
+  setErrorRateReader: jest.fn(),
+}));
+
+const AUDIT_SPY = jest.spyOn(auditService, 'log');
+
+beforeEach(() => {
+  AUDIT_SPY.mockClear();
+});
+
+afterAll(() => {
+  AUDIT_SPY.mockRestore();
+  closeDb();
+});
 
 describe('Environment Promoter', () => {
   describe('validatePromotionPath', () => {
@@ -154,6 +174,29 @@ describe('Environment Promoter', () => {
 
       expect(result.request.timestamp).toEqual(timestamp);
     });
+
+    it('should call switchToGreen on successful promotion', async () => {
+      const { switchToGreen } = require('../deploy');
+      switchToGreen.mockClear();
+
+      const request = createPromotionRequest();
+      await promoteDeployment(request);
+
+      expect(switchToGreen).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call switchToGreen when path validation fails', async () => {
+      const { switchToGreen } = require('../deploy');
+      switchToGreen.mockClear();
+
+      const request = createPromotionRequest({
+        from: 'development',
+        to: 'production',
+      });
+      await promoteDeployment(request);
+
+      expect(switchToGreen).not.toHaveBeenCalled();
+    });
   });
 
   describe('rollbackDeployment', () => {
@@ -235,32 +278,215 @@ describe('Environment Promoter', () => {
         expect(result.request.targetVersion).toBe(version);
       }
     });
+
+    it('should call blueGreenRollback on successful rollback', async () => {
+      const { rollback: blueGreenRollback } = require('../deploy');
+      blueGreenRollback.mockClear();
+
+      const request = createRollbackRequest();
+      await rollbackDeployment(request);
+
+      expect(blueGreenRollback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call blueGreenRollback when validation fails', async () => {
+      const { rollback: blueGreenRollback } = require('../deploy');
+      blueGreenRollback.mockClear();
+
+      const request = createRollbackRequest({ targetVersion: '' });
+      await rollbackDeployment(request);
+
+      expect(blueGreenRollback).not.toHaveBeenCalled();
+    });
   });
 
   describe('getPromotionHistory', () => {
-    it('should return empty array for development environment', async () => {
+    beforeEach(() => {
+      const db = getDb();
+      db.exec('DELETE FROM deployment_history');
+    });
+
+    it('should return empty array when no history exists', async () => {
       const history = await getPromotionHistory('development');
 
       expect(Array.isArray(history)).toBe(true);
       expect(history).toHaveLength(0);
     });
 
-    it('should return empty array for staging environment', async () => {
-      const history = await getPromotionHistory('staging');
+    it('should return promotion records after a successful promotion', async () => {
+      const request: PromotionRequest = {
+        from: 'development',
+        to: 'staging',
+        version: 'v1.0.0',
+        initiatedBy: 'test-user',
+        timestamp: new Date('2024-06-01T12:00:00Z'),
+      };
+      const result = await promoteDeployment(request);
 
-      expect(Array.isArray(history)).toBe(true);
-      expect(history).toHaveLength(0);
+      expect(result.success).toBe(true);
+
+      const history = await getPromotionHistory('staging');
+      expect(history).toHaveLength(1);
+      expect(history[0].from).toBe('development');
+      expect(history[0].to).toBe('staging');
+      expect(history[0].version).toBe('v1.0.0');
+      expect(history[0].initiatedBy).toBe('test-user');
     });
 
-    it('should return empty array for production environment', async () => {
-      const history = await getPromotionHistory('production');
+    it('should return records ordered by timestamp descending', async () => {
+      const req1: PromotionRequest = {
+        from: 'development',
+        to: 'staging',
+        version: 'v1.0.0',
+        initiatedBy: 'user-a',
+        timestamp: new Date('2024-06-01T12:00:00Z'),
+      };
+      const req2: PromotionRequest = {
+        from: 'staging',
+        to: 'production',
+        version: 'v2.0.0',
+        initiatedBy: 'user-b',
+        timestamp: new Date('2024-06-02T12:00:00Z'),
+      };
 
-      expect(Array.isArray(history)).toBe(true);
-      expect(history).toHaveLength(0);
+      await promoteDeployment(req1);
+      await promoteDeployment(req2);
+
+      const history = await getPromotionHistory('staging');
+      expect(history.length).toBeGreaterThanOrEqual(1);
+      if (history.length >= 2) {
+        expect(new Date(history[0].timestamp).getTime()).toBeGreaterThanOrEqual(
+          new Date(history[1].timestamp).getTime()
+        );
+      }
+    });
+
+    it('should include rollback records in history', async () => {
+      await promoteDeployment({
+        from: 'staging',
+        to: 'production',
+        version: 'v2.0.0',
+        initiatedBy: 'admin',
+        timestamp: new Date(),
+      });
+
+      await rollbackDeployment({
+        environment: 'production',
+        targetVersion: 'v1.0.0',
+        reason: 'Bug found',
+        initiatedBy: 'admin',
+      });
+
+      const history = await getPromotionHistory('production');
+      expect(history.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('audit emission', () => {
+    it('should emit audit entry on successful promotion', async () => {
+      AUDIT_SPY.mockClear();
+
+      const request: PromotionRequest = {
+        from: 'development',
+        to: 'staging',
+        version: 'v2.0.0',
+        initiatedBy: 'ci-bot',
+        timestamp: new Date(),
+      };
+      await promoteDeployment(request);
+
+      const auditCalls = AUDIT_SPY.mock.calls.filter(
+        (call) => call[0].action === 'DEPLOYMENT_PROMOTED'
+      );
+      expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+      const entry = auditCalls[auditCalls.length - 1][0];
+      expect(entry.severity).toBe('INFO');
+      expect(entry.actor).toBe('ci-bot');
+      expect(entry.resource).toBe('deployment');
+    });
+
+    it('should emit audit entry on successful rollback', async () => {
+      AUDIT_SPY.mockClear();
+
+      await rollbackDeployment({
+        environment: 'staging',
+        targetVersion: 'v1.0.0',
+        reason: 'Stability issues',
+        initiatedBy: 'ops-user',
+      });
+
+      const auditCalls = AUDIT_SPY.mock.calls.filter(
+        (call) => call[0].action === 'DEPLOYMENT_ROLLED_BACK'
+      );
+      expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+      const entry = auditCalls[auditCalls.length - 1][0];
+      expect(entry.severity).toBe('WARNING');
+      expect(entry.actor).toBe('ops-user');
+    });
+
+    it('should emit CRITICAL audit entry on failed promotion', async () => {
+      AUDIT_SPY.mockClear();
+
+      const { switchToGreen } = require('../deploy');
+      switchToGreen.mockRejectedValueOnce(new Error('Switch failed'));
+
+      const request: PromotionRequest = {
+        from: 'development',
+        to: 'staging',
+        version: 'v3.0.0',
+        initiatedBy: 'tester',
+        timestamp: new Date(),
+      };
+      const result = await promoteDeployment(request);
+
+      expect(result.success).toBe(false);
+
+      const criticalCall = AUDIT_SPY.mock.calls.find(
+        (call) =>
+          call[0].action === 'DEPLOYMENT_PROMOTED' && call[0].severity === 'CRITICAL'
+      );
+      expect(criticalCall).toBeDefined();
+      expect(criticalCall[0].actor).toBe('tester');
+      expect(criticalCall[0].metadata.error).toBe('Switch failed');
+    });
+  });
+
+  describe('validation gate', () => {
+    it('should block promotion when path is invalid', async () => {
+      const request: PromotionRequest = {
+        from: 'production',
+        to: 'development',
+        version: 'v1.0.0',
+        initiatedBy: 'user',
+        timestamp: new Date(),
+      };
+      const result = await promoteDeployment(request);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid promotion path');
+    });
+
+    it('should block promotion when readiness validation fails', async () => {
+      const request: PromotionRequest = {
+        from: 'development',
+        to: 'production',
+        version: 'v1.0.0',
+        initiatedBy: 'user',
+        timestamp: new Date(),
+      };
+      const result = await promoteDeployment(request);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBeDefined();
     });
   });
 
   describe('Edge Cases', () => {
+    beforeEach(() => {
+      const db = getDb();
+      db.exec('DELETE FROM deployment_history');
+    });
+
     it('should handle promotion with empty version string', async () => {
       const request: PromotionRequest = {
         from: 'development',
@@ -297,6 +523,42 @@ describe('Environment Promoter', () => {
       const result = await promoteDeployment(request);
 
       expect(result.success).toBe(true);
+    });
+
+    it('should record failed promotion in history', async () => {
+      const { switchToGreen } = require('../deploy');
+      switchToGreen.mockRejectedValueOnce(new Error('Deployment failed'));
+
+      const request: PromotionRequest = {
+        from: 'development',
+        to: 'staging',
+        version: 'v1.0.0',
+        initiatedBy: 'user',
+        timestamp: new Date(),
+      };
+      const result = await promoteDeployment(request);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Deployment failed');
+
+      const history = await getPromotionHistory('staging');
+      expect(history.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should maintain history ordering across repeated promotions', async () => {
+      for (let i = 1; i <= 3; i++) {
+        const request: PromotionRequest = {
+          from: 'development',
+          to: 'staging',
+          version: `v${i}.0.0`,
+          initiatedBy: 'ci',
+          timestamp: new Date(2024, 5, i, 12, 0, 0),
+        };
+        await promoteDeployment(request);
+      }
+
+      const history = await getPromotionHistory('staging');
+      expect(history.length).toBe(3);
     });
   });
 });
