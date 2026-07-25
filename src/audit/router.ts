@@ -19,6 +19,7 @@ import { pipeline } from 'stream/promises';
 import { auditService, AuditService } from './service';
 import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
 import type { AuditAction, AuditQuery, AuditSeverity } from './types';
+import { decodeCursor } from './types';
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -86,7 +87,7 @@ function parseAuditQuery(
   options: { defaultLimit?: number; maxLimit: number },
 ): { query: AuditQuery; limit?: number; offset: number } {
   const {
-    action, severity, actor, resource, resourceId,
+    action, severity, actor, resource, resourceId, cursor,
   } = req.query as Record<string, string | undefined>;
 
   if (action && !VALID_ACTIONS.has(action as AuditAction)) {
@@ -99,6 +100,17 @@ function parseAuditQuery(
 
   const limit = parseLimit(req.query['limit'] as string | undefined, options.maxLimit, options.defaultLimit);
   const offset = parseOffset(req.query['offset'] as string | undefined);
+  const from = parseOptionalIsoDate(req.query['from'] as string | undefined, 'from');
+  const to = parseOptionalIsoDate(req.query['to'] as string | undefined, 'to');
+
+  // Validate cursor format if provided
+  if (cursor) {
+    try {
+      decodeCursor(cursor);
+    } catch (_error) {
+      throw new Error('Invalid cursor format');
+    }
+  }
 
   return {
     query: {
@@ -107,18 +119,35 @@ function parseAuditQuery(
       ...(actor && { actor }),
       ...(resource && { resource }),
       ...(resourceId && { resourceId }),
-      ...(parseOptionalIsoDate(req.query['from'] as string | undefined, 'from') && {
-        from: parseOptionalIsoDate(req.query['from'] as string | undefined, 'from'),
-      }),
-      ...(parseOptionalIsoDate(req.query['to'] as string | undefined, 'to') && {
-        to: parseOptionalIsoDate(req.query['to'] as string | undefined, 'to'),
-      }),
+      ...(from && { from }),
+      ...(to && { to }),
       ...(limit !== undefined && { limit }),
       offset,
+      ...(cursor && { cursor }),
     },
     limit,
     offset,
   };
+}
+
+/**
+ * Runs `parseAuditQuery` and, on failure, writes the shared 400 validation
+ * response directly instead of throwing. Used by every handler below that
+ * accepts query filters, so the "parse, then reject with a 400 on the same
+ * shape of error" preamble lives in one place instead of being repeated
+ * per-route.
+ */
+function parseAuditQueryOrRespond(
+  req: Request,
+  res: Response,
+  options: { defaultLimit?: number; maxLimit: number },
+): { query: AuditQuery; limit?: number; offset: number } | undefined {
+  try {
+    return parseAuditQuery(req, options);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return undefined;
+  }
 }
 
 export function createAuditRouter(options: AuditRouterOptions = {}): Router {
@@ -129,12 +158,28 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const exportMiddleware = options.exportMiddleware ?? [];
 
   router.get('/', ...accessMiddleware, (req: Request, res: Response): void => {
-    try {
-      const { query, limit = 100, offset } = parseAuditQuery(req, { defaultLimit: 100, maxLimit: 1000 });
+    const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });
+    if (!parsed) {
+      return;
+    }
+
+    const { query } = parsed;
+    
+    // Use cursor-based pagination if cursor is provided, otherwise use legacy offset
+    if (query.cursor) {
+      const result = service.queryWithCursor(query);
+      res.json({ 
+        entries: result.entries, 
+        count: result.count, 
+        limit: result.limit,
+        nextCursor: result.nextCursor,
+      });
+    } else {
+      // Legacy offset-based pagination for backward compatibility
+      const limit = query.limit ?? 50;
+      const offset = query.offset ?? 0;
       const entries = service.query(query);
       res.json({ entries, count: entries.length, limit, offset });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
     }
   });
 
@@ -143,15 +188,22 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
  * Streams a file-backed NDJSON export for compliance downloads.
  */
   router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response): Promise<void> => {
+    const parsed = parseAuditQueryOrRespond(req, res, { maxLimit: 50_000 });
+    if (!parsed) {
+      return;
+    }
+    const { query } = parsed;
+
     let exportResult:
       | Awaited<ReturnType<AuditExportService['createNdjsonExport']>>
       | undefined;
 
     try {
       const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
-      const { query } = parseAuditQuery(req, { maxLimit: 50_000 });
 
-      // Extract only the filter fields — limit/offset are not meaningful for a full export.
+      // Extract the filter fields. Offset is not meaningful for an export, but an
+      // explicit limit caps how many records are written so callers can request a
+      // bounded export (e.g. a preview) rather than the entire log.
       const filters: AuditExportFilters = {
         ...(query.action && { action: query.action }),
         ...(query.severity && { severity: query.severity }),
@@ -160,6 +212,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
         ...(query.resourceId && { resourceId: query.resourceId }),
         ...(query.from && { from: query.from }),
         ...(query.to && { to: query.to }),
+        ...(query.limit !== undefined && { limit: query.limit }),
       };
 
       exportResult = await exportService.createNdjsonExport(filters);

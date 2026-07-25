@@ -135,6 +135,24 @@ describe("AuthService — password hashing with scrypt", () => {
     const login2 = await authService.login("USER@TEST.COM", "Pass123!");
     expect(login2.accessToken).toBeDefined();
   });
+
+  it("trims surrounding whitespace from emails on register and login", async () => {
+    const result = await authService.register("  user@test.com  ", "Pass123!", "testuser");
+    const decoded = jwt.verify(result.accessToken, TEST_JWT_SECRET) as Record<string, unknown>;
+
+    expect(decoded.email).toBe("user@test.com");
+
+    const login = await authService.login("  user@test.com  ", "Pass123!");
+    expect(login.accessToken).toBeDefined();
+  });
+
+  it("rejects registration when a case-and-whitespace variant of an existing email is used", async () => {
+    await authService.register("user@test.com", "Pass123!", "testuser");
+
+    await expect(
+      authService.register("  USER@Test.com  ", "DifferentPass!", "anotheruser")
+    ).rejects.toThrow("An account with that email already exists.");
+  });
 });
 
 describe("AuthService — anti-enumeration (uniform error contract)", () => {

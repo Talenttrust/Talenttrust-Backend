@@ -1,323 +1,478 @@
 /**
- * @module rateLimit
+ * rateLimit.ts — outbound webhook delivery pacing via a token-bucket limiter.
  *
- * Per-provider token-bucket rate limiter for outbound webhook deliveries.
- *
- * ## Algorithm
- * Each provider gets its own token bucket.  Tokens refill continuously at
- * `refillRatePerSec` tokens/second up to `capacity`.  When a caller requests
- * a token and the bucket is empty the call is queued and resolved as soon as
- * enough tokens have refilled — deliveries are **paced/queued, never dropped**.
- *
- * ## State
- * Buckets are held in the shared in-process `RateLimitStore`. In a blue/green
- * or multi-replica deployment each process maintains its own independent bucket
- * state unless the store interface is backed by Redis or another shared
- * implementation.
- *
- * ## Configuration (environment variables)
- * | Variable                        | Default | Description                              |
- * |---------------------------------|---------|------------------------------------------|
- * | `WEBHOOK_BUCKET_CAPACITY`       | `10`    | Max tokens per provider bucket           |
- * | `WEBHOOK_REFILL_RATE_PER_SEC`   | `2`     | Tokens added per second per provider     |
- * | `RATE_LIMIT_STORE`              | `memory`| Store type: 'memory' or 'redis'          |
- * | `REDIS_HOST`                    | None    | Redis server hostname                    |
- * | `REDIS_PORT`                    | `6379`  | Redis server port                        |
- * | `REDIS_PASSWORD`                | None    | Redis server password                    |
- *
- * Both values are validated at construction time; the process will throw a
- * descriptive error on invalid configuration rather than silently misbehaving.
- *
- * ## Security
- * Provider secrets are **never** passed to or stored by this module.
- * Only opaque provider IDs appear in log output.
+ * Provides single-node (in-process Map) or multi-replica (Redis-backed) pacing for outbound webhooks.
  */
 
-import Redis from 'ioredis';
-import { recordThrottled } from './webhookMetrics';
-import { rateLimitConfig } from './config/rateLimit';
-import {
-  loadWebhookTokenBucketConfig,
-  rateLimitStore,
-  type WebhookTokenBucketConfig,
-} from './config/rateLimit';
-import type { RateLimitStoreInterface, TokenBucketEntry } from './lib/rateLimitStore';
-
-// ---------------------------------------------------------------------------
-// Configuration helpers
-// ---------------------------------------------------------------------------
-
-export type RateLimiterConfig = WebhookTokenBucketConfig;
-export const loadRateLimiterConfig = loadWebhookTokenBucketConfig;
+import { recordQueueOverflow, recordThrottled } from './webhookMetrics';
+import type { RateLimitStore, TokenBucketEntry } from './lib/rateLimitStore';
+import { loadWebhookTokenBucketConfig } from './config/rateLimit';
 
 /**
- * Per-provider token-bucket rate limiter.
+ * Thrown by {@link TokenBucketLimiter.acquireToken} when the per-provider
+ * waiter queue has reached its configured maximum depth. Callers should
+ * catch this error and route the delivery to the DLQ rather than retrying.
+ */
+export class RateLimitQueueFullError extends Error {
+  public readonly code: string;
+  constructor(public readonly providerId: string, maxQueueDepth: number) {
+    super(
+      `Rate-limit queue full for provider "${providerId}": ` +
+        `max depth ${maxQueueDepth} reached. Route to DLQ.`,
+    );
+    this.name = 'RateLimitQueueFullError';
+    this.code = 'RATE_LIMIT_QUEUE_FULL';
+  }
+}
+
+/** Parsed token-bucket configuration for the outbound webhook limiter. */
+export interface RateLimiterConfig {
+  /** Maximum burst capacity; the bucket never holds more than this many tokens. */
+  capacity: number;
+  /** Steady-state token replenishment rate, in tokens per second. */
+  refillRatePerSec: number;
+  /**
+   * Hard cap on the number of pending waiters queued per provider.
+   * When the queue reaches this depth, new acquisitions throw
+   * {@link RateLimitQueueFullError} so the caller can route the
+   * delivery to the DLQ instead of accumulating unbounded memory.
+   */
+  maxQueueDepth: number;
+}
+
+/**
+ * Derives a safe, hashed identifier for provider IDs to avoid storing sensitive
+ * provider secrets or hostnames in store keys or log entries.
+ */
+export function redactId(providerId: string): string {
+  return RateLimitStore.hashKey(providerId);
+}
+
+/**
+ * BucketStore — Abstract storage contract for token-bucket rate limiters.
  *
- * Instantiate once at application startup (or use the module-level singleton
- * {@link defaultLimiter}) and share the instance across all delivery workers.
- *
- * @example
- * ```ts
- * const limiter = new TokenBucketLimiter();
- * await limiter.acquireToken('provider-acme');
- * // safe to send the webhook now
- * ```
+ * Allows token replenishment and consumption to be backed by in-process memory
+ * or a distributed Redis store for cluster-wide enforcement.
+ */
+export interface BucketStore {
+  /**
+   * Retrieve current available token count for a provider.
+   * @param providerId - Raw or hashed provider identifier
+   * @returns Remaining token count or undefined if bucket does not exist
+   */
+  getTokenCount(providerId: string): Promise<number | undefined> | number | undefined;
+
+  /**
+   * Atomically refill and consume 1 token for `providerId` if available.
+   *
+   * Refills accrued tokens up to `capacity` based on elapsed time since last refill,
+   * then decrements 1 token if `tokens >= 1`.
+   *
+   * @param providerId - Raw or hashed provider identifier
+   * @param capacity - Maximum capacity of the token bucket
+   * @param refillRatePerSec - Replenishment rate in tokens per second
+   * @returns `true` if a token was consumed; `false` if insufficient tokens exist.
+   */
+  consumeToken(
+    providerId: string,
+    capacity: number,
+    refillRatePerSec: number,
+  ): Promise<boolean> | boolean;
+
+  /**
+   * Total number of active token buckets tracked by this store.
+   */
+  getSize(): Promise<number> | number;
+
+  /**
+   * Clean up resources and close connections on shutdown.
+   */
+  destroy(): Promise<void> | void;
+}
+
+/**
+ * In-process Map-backed token-bucket store.
+ * Default store engine when Redis is not configured.
+ */
+export class InMemoryBucketStore implements BucketStore {
+  private readonly rateLimitStore: RateLimitStore;
+
+  constructor(rateLimitStore?: RateLimitStore) {
+    this.rateLimitStore = rateLimitStore ?? new RateLimitStore({ sweepIntervalMs: 0 });
+  }
+
+  get underlyingStore(): RateLimitStore {
+    return this.rateLimitStore;
+  }
+
+  getTokenCount(providerId: string): number | undefined {
+    const bucket = this.rateLimitStore.getTokenBucket(providerId);
+    if (!bucket) return undefined;
+    return bucket.tokens;
+  }
+
+  consumeToken(providerId: string, capacity: number, refillRatePerSec: number): boolean {
+    let bucket = this.rateLimitStore.getTokenBucket(providerId);
+    const now = Date.now();
+    if (!bucket) {
+      bucket = { tokens: capacity, lastRefillMs: now, queue: [] };
+    } else {
+      const elapsedMs = now - bucket.lastRefillMs;
+      if (elapsedMs > 0) {
+        const refilled = (elapsedMs / 1000) * refillRatePerSec;
+        bucket.tokens = Math.min(capacity, bucket.tokens + refilled);
+        bucket.lastRefillMs = now;
+      }
+    }
+
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      this.rateLimitStore.setTokenBucket(providerId, bucket);
+      return true;
+    }
+
+    this.rateLimitStore.setTokenBucket(providerId, bucket);
+    return false;
+  }
+
+  getSize(): number {
+    return this.rateLimitStore.tokenBucketSize;
+  }
+
+  destroy(): void {
+    this.rateLimitStore.destroy();
+  }
+}
+
+/** Lua script for atomic token refill and consumption in Redis */
+const CONSUME_LUA_SCRIPT = `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refillRate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(bucket[1])
+local lastRefill = tonumber(bucket[2])
+
+if not tokens or not lastRefill then
+  tokens = capacity
+  lastRefill = now
+else
+  local elapsedMs = now - lastRefill
+  if elapsedMs > 0 then
+    local refilled = (elapsedMs / 1000.0) * refillRate
+    tokens = math.min(capacity, tokens + refilled)
+    lastRefill = now
+  end
+end
+
+local consumed = 0
+if tokens >= requested then
+  tokens = tokens - requested
+  consumed = 1
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'last_refill', lastRefill)
+local ttl = math.max(60, math.ceil((capacity / refillRate) * 2))
+redis.call('EXPIRE', key, ttl)
+
+return { consumed, tokens }
+`;
+
+/** Options for configuring a RedisBucketStore */
+export interface RedisBucketStoreOptions {
+  redisUrl?: string;
+  redisClient?: any;
+  keyPrefix?: string;
+}
+
+/**
+ * Distributed Redis-backed token bucket store.
+ * Performs atomic token consumption via Lua scripting across multi-replica nodes.
+ * Gracefully falls back to an in-process memory store if Redis is unavailable or fails.
+ */
+export class RedisBucketStore implements BucketStore {
+  private readonly redis: any;
+  private readonly keyPrefix: string;
+  private readonly fallbackStore: InMemoryBucketStore;
+  private isConnected = true;
+
+  constructor(options: RedisBucketStoreOptions = {}) {
+    this.keyPrefix = options.keyPrefix ?? 'rate_limit:bucket:';
+    this.fallbackStore = new InMemoryBucketStore();
+
+    if (options.redisClient) {
+      this.redis = options.redisClient;
+    } else if (options.redisUrl) {
+      this.redis = new Redis(options.redisUrl);
+    } else {
+      this.redis = new Redis();
+    }
+
+    if (typeof this.redis.on === 'function') {
+      this.redis.on('error', (err: Error) => {
+        console.warn(`[rateLimit] Redis store error, using in-memory fallback: ${err.message}`);
+        this.isConnected = false;
+      });
+      this.redis.on('connect', () => {
+        this.isConnected = true;
+      });
+    }
+  }
+
+  private getKey(providerId: string): string {
+    return `${this.keyPrefix}${redactId(providerId)}`;
+  }
+
+  async getTokenCount(providerId: string): Promise<number | undefined> {
+    if (!this.isConnected) {
+      return this.fallbackStore.getTokenCount(providerId);
+    }
+    try {
+      const key = this.getKey(providerId);
+      const res = await this.redis.hmget(key, 'tokens', 'last_refill');
+      if (!res || !res[0]) return undefined;
+      return parseFloat(res[0]);
+    } catch (err: any) {
+      console.warn(`[rateLimit] Redis getTokenCount failed, falling back to memory: ${err.message}`);
+      return this.fallbackStore.getTokenCount(providerId);
+    }
+  }
+
+  async consumeToken(
+    providerId: string,
+    capacity: number,
+    refillRatePerSec: number,
+  ): Promise<boolean> {
+    if (!this.isConnected) {
+      return this.fallbackStore.consumeToken(providerId, capacity, refillRatePerSec);
+    }
+    try {
+      const key = this.getKey(providerId);
+      const now = Date.now();
+
+      let result: any;
+      if (typeof this.redis.eval === 'function') {
+        result = await this.redis.eval(
+          CONSUME_LUA_SCRIPT,
+          1,
+          key,
+          capacity.toString(),
+          refillRatePerSec.toString(),
+          now.toString(),
+          '1',
+        );
+      } else {
+        return this.fallbackStore.consumeToken(providerId, capacity, refillRatePerSec);
+      }
+
+      const consumed = Array.isArray(result) ? Number(result[0]) : Number(result);
+      return consumed === 1;
+    } catch (err: any) {
+      console.warn(`[rateLimit] Redis consumeToken failed, falling back to memory: ${err.message}`);
+      return this.fallbackStore.consumeToken(providerId, capacity, refillRatePerSec);
+    }
+  }
+
+  async getSize(): Promise<number> {
+    if (!this.isConnected) {
+      return this.fallbackStore.getSize();
+    }
+    try {
+      const keys = await this.redis.keys(`${this.keyPrefix}*`);
+      return keys.length;
+    } catch {
+      return this.fallbackStore.getSize();
+    }
+  }
+
+  async destroy(): Promise<void> {
+    this.fallbackStore.destroy();
+    if (this.redis && typeof this.redis.quit === 'function') {
+      try {
+        await this.redis.quit();
+      } catch {
+        // Ignore disconnect errors
+      }
+    }
+  }
+}
+
+/**
+ * Creates a BucketStore based on application configuration.
+ * Selected via `RATE_LIMIT_STORE_TYPE` ('memory' | 'redis') in process.env.
+ */
+export function createBucketStore(
+  env: NodeJS.ProcessEnv = process.env,
+  customRedisClient?: any,
+): BucketStore {
+  const storeType = env.RATE_LIMIT_STORE_TYPE ?? (env.REDIS_URL ? 'redis' : 'memory');
+
+  if (storeType === 'redis' || customRedisClient) {
+    return new RedisBucketStore({
+      redisUrl: env.REDIS_URL,
+      redisClient: customRedisClient,
+      keyPrefix: env.REDIS_KEY_PREFIX,
+    });
+  }
+
+  return new InMemoryBucketStore();
+}
+
+/**
+ * Reads token-bucket defaults from the centralized rate-limit configuration.
+ */
+export function loadRateLimiterConfig(env: NodeJS.ProcessEnv = process.env): RateLimiterConfig {
+  const { capacity, refillRatePerSec, maxQueueDepth } = loadWebhookTokenBucketConfig(env);
+  return { capacity, refillRatePerSec, maxQueueDepth };
+}
+
+/**
+ * Per-provider token-bucket limiter backed by a {@link BucketStore}.
  */
 export class TokenBucketLimiter {
   private readonly capacity: number;
   private readonly refillRatePerSec: number;
-  private readonly store: RateLimitStoreInterface;
-  private samplingIntervalId: ReturnType<typeof setInterval> | null = null;
+  private readonly maxQueueDepth: number;
+  private readonly store: RateLimitStore;
+  /** Active drain timers keyed by provider id. */
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  /**
-   * @param config - Parsed configuration.  Defaults to
-   *   {@link loadRateLimiterConfig} (reads env vars) when omitted.
-   * @param store - Shared rate-limit store. Defaults to the process-wide store
-   *   from `src/config/rateLimit.ts`.
-   */
-  constructor(config?: RateLimiterConfig, store: RateLimitStoreInterface = rateLimitStore) {
-    const resolved = config ?? loadRateLimiterConfig();
-    this.capacity = resolved.capacity;
-    this.refillRatePerSec = resolved.refillRatePerSec;
+  constructor(config: RateLimiterConfig, store?: BucketStore | RateLimitStore) {
+    this.capacity = config.capacity;
+    this.refillRatePerSec = config.refillRatePerSec;
+    this.maxQueueDepth = config.maxQueueDepth;
     this.store = store;
   }
 
-  // -------------------------------------------------------------------------
-  // Public API
-  // -------------------------------------------------------------------------
-
   /**
-   * Acquire one token for the given provider.
-   *
-   * Resolves immediately when a token is available.  If the bucket is empty
-   * the returned promise is queued and resolves as soon as the next refill
-   * produces a token — the delivery is **paced, not dropped**.
-   *
-   * @param providerId - Opaque provider identifier.  Must NOT contain secrets.
-   * @returns A promise that resolves when the caller may proceed with delivery.
+   * Acquire a single token for `providerId`, resolving immediately when one is
+   * available or once one refills. Enqueued waiters resolve in FIFO order.
    */
-  public async acquireToken(providerId: string): Promise<void> {
-    const bucket = this.getOrCreateBucket(providerId);
+  acquireToken(providerId: string): Promise<void> {
+    const queue = this.getOrCreateQueue(providerId);
 
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1;
-      this.store.setTokenBucket(providerId, bucket);
-      return;
+    if (queue.length === 0) {
+      const consumedResult = this.store.consumeToken(
+        providerId,
+        this.capacity,
+        this.refillRatePerSec,
+      );
+
+      if (consumedResult === true) {
+        this.syncLegacyStoreQueue(providerId, queue);
+        return Promise.resolve();
+      }
+
+      if (consumedResult instanceof Promise) {
+        let resolveWaiter!: () => void;
+        const waiterPromise = new Promise<void>((res) => {
+          resolveWaiter = res;
+        });
+
+        queue.push(resolveWaiter);
+        this.syncLegacyStoreQueue(providerId, queue);
+
+        consumedResult
+          .then((consumed) => {
+            if (consumed) {
+              const idx = queue.indexOf(resolveWaiter);
+              if (idx !== -1) queue.splice(idx, 1);
+              this.syncLegacyStoreQueue(providerId, queue);
+              resolveWaiter();
+            } else {
+              recordThrottled(providerId);
+              this.scheduleDrain(providerId);
+            }
+          })
+          .catch(() => {
+            recordThrottled(providerId);
+            this.scheduleDrain(providerId);
+          });
+
+        return waiterPromise;
+      }
     }
 
-    // Bucket is empty — queue the caller and record the throttle event.
-    recordThrottled(providerId);
-    console.log(
-      `[rateLimit] Provider "${redactId(providerId)}" throttled — queuing delivery.`,
-    );
+    if (bucket.queue.length >= this.maxQueueDepth) {
+      recordQueueOverflow();
+      return Promise.reject(
+        new RateLimitQueueFullError(providerId, this.maxQueueDepth),
+      );
+    }
 
     return new Promise<void>((resolve) => {
-      bucket.queue.push(resolve);
-      this.store.setTokenBucket(providerId, bucket);
-      this.scheduleRefill(providerId);
+      queue.push(resolve);
+      this.syncLegacyStoreQueue(providerId, queue);
+      recordThrottled(providerId);
+      this.scheduleDrain(providerId);
     });
   }
 
-  /**
-   * Return the current token count for a provider without consuming a token.
-   * Useful for observability and testing.
-   *
-   * @param providerId - Opaque provider identifier.
-   */
-  public getTokenCount(providerId: string): number | Promise<number> {
-    const bucket = this.getOrCreateBucket(providerId);
-    this.refillBucket(providerId);
-    return bucket.tokens;
+  /** Number of callers currently queued in this process for `providerId`. */
+  getQueueDepth(providerId: string): number {
+    return this.queues.get(providerId)?.length ?? 0;
   }
 
-  /**
-   * Return the number of queued (waiting) deliveries for a provider.
-   *
-   * @param providerId - Opaque provider identifier.
-   */
-  public getQueueDepth(providerId: string): number {
-    return this.getOrCreateBucket(providerId).queue.length;
+  /** Retrieve remaining token count for `providerId`. */
+  async getTokenCount(providerId: string): Promise<number | undefined> {
+    return this.store.getTokenCount(providerId);
   }
 
-  /**
-   * Close connections or clean up resources.
-   */
-  public async close(): Promise<void> {
-    if (this.store && typeof (this.store as any).disconnect === 'function') {
-      await (this.store as any).disconnect();
+  private getOrCreateQueue(providerId: string): Array<() => void> {
+    let queue = this.queues.get(providerId);
+    if (!queue) {
+      queue = [];
+      this.queues.set(providerId, queue);
     }
+    return queue;
   }
 
-  /**
-   * Start periodic sampling of token and queue-depth metrics.
-   *
-   * Samples all active provider buckets at the specified interval and updates
-   * the provided gauges. Sampling does not consume tokens and is designed to
-   * have minimal impact on the delivery hot path.
-   *
-   * @param tokenGauge - Gauge to record current token count per provider.
-   * @param queueDepthGauge - Gauge to record current queue depth per provider.
-   * @param intervalMs - Sampling interval in milliseconds. Recommended: 5000-15000ms.
-   * @returns A function to stop sampling.
-   */
-  public startMetricsSampling(
-    tokenGauge: Gauge<string>,
-    queueDepthGauge: Gauge<string>,
-    intervalMs: number = 10000,
-  ): () => void {
-    if (this.samplingIntervalId !== null) {
-      console.warn('[rateLimit] Metrics sampling already active, ignoring start request.');
-      return () => {};
+  private syncLegacyStoreQueue(providerId: string, queue: Array<() => void>): void {
+    if (!this.rateLimitStore) return;
+    let bucket = this.rateLimitStore.getTokenBucket(providerId);
+    if (!bucket) {
+      const tokens = this.store.getTokenCount(providerId) ?? this.capacity;
+      const count = typeof tokens === 'number' ? tokens : this.capacity;
+      bucket = { tokens: count, lastRefillMs: Date.now(), queue };
+    } else {
+      bucket.queue = queue;
+    }
+    this.rateLimitStore.setTokenBucket(providerId, bucket);
+  }
+
+  private scheduleDrain(providerId: string): void {
+    if (this.timers.has(providerId)) return;
+    const delayMs = Math.max(1, Math.ceil(1000 / this.refillRatePerSec));
+    const timer = setTimeout(() => {
+      this.timers.delete(providerId);
+      this.drain(providerId);
+    }, delayMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.timers.set(providerId, timer);
+  }
+
+  private async drain(providerId: string): Promise<void> {
+    const queue = this.queues.get(providerId);
+    if (!queue || queue.length === 0) return;
+
+    while (queue.length > 0) {
+      const consumed = await this.store.consumeToken(
+        providerId,
+        this.capacity,
+        this.refillRatePerSec,
+      );
+      if (!consumed) break;
+
+      const resolve = queue.shift();
+      this.syncLegacyStoreQueue(providerId, queue);
+      resolve?.();
     }
 
-    const sample = () => {
-      for (const providerId of this._sampledProviders) {
-        const redactedProviderId = redactId(providerId);
-        const tokens = typeof this.getTokenCount(providerId) === 'number'
-          ? (this.getTokenCount(providerId) as number)
-          : 0;
-        const queueDepth = this.getQueueDepth(providerId);
-
-        tokenGauge.set({ provider_id: redactedProviderId }, tokens);
-        queueDepthGauge.set({ provider_id: redactedProviderId }, queueDepth);
-      }
-    };
-
-    // Initial sample
-    sample();
-
-    this.samplingIntervalId = setInterval(sample, intervalMs);
-
-    return () => {
-      if (this.samplingIntervalId !== null) {
-        clearInterval(this.samplingIntervalId);
-        this.samplingIntervalId = null;
-      }
-    };
-  }
-
-  /**
-   * Stop metrics sampling if active.
-   */
-  public stopMetricsSampling(): void {
-    if (this.samplingIntervalId !== null) {
-      clearInterval(this.samplingIntervalId);
-      this.samplingIntervalId = null;
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-
-  /**
-   * The sampled provider IDs whose token count / queue depth are reported to
-   * Prometheus gauges so the SLO evaluator and dashboards have data.
-   */
-  private readonly _sampledProviders = new Set<string>();
-
-  /**
-   * Retrieve or lazily create the bucket state for a provider.
-   */
-  private getOrCreateBucket(providerId: string): TokenBucketEntry {
-    const existing = this.store.getTokenBucket(providerId);
-    if (existing) return existing;
-
-    const created: TokenBucketEntry = {
-      tokens: this.capacity,
-      lastRefillMs: Date.now(),
-      queue: [],
-    };
-    this.store.setTokenBucket(providerId, created);
-    this._sampledProviders.add(providerId);
-    return created;
-  }
-
-  /**
-   * Apply elapsed-time token refill to the named bucket using the continuous
-   * token-bucket formula:
-   *
-   *   newTokens = min(capacity, currentTokens + elapsed_sec * refillRate)
-   */
-  private refillBucket(providerId: string): void {
-    const bucket = this.getBucket(providerId);
-    const nowMs = Date.now();
-    const elapsedSec = (nowMs - bucket.lastRefillMs) / 1_000;
-    const added = elapsedSec * this.refillRatePerSec;
-
-    bucket.tokens = Math.min(this.capacity, bucket.tokens + added);
-    bucket.lastRefillMs = nowMs;
-    this.store.setTokenBucket(providerId, bucket);
-  }
-
-  /**
-   * Schedule a `setTimeout` to drain the queue for a provider once enough
-   * time has elapsed to produce the next token.
-   *
-   * Only one timer is scheduled per provider at a time; the drain loop
-   * re-schedules itself while the queue is non-empty.
-   */
-  private scheduleRefill(providerId: string): void {
-    // Time (ms) until the next whole token is available.
-    const msUntilToken = Math.ceil((1 / this.refillRatePerSec) * 1_000);
-
-    setTimeout(() => {
-      this.drainQueue(providerId).catch((err) => {
-        console.error(`[rateLimit] Error refilling and draining queue:`, err);
-      });
-    }, msUntilToken);
-  }
-
-  /**
-   * Resolve as many queued waiters as the current token count allows,
-   * then re-schedule if the queue is still non-empty.
-   */
-  private async drainQueue(providerId: string): Promise<void> {
-    this.refillBucket(providerId);
-    const bucket = this.getBucket(providerId);
-
-    while (bucket.queue.length > 0 && bucket.tokens >= 1) {
-      bucket.tokens -= 1;
-      const resolve = bucket.queue.shift()!;
-      resolve();
-    }
-    this.store.setTokenBucket(providerId, bucket);
-
-    if (bucket.queue.length > 0) {
-      this.scheduleRefill(providerId);
+    if (queue.length > 0) {
+      this.scheduleDrain(providerId);
     }
   }
 }
-
-// ---------------------------------------------------------------------------
-// Security helper
-// ---------------------------------------------------------------------------
-
-/**
- * Redact a provider ID for safe log output.
- *
- * Shows only the first 4 characters followed by `****` to aid debugging
- * without leaking full identifiers that might encode sensitive routing info.
- *
- * @param id - Raw provider identifier.
- * @returns Redacted string safe for log output.
- */
-export function redactId(id: string): string {
-  if (id.length <= 4) {
-    return '****';
-  }
-  return `${id.slice(0, 4)}****`;
-}
-
-// ---------------------------------------------------------------------------
-// Module-level singleton
-// ---------------------------------------------------------------------------
-
-/**
- * Shared default limiter instance, initialised once at module load time.
- * Configuration is read from environment variables (see module docs).
- *
- * Import and use this in `WebhookDeliveryService` and anywhere else that
- * needs rate-limited webhook delivery.
- */
-export const defaultLimiter: TokenBucketLimiter = new TokenBucketLimiter();

@@ -22,7 +22,7 @@ describe('Security Middleware Integration', () => {
 
     describe('CORS Middleware', () => {
         it('should allow requests from allowed origins', async () => {
-            process.env.ALLOWED_ORIGINS = 'https://example.com';
+            process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
             
             jest.isolateModules(() => {
                 const { applySecurityMiddleware: applySecurity } = require('./security');
@@ -40,7 +40,7 @@ describe('Security Middleware Integration', () => {
         });
 
         it('should reject requests from disallowed origins', async () => {
-            process.env.ALLOWED_ORIGINS = 'https://example.com';
+            process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
             
             jest.isolateModules(() => {
                 const { applySecurityMiddleware: applySecurity } = require('./security');
@@ -68,7 +68,7 @@ describe('Security Middleware Integration', () => {
         });
 
         it('should handle preflight OPTIONS requests', async () => {
-            process.env.ALLOWED_ORIGINS = 'https://example.com';
+            process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
             
             jest.isolateModules(() => {
                 const { applySecurityMiddleware: applySecurity } = require('./security');
@@ -88,7 +88,7 @@ describe('Security Middleware Integration', () => {
         });
 
         it('should include credentials in CORS response', async () => {
-            process.env.ALLOWED_ORIGINS = 'https://example.com';
+            process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
             
             jest.isolateModules(() => {
                 const { applySecurityMiddleware: applySecurity } = require('./security');
@@ -140,7 +140,7 @@ describe('Security Middleware Integration', () => {
 
     describe('Combined Security Middleware', () => {
         it('should apply both CORS and Helmet headers', async () => {
-            process.env.ALLOWED_ORIGINS = 'https://example.com';
+            process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
             
             jest.isolateModules(() => {
                 const { applySecurityMiddleware: applySecurity } = require('./security');

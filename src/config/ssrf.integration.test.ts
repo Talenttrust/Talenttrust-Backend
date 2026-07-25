@@ -2,6 +2,21 @@ import { envSchema } from './env.schema';
 
 describe('envSchema SSRF Protection', () => {
   const dummySecret = 'a'.repeat(32);
+  const originalAllowFlag = process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+
+  beforeEach(() => {
+    // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; these tests assert
+    // the SSRF refinements reject private URLs, so clear the bypass flag.
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+  });
+
+  afterEach(() => {
+    if (originalAllowFlag === undefined) {
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+    } else {
+      process.env.SSRF_ALLOW_PRIVATE_HOSTS = originalAllowFlag;
+    }
+  });
 
   it('should reject private URLs in API_BASE_URL', () => {
     const result = envSchema.safeParse({

@@ -45,7 +45,7 @@ describe('Deployment Integration Tests', () => {
       process.env.NODE_ENV = 'staging';
       process.env.PORT = '3002';
       process.env.API_BASE_URL = 'https://staging-api.example.com';
-      process.env.CORS_ORIGINS = 'https://staging.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://staging.example.com';
 
       // Load and validate configuration
       const config = loadEnvironmentConfig();
@@ -61,7 +61,7 @@ describe('Deployment Integration Tests', () => {
       process.env.NODE_ENV = 'production';
       process.env.PORT = '3000';
       process.env.API_BASE_URL = 'https://api.example.com';
-      process.env.CORS_ORIGINS = 'https://app.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       process.env.DEBUG = 'false';
 
       // Load and validate configuration
@@ -173,7 +173,7 @@ describe('Deployment Integration Tests', () => {
     it('should reject production config with testnet', async () => {
       process.env.NODE_ENV = 'production';
       process.env.API_BASE_URL = 'https://api.example.com';
-      process.env.CORS_ORIGINS = 'https://app.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
 
       const config = loadEnvironmentConfig();
       // Force testnet for testing
@@ -187,7 +187,7 @@ describe('Deployment Integration Tests', () => {
     it('should reject production config with localhost CORS', async () => {
       process.env.NODE_ENV = 'production';
       process.env.API_BASE_URL = 'https://api.example.com';
-      process.env.CORS_ORIGINS = 'http://localhost:3000';
+      process.env.CORS_ALLOWED_ORIGINS = 'http://localhost:3000';
 
       const config = loadEnvironmentConfig();
       const validation = validateDeploymentConfig(config);
@@ -199,7 +199,7 @@ describe('Deployment Integration Tests', () => {
     it('should warn about debug mode in production', async () => {
       process.env.NODE_ENV = 'production';
       process.env.API_BASE_URL = 'https://api.example.com';
-      process.env.CORS_ORIGINS = 'https://app.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       process.env.DEBUG = 'true';
 
       const config = loadEnvironmentConfig();
@@ -229,7 +229,7 @@ describe('Deployment Integration Tests', () => {
 
       // Step 3: Validate staging
       process.env.NODE_ENV = 'staging';
-      process.env.CORS_ORIGINS = 'https://staging.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://staging.example.com';
       const stagingConfig = loadEnvironmentConfig();
       const stagingValidation = await validateDeploymentReadiness(stagingConfig);
       expect(stagingValidation.valid).toBe(true);
@@ -246,7 +246,7 @@ describe('Deployment Integration Tests', () => {
 
       // Step 5: Validate production
       process.env.NODE_ENV = 'production';
-      process.env.CORS_ORIGINS = 'https://app.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       const prodConfig = loadEnvironmentConfig();
       const prodValidation = await validateDeploymentReadiness(prodConfig);
       expect(prodValidation.valid).toBe(true);
@@ -258,7 +258,7 @@ describe('Deployment Integration Tests', () => {
       // Simulate failed production deployment
       process.env.NODE_ENV = 'production';
       process.env.API_BASE_URL = 'invalid-url';
-      process.env.CORS_ORIGINS = 'https://app.example.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
 
       // Load and validate configuration - should fail fast due to Zod validation
       expect(() => loadEnvironmentConfig()).toThrow();

@@ -6,6 +6,10 @@
  */
 
 import { processEmailNotification, generateEmailId } from './email-processor';
+import {
+  EmailTransport,
+  setEmailTransportOverride,
+} from './email.transport';
 import { EmailNotificationPayload } from '../types';
 import { setWriteRecordImpl, LogRecord } from '../../logger';
 
@@ -48,6 +52,10 @@ describe('generateEmailId', () => {
 // ── processEmailNotification ──────────────────────────────────────────────────
 
 describe('processEmailNotification', () => {
+  afterEach(() => {
+    setEmailTransportOverride(undefined);
+  });
+
   describe('happy path', () => {
     it('returns success with a crypto-strong emailId', async () => {
       const result = await processEmailNotification(BASE_PAYLOAD);
@@ -82,6 +90,24 @@ describe('processEmailNotification', () => {
       await expect(
         processEmailNotification({ ...BASE_PAYLOAD, to: 'invalid-email' }),
       ).rejects.toThrow('Invalid email address');
+    });
+
+    it('throws on header-injection in recipient', async () => {
+      await expect(
+        processEmailNotification({
+          ...BASE_PAYLOAD,
+          to: 'user@example.com\r\nBcc: evil@example.com',
+        }),
+      ).rejects.toThrow('Invalid email address');
+    });
+
+    it('throws on header-injection in subject', async () => {
+      await expect(
+        processEmailNotification({
+          ...BASE_PAYLOAD,
+          subject: 'Hello\r\nBcc: evil@example.com',
+        }),
+      ).rejects.toThrow('header injection');
     });
 
     it('throws on missing subject', async () => {
@@ -168,6 +194,29 @@ describe('processEmailNotification', () => {
         const serialised = JSON.stringify(r);
         expect(serialised).not.toContain('bad-email');
       }
+    });
+
+    it('propagates transport failures so the job can be retried', async () => {
+      const failingTransport: EmailTransport = {
+        send: async () => {
+          throw new Error('Provider unavailable');
+        },
+      };
+      setEmailTransportOverride(failingTransport);
+
+      await expect(processEmailNotification(BASE_PAYLOAD)).rejects.toThrow(
+        'Provider unavailable',
+      );
+    });
+
+    it('invokes the injected transport on success', async () => {
+      const send = jest.fn().mockResolvedValue({ providerMessageId: 'msg-1' });
+      setEmailTransportOverride({ send });
+
+      const result = await processEmailNotification(BASE_PAYLOAD);
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
     });
 
     it('includes emailId in the delivery log record', async () => {

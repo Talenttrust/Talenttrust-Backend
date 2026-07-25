@@ -137,28 +137,71 @@ describe("dbProbe", () => {
     jest.resetAllMocks();
   });
 
-  it("returns ok when SELECT 1 succeeds", async () => {
+  it("returns status up when SELECT 1 succeeds quickly", async () => {
     mockGetDb.mockReturnValue({
       prepare: () => ({ run: () => undefined }),
     } as unknown as ReturnType<typeof getDb>);
 
     const result = await dbProbe();
     expect(result.ok).toBe(true);
+    expect(result.status).toBe("up");
     expect(result.name).toBe("db");
     expect(typeof result.latencyMs).toBe("number");
+    expect(result.detail).toBeUndefined();
   });
 
-  it("returns not ok when getDb throws", async () => {
+  it("returns status degraded when response is slow (1000ms-3000ms)", async () => {
+    mockGetDb.mockReturnValue({
+      prepare: () => ({
+        run: () => {
+          // Simulate slow query by spinning
+          const start = Date.now();
+          while (Date.now() - start < 1500) {
+            // busy-wait
+          }
+        },
+      }),
+    } as unknown as ReturnType<typeof getDb>);
+
+    const result = await dbProbe();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("degraded");
+    expect(result.name).toBe("db");
+    expect(result.latencyMs).toBeGreaterThanOrEqual(1000);
+    expect(result.detail).toContain("slow response");
+  });
+
+  it("returns status down on timeout (>=3000ms)", async () => {
+    // Mock a query that takes longer than timeout
+    mockGetDb.mockReturnValue({
+      prepare: () => ({
+        run: () => {
+          const start = Date.now();
+          while (Date.now() - start < 3500) {
+            // busy-wait longer than timeout
+          }
+        },
+      }),
+    } as unknown as ReturnType<typeof getDb>);
+
+    const result = await dbProbe();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
+    expect(result.detail).toContain("timeout");
+  });
+
+  it("returns status down when getDb throws", async () => {
     mockGetDb.mockImplementation(() => {
       throw new Error("SQLITE_CANTOPEN");
     });
 
     const result = await dbProbe();
     expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
     expect(result.detail).toContain("SQLITE_CANTOPEN");
   });
 
-  it("returns not ok when prepare().run() throws", async () => {
+  it("returns status down when prepare().run() throws", async () => {
     mockGetDb.mockReturnValue({
       prepare: () => ({
         run: () => {
@@ -169,16 +212,18 @@ describe("dbProbe", () => {
 
     const result = await dbProbe();
     expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
     expect(result.detail).toContain("disk I/O error");
   });
 
-  it("handles non-Error thrown values", async () => {
+  it("returns status down and handles non-Error thrown values", async () => {
     mockGetDb.mockImplementation(() => {
       throw "raw string error";
     });
 
     const result = await dbProbe();
     expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
     expect(result.detail).toBe("unknown error");
   });
 
@@ -189,6 +234,22 @@ describe("dbProbe", () => {
 
     const result = await dbProbe();
     expect(typeof result.latencyMs).toBe("number");
+    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("handles database locked errors", async () => {
+    mockGetDb.mockReturnValue({
+      prepare: () => ({
+        run: () => {
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      }),
+    } as unknown as ReturnType<typeof getDb>);
+
+    const result = await dbProbe();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
+    expect(result.detail).toContain("locked");
   });
 });
 
@@ -382,7 +443,11 @@ describe("queueProbe", () => {
     process.env.QUEUE_PROBE_TIMEOUT_MS = "1";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
       getHealth: jest.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(resolve, 60_000))
+        // A never-resolving promise without a timer is sufficient to simulate
+        // an infinitely-slow getHealth(); using setTimeout(resolve, 60_000)
+        // would leave a live 60-second timer after the race resolves, causing
+        // Jest to report an open handle and exit with code 1.
+        () => new Promise(() => { /* never resolves */ })
       ),
     });
 

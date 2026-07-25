@@ -105,7 +105,7 @@ All environments require:
 - `API_BASE_URL`: API base URL
 - `DEBUG`: Enable debug logging (true/false)
 - `DATABASE_URL`: Database connection string
-- `CORS_ORIGINS`: Comma-separated list of allowed origins
+- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins
 - `MAX_REQUEST_SIZE`: Maximum request body size (default: 10mb)
 
 ### Environment-Specific Requirements

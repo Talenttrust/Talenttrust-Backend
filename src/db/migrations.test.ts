@@ -32,6 +32,24 @@ describe("runMigrations", () => {
     expect(rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
 
+  it("enforces a unique index on the normalized (trimmed + lowercased) email", () => {
+    runMigrations(db);
+
+    db.prepare(
+      `INSERT INTO users (id, username, email, role, created_at)
+       VALUES ('u1', 'alice', 'alice@example.com', 'client', '2026-01-01T00:00:00.000Z')`
+    ).run();
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO users (id, username, email, role, created_at)
+           VALUES ('u2', 'alice2', '  Alice@Example.COM  ', 'client', '2026-01-01T00:00:00.000Z')`
+        )
+        .run()
+    ).toThrow();
+  });
+
   it("is idempotent when run multiple times", () => {
     runMigrations(db);
     runMigrations(db);

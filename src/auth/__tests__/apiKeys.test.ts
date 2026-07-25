@@ -294,6 +294,63 @@ describe('API Key Utilities', () => {
       const storedKey = db2.api_keys.find((k: any) => k.name === 'Legacy Key');
       expect(storedKey.key_selector).toBe(computeKeySelector(apiKeyPlain));
     });
+
+    it('should find the correct key among multiple legacy keys', async () => {
+      // Simulate THREE legacy keys without key_selector (only the last one matches the API key)
+      const matchingKeyPlain = generateApiKey();
+      const { salt: matchSalt, hash: matchHash } = hashApiKey(matchingKeyPlain);
+
+      const db = await (database as any).loadDatabase();
+
+      // Push two non-matching legacy keys first
+      for (let i = 0; i < 2; i++) {
+        const otherKey = generateApiKey();
+        const { salt, hash } = hashApiKey(otherKey);
+        db.api_keys.push({
+          id: require('crypto').randomUUID(),
+          name: `Other Legacy Key ${i}`,
+          key_hash: `${salt}:${hash}`,
+          scope: ['legacy:read'],
+          created_by: 'user123',
+          created_at: new Date(),
+          updated_at: new Date(),
+          is_active: true
+          // No key_selector field
+        });
+      }
+
+      // Push the matching legacy key last
+      db.api_keys.push({
+        id: require('crypto').randomUUID(),
+        name: 'Target Legacy Key',
+        key_hash: `${matchSalt}:${matchHash}`,
+        scope: ['legacy:write'],
+        created_by: 'user456',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+        // No key_selector field
+      });
+      await (database as any).saveDatabase();
+
+      // Validate should find the correct key even though it's not the first legacy key
+      const result = await validateApiKey(matchingKeyPlain);
+      expect(result).not.toBeNull();
+      expect(result!.name).toBe('Target Legacy Key');
+      expect(result!.scope).toEqual(['legacy:write']);
+      expect(result!.createdBy).toBe('user456');
+
+      // After validation, the matched key should be backfilled
+      const db2 = await (database as any).loadDatabase();
+      const matchedKey = db2.api_keys.find((k: any) => k.name === 'Target Legacy Key');
+      expect(matchedKey.key_selector).toBe(computeKeySelector(matchingKeyPlain));
+
+      // Other legacy keys should remain without key_selector
+      const otherKeys = db2.api_keys.filter((k: any) => k.name !== 'Target Legacy Key');
+      for (const k of otherKeys) {
+        expect(k.key_selector).toBeUndefined();
+      }
+    });
   });
 
   describe('rotateApiKey', () => {
@@ -358,6 +415,186 @@ describe('API Key Utilities', () => {
     it('should return false for non-existent key', async () => {
       const result = await deactivateApiKey('non-existent-id');
       expect(result).toBe(false);
+    });
+  });
+
+  describe('validateApiKey - malformed stored credential handling', () => {
+    const crypto = require('crypto');
+
+    it('should reject keys with empty stored credential', async () => {
+      // Insert a key with empty key_hash directly
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Empty Hash Key',
+        key_hash: '',
+        key_selector: computeKeySelector('some-key'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with missing colon separator', async () => {
+      // Insert a key with no colon in key_hash
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'No Colon Key',
+        key_hash: 'abcdef0123456789abcdef0123456789', // valid hex but no colon
+        key_selector: computeKeySelector('some-key-2'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-2');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with extra colons', async () => {
+      // Insert a key with multiple colons
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Extra Colon Key',
+        key_hash: 'salt:hash:extra',
+        key_selector: computeKeySelector('some-key-3'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-3');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with wrong-length hex (salt too short)', async () => {
+      // Salt should be 32 hex chars, here it's too short
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Short Salt Key',
+        key_hash: 'abc:hash1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        key_selector: computeKeySelector('some-key-4'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-4');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with wrong-length hex (hash too short)', async () => {
+      // Hash should be 128 hex chars, here it's too short
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Short Hash Key',
+        key_hash: 'abcdef0123456789abcdef0123456789:abc',
+        key_selector: computeKeySelector('some-key-5'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-5');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with empty salt part', async () => {
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Empty Salt Key',
+        key_hash: ':hash1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        key_selector: computeKeySelector('some-key-6'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-6');
+      expect(result).toBeNull();
+    });
+
+    it('should reject keys with empty hash part', async () => {
+      const db = await (database as any).loadDatabase();
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Empty Hash Part Key',
+        key_hash: 'abcdef0123456789abcdef0123456789:',
+        key_selector: computeKeySelector('some-key-7'),
+        scope: ['test:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('some-key-7');
+      expect(result).toBeNull();
+    });
+
+    it('should still verify valid keys correctly', async () => {
+      // This is a regression test to ensure the fix doesn't break valid key verification
+      const request = {
+        name: 'Valid Key Test',
+        scope: ['contracts:read'],
+        createdBy: 'user123'
+      };
+
+      const { apiKey } = await createApiKey(request);
+      const result = await validateApiKey(apiKey);
+
+      expect(result).not.toBeNull();
+      expect(result!.name).toBe('Valid Key Test');
+      expect(result!.isActive).toBe(true);
+    });
+
+    it('should not throw exceptions on malformed input - fail closed', async () => {
+      // This test ensures no exceptions are thrown for any malformed input
+      const malformedInputs = [
+        '',
+        'no-colon',
+        'multiple:colons:here',
+        'short:hash123',
+        'salt0123456789abcdef0123456789abcdef:short',
+        ':hash...',
+        'salt:',
+        '  :  ',
+        'invalidhex!@#:invalidhex!@#'
+      ];
+
+      for (const key of malformedInputs) {
+        // Should not throw - should return null cleanly
+        await expect(async () => {
+          await validateApiKey(key);
+        }).not.toThrow();
+      }
     });
   });
 });

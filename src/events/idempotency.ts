@@ -1,7 +1,18 @@
 import { createHash, timingSafeEqual } from 'crypto';
+import { Counter, Gauge } from 'prom-client';
 import { defaultIdempotencyStore, IdempotencyStore } from '../db/idempotencyStore';
 import { redact, redactPayloadForLog } from './redact';
 import { IdempotentEventResult, JsonValue } from './types';
+
+export const activeIdempotencyKeys = new Gauge({
+  name: 'event_idempotency_active_keys',
+  help: 'Number of active idempotency keys currently tracked',
+});
+
+export const idempotencyEvictions = new Counter({
+  name: 'event_idempotency_evictions_total',
+  help: 'Total number of idempotency keys evicted due to TTL expiration',
+});
 
 export class IdempotencyConflictError extends Error {
   readonly statusCode = 409;
@@ -56,38 +67,52 @@ export async function runIdempotentEvent<TResult>(
 
   const store = options.store ?? defaultIdempotencyStore;
   const payloadHash = hashEventPayload(payload);
-  const existing = store.get<TResult>(normalizedKey);
+  const existing = store.getRaw ? store.getRaw<TResult>(normalizedKey) : store.get<TResult>(normalizedKey);
 
   if (existing) {
-    if (constantTimeEqual(existing.payloadHash, payloadHash)) {
-      return {
-        result: existing.result,
-        replayed: true,
-        payloadHash,
-      };
+    if (existing.expiresAt && existing.expiresAt.getTime() <= Date.now()) {
+      idempotencyEvictions.inc();
+      if (store.delete) {
+        store.delete(normalizedKey);
+      }
+      // Proceed as brand-new ingestion
+    } else {
+      if (constantTimeEqual(existing.payloadHash, payloadHash)) {
+        return {
+          result: existing.result,
+          replayed: true,
+          payloadHash,
+        };
+      }
+
+      options.logger?.warn(
+        'Rejected conflicting event idempotency replay',
+        redact({
+          idempotencyKey: normalizedKey,
+          storedPayloadHash: existing.payloadHash,
+          receivedPayloadHash: payloadHash,
+          receivedPayload: redactPayloadForLog(payload),
+        }),
+      );
+
+      throw new IdempotencyConflictError(normalizedKey);
     }
-
-    options.logger?.warn(
-      'Rejected conflicting event idempotency replay',
-      redact({
-        idempotencyKey: normalizedKey,
-        storedPayloadHash: existing.payloadHash,
-        receivedPayloadHash: payloadHash,
-        receivedPayload: redactPayloadForLog(payload),
-      }),
-    );
-
-    throw new IdempotencyConflictError(normalizedKey);
   }
 
   const result = await handler();
 
+  const ttlMs = 24 * 60 * 60 * 1000; // 24 hours
   store.set({
     key: normalizedKey,
     payloadHash,
     result,
     createdAt: new Date(),
+    expiresAt: new Date(Date.now() + ttlMs),
   });
+
+  if (store.size) {
+    activeIdempotencyKeys.set(store.size());
+  }
 
   return {
     result,

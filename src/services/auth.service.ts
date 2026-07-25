@@ -21,6 +21,7 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash } from "crypto";
 import jwt from "jsonwebtoken";
 import Database from "better-sqlite3";
 import { JWT_VERIFY_OPTIONS, JWT_SIGN_ALGORITHMS } from "../auth/jwtConfig";
+import { normalizeEmail } from "../repositories/userRepository";
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
@@ -109,7 +110,7 @@ export class AuthService {
   /**
    * Registers a new user with a hashed password.
    *
-   * @param email    - Normalised (lowercased) email address.
+   * @param email    - Email address, normalised (trimmed + lowercased) internally.
    * @param password - Plaintext password (min 8 chars enforced by Zod schema).
    * @param username - Display name.
    * @param role     - User role (default: 'client').
@@ -122,7 +123,7 @@ export class AuthService {
     username: string,
     role = "client"
   ): Promise<AuthTokens> {
-    const normalised = email.toLowerCase();
+    const normalised = normalizeEmail(email);
     const existing = this.db
       .prepare<[string], { id: string }>("SELECT id FROM users WHERE email = ?")
       .get(normalised);
@@ -163,7 +164,7 @@ export class AuthService {
    * @throws Error with `invalid_credentials` code on any auth failure.
    */
   async login(email: string, password: string): Promise<AuthTokens> {
-    const normalised = email.toLowerCase();
+    const normalised = normalizeEmail(email);
     const row = this.db
       .prepare<[string], UserAuthRow>(
         "SELECT id, username, email, role, password_hash, refresh_token_hash FROM users WHERE email = ?"

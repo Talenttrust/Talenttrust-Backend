@@ -39,6 +39,25 @@ The backend includes dependency-level chaos testing to simulate upstream outages
 Detailed architecture and security notes are in `docs/backend/chaos-testing.md`.
 
 Developer onboarding and blue-green local setup are documented in [docs/backend/developer-onboarding-blue-green.md](docs/backend/developer-onboarding-blue-green.md).
+Detailed authentication design, lifecycle, and refresh-token rotation semantics are documented in [AUTH.md](AUTH.md).
+
+## Soroban RPC Outbound Retries
+
+Outbound RPC queries to the Stellar/Soroban network are wrapped in an automatic retry-with-backoff mechanism to protect against transient network failures.
+
+* **Idempotent Reads**: Queries like `getLedgerEntries`, `getLatestLedger`, `getEvents`, `simulateTransaction`, and the polling check `getTransaction` are wrapped with a jittered exponential back-off helper.
+* **Mutating Transactions**: Submitting signed transactions via `sendTransaction` is **never** retried automatically to prevent accidental double-submission or transaction collisions.
+
+### Configuration
+
+You can configure retry behavior using the following environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOROBAN_RPC_RETRY_ATTEMPTS` | `5` | Maximum number of retry attempts for read calls. |
+| `SOROBAN_RPC_RETRY_BASE_DELAY_MS` | `200` | The initial base delay in milliseconds, scaled exponentially with jitter. |
+
+Detailed authentication design, lifecycle, and refresh-token rotation semantics are documented in [AUTH.md](AUTH.md).
 
 ## Error Handling and Testing
 
@@ -159,6 +178,21 @@ EVENT_TIMEOUT_MS=5000
 IDEMPOTENCY_TTL_MS=3600000
 ```
 
+### Queue Job Timeouts
+
+Queue workers enforce a wall-clock timeout for every job attempt. When a job exceeds its timeout, the queue manager aborts the processor `AbortSignal`, fails the attempt, and lets the existing retry/DLQ policy decide whether to retry or retain the job as failed.
+
+| Variable | Default | Description |
+|---|---:|---|
+| `QUEUE_JOB_TIMEOUT_MS` | `30000` | Default per-job attempt timeout in milliseconds. |
+| `QUEUE_JOB_TIMEOUT_EMAIL_NOTIFICATION_MS` | `QUEUE_JOB_TIMEOUT_MS` | Timeout override for email notification jobs. |
+| `QUEUE_JOB_TIMEOUT_CONTRACT_PROCESSING_MS` | `QUEUE_JOB_TIMEOUT_MS` | Timeout override for contract processing jobs. |
+| `QUEUE_JOB_TIMEOUT_REPUTATION_UPDATE_MS` | `QUEUE_JOB_TIMEOUT_MS` | Timeout override for reputation update jobs. |
+| `QUEUE_JOB_TIMEOUT_REPUTATION_RECOMPUTE_MS` | `QUEUE_JOB_TIMEOUT_MS` | Timeout override for reputation recompute jobs. |
+| `QUEUE_JOB_TIMEOUT_BLOCKCHAIN_SYNC_MS` | `QUEUE_JOB_TIMEOUT_MS` | Timeout override for blockchain sync jobs. |
+
+Processors receive an `AbortSignal` as optional context and should stop outbound work when it is aborted. The manager still fails the attempt on timeout when a processor ignores the signal, and it prevents the same job from being executed again while the timed-out processor is still active.
+
 For full configuration details, see [docs/backend/config.md](docs/backend/config.md).
 
 ## Audit Log Export
@@ -203,12 +237,14 @@ All sensitive metadata fields (`password`, `token`, `secret`, `credential`, `api
 ## Documentation
 
 - [Backend Notification Services](./docs/backend/notifications.md)
+- [Outbound Notification Subsystem (channels, transports, persistence)](docs/email-notifications.md)
 - [Event Ingestion Idempotency](docs/EVENT_INGESTION_IDEMPOTENCY.md)
 - [SLA/SLO Definitions and Alert Thresholds](docs/backend/SLA_SLO.md)
 - [SLO Runtime Evaluation](#slo-runtime-evaluation)
 - [Redis Testing Guide](docs/backend/redis-testing-guide.md)
 - [Escrow Contract Lifecycle & Bounds](docs/contracts-lifecycle.md)
 - [Contract Event Indexer Cursor Model & Replay Protection](INDEXER.md)
+- [Data Retention, Archival, and Purge Lifecycle](docs/DATA_RETENTION.md)
 
 ## CI/CD
 
@@ -246,7 +282,60 @@ decisions and planned integrations.
 The TalentTrust Backend implements hardened HTTP response policies and origin controls.
 
 - **Security Headers**: Managed via [Helmet](https://helmetjs.github.io/) (CSP, HSTS, etc.).
-- **CORS Policy**: Configurable origin controls.
+- **CORS Policy**: Strict allowlist controlled by environment configuration.
+
+### HTTP request logging redaction
+
+Structured HTTP logs preserve operational metadata needed for debugging and tracing while masking credential-bearing headers before any request or response log line is emitted.
+
+**Logged fields retained in cleartext**
+- HTTP method
+- Request path / URL
+- Response status code
+- Latency / duration
+- Request ID and correlation ID
+- Client IP and truncated User-Agent
+- Non-sensitive request/response headers
+
+**Headers redacted in logs**
+- `Authorization`
+- `Cookie`
+- `Set-Cookie`
+- Known API-key and token-bearing headers such as `X-API-Key` and `X-Auth-Token`
+
+Header matching is case-insensitive. Request and response bodies are not logged by the default HTTP logger middleware.
+
+### CORS Configuration
+
+The CORS policy is driven by the `CORS_ALLOWED_ORIGINS` environment variable, a comma-separated list of allowed origins.
+
+```bash
+# Allow specific origins
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+#### Behavior by environment
+
+| Environment | Default | Behavior |
+|---|---|---|
+| `production` | Deny-by-default (empty allowlist) | Only origins in `CORS_ALLOWED_ORIGINS` are accepted. Wildcard (`*`) and localhost origins are rejected at startup. |
+| `development` / `staging` / `test` | `http://localhost:3000,http://localhost:3001` | Localhost origins are pre-configured for convenience. Explicitly setting the variable overrides the default. |
+
+#### Security guarantees
+
+- The request `Origin` header is reflected in `Access-Control-Allow-Origin` **only** when it exists in the allowlist.
+- Arbitrary origins are never echoed back.
+- Wildcard (`*`) is never used as `Access-Control-Allow-Origin` because credentials are always enabled.
+- `Access-Control-Allow-Credentials: true` is set for all allowlisted requests.
+- Requests without an `Origin` header (server-to-server, curl, health checks) are allowed.
+
+#### Allowed methods
+
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`
+
+#### Allowed headers
+
+`Content-Type`, `Authorization`
 
 For detailed information, see [Security Documentation](docs/backend/security.md).
 
@@ -269,10 +358,32 @@ All queue processors (`src/queue/processors/`) use the structured logger from `s
 | Concern | Rule |
 |---|---|
 | Logger instantiation | Each processor calls `createLogger({ processor: '<name>', ...correlationCtx })` at the top of its handler, binding `correlationId` and `requestId` from the job payload. |
-| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. |
+| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. Processor-specific context (e.g. `processor`, `action`, `network`) is bound at logger creation time and appears on every record from that processor instance. |
 | PII at info/warn level | Recipient email addresses, `userId`, and `contractId` must **not** appear in `message` strings at `info` or `warn` level. They may be logged at `debug` level as structured fields. |
+| Sensitive payload fields | Any payload logged at debug level must pass through `redactObject` / `redactPayload` from `src/utils/redact.ts` before inclusion. Keys matching `secret`, `token`, `password`, `authorization`, `key`, `signature`, `cookie`, and `nonce` are automatically replaced with `[REDACTED]` by the logger's built-in sanitizer. |
 | Error path | Validation errors emit a `warn` record (via `log.warn(...)`) **before** throwing, so observers can correlate the rejection with the job's correlation context. |
-| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). Never use `Date.now() + Math.random()` for IDs. |
+| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). **Never** use `Date.now() + Math.random()` for IDs — this approach is collision-prone under load. |
+
+### ID generation
+
+`generateEmailId()` is exported from `email-processor.ts` and documented with TSDoc:
+
+```ts
+/**
+ * Generate a cryptographically-strong unique tracking ID for an outbound email.
+ *
+ * Uses `crypto.randomUUID()` (RFC 4122 v4) so that IDs are collision-resistant
+ * even under rapid successive calls, unlike the previous `Date.now() +
+ * Math.random()` approach which could produce duplicates under load.
+ *
+ * @returns A UUID v4 string prefixed with `email_` for readability in logs.
+ */
+export function generateEmailId(): string {
+  return `email_${crypto.randomUUID()}`;
+}
+```
+
+Uniqueness is validated in tests by generating 50 IDs in rapid succession and asserting the full set is deduplicated.
 
 ### Example — adding a new processor
 
@@ -287,16 +398,55 @@ export async function processMyJob(payload: MyPayload): Promise<JobResult> {
   });
 
   if (!isValid(payload)) {
-    log.warn('Validation failed: reason');   // structured, no PII
+    log.warn('Validation failed: reason');   // structured, no PII in message
     throw new Error('...');
   }
 
   log.info('Job started');
-  // ...
+  // log sensitive fields only at debug, never in message strings
+  log.debug('Processing with context', { internalId: payload.id });
   log.info('Job completed', { someMetric: 42 });
   return { success: true };
 }
 ```
+
+### Log record example
+
+```json
+{
+  "timestamp": "2026-07-24T22:52:00.001Z",
+  "level": "info",
+  "message": "Email notification delivered",
+  "service": "talenttrust-backend",
+  "processor": "email",
+  "emailId": "email_3f1a2b4c-...",
+  "subject": "Welcome",
+  "correlationId": "corr-abc",
+  "requestId": "req-123"
+}
+```
+
+### Testing convention
+
+Processor tests use `setWriteRecordImpl` from `src/logger.ts` to intercept log records as plain objects rather than parsing serialised output. This allows assertions on:
+
+- Required base field presence (`timestamp`, `level`, `message`, `service`)
+- Correlation context propagation (`correlationId`, `requestId`)
+- PII absence in `info`/`warn` message strings (email addresses, `userId`, `contractId`)
+- `warn` emission before throws on validation failure
+- Unique ID generation across rapid successive calls
+
+
+## Graceful shutdown and drain order
+
+The service now uses a single shutdown registry for SIGTERM/SIGINT handling. On shutdown it performs the following steps in order:
+
+1. Close the HTTP listener so new requests stop arriving.
+2. Stop accepting new webhook deliveries and wait for in-flight deliveries, with a bounded grace period before fallback checkpointing.
+3. Stop accepting new transaction polls and queue jobs, wait for in-flight work to finish, and checkpoint any remaining pending state if the grace period expires.
+4. Close BullMQ workers and downstream connections before exiting.
+
+This prevents polls and queue jobs from being interrupted mid-flight while preserving a checkpointable state for pending work.
 
 ## Security Notes
 
@@ -309,11 +459,12 @@ export async function processMyJob(payload: MyPayload): Promise<JobResult> {
 All configuration is managed through `src/config/` and validated at startup using **Zod**. This ensures a fail-fast behavior with clear error messages. Copy `.env.example` to `.env` to get started. See [docs/backend/config.md](docs/backend/config.md) for full details.
 
 | Variable | Default | Description |
-|---|---|---|
+|---|---|---|---|
 | `PORT` | `3001` | HTTP port for the Express server |
 | `NODE_ENV` | `development` | Runtime environment (`development`, `staging`, `production`, `test`) |
 | `API_BASE_URL` | `http://localhost:${PORT}` | Base URL for the API |
 | `DEBUG` | `false` | Enable/disable debug logging |
+| `CORS_ALLOWED_ORIGINS` | *(see CORS Configuration)* | Comma-separated list of allowed CORS origins. In production defaults to deny-by-default; in development defaults to `http://localhost:3000`. |
 | `DATABASE_URL` | *(optional)* | Database connection string |
 | `JWT_SECRET` | *(optional)* | Secret used for JWT signing (min 8 chars) |
 | `IDEMPOTENCY_TTL_MS` | `3600000` | Idempotency key TTL in ms (default 1 hour); after expiry keys are eligible for eviction and re-submission is processed fresh |
@@ -324,6 +475,7 @@ All configuration is managed through `src/config/` and validated at startup usin
 | `ACTIVE_COLOR` | `blue` | Active backend color for blue-green routing |
 | `BLUE_PORT` | `3001` | Port for the 'blue' backend |
 | `GREEN_PORT` | `3002` | Port for the 'green' backend |
+| `HTTP_METRICS_ROUTE_LABEL_LIMIT` | `100` | Maximum distinct HTTP route template labels before new routes are recorded as `other` |
 
 
 ## API Endpoints
@@ -338,7 +490,98 @@ See [docs/backend/reputation-api.md](docs/backend/reputation-api.md) for detaile
 ## API Endpoints
 
 ### Health Check
-- `GET /health` - Service health status
+
+The service exposes a comprehensive health check endpoint at `GET /health` that aggregates dependency probes.
+
+**Request:**
+```bash
+curl http://localhost:3000/health
+```
+
+**Response (200 OK - healthy):**
+```json
+{
+  "status": "ok",
+  "service": "talenttrust-backend",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "uptimeSeconds": 1234,
+  "probes": [
+    {
+      "name": "db",
+      "ok": true,
+      "status": "up",
+      "latencyMs": 45
+    },
+    {
+      "name": "redis",
+      "ok": true,
+      "status": "up",
+      "latencyMs": 12
+    }
+  ]
+}
+```
+
+**Response (503 Service Unavailable - degraded):**
+```json
+{
+  "status": "degraded",
+  "service": "talenttrust-backend",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "uptimeSeconds": 1234,
+  "probes": [
+    {
+      "name": "db",
+      "ok": false,
+      "status": "down",
+      "detail": "disk I/O error",
+      "latencyMs": 5000
+    }
+  ]
+}
+```
+
+**Probe Status Mapping:**
+
+Each probe reports one of three statuses:
+
+| Status | Meaning | HTTP |
+|--------|---------|------|
+| `up` | Dependency is healthy and responsive | 200 |
+| `degraded` | Dependency is slow or warning | 503 |
+| `down` | Dependency is unreachable or failed | 503 |
+
+**Database Probe (`db`):**
+- Verifies SQLite connectivity with lightweight `SELECT 1` query
+- Thresholds: up (<1000ms), degraded (1000-3000ms), down (≥3000ms or error)
+- Security: Query is hardcoded with no user input
+- Configuration: `DB_BUSY_TIMEOUT` (default 5000ms)
+
+**Redis Probe (`redis`):**
+- Tests Redis with PING command
+- Timeout: 3000ms
+- Configuration: `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
+
+**Other Probes:**
+- `stellar-rpc`: Stellar/Soroban RPC reachability (5s timeout)
+- `queue`: BullMQ job queue health (degraded if failed jobs exceed threshold)
+- `circuit-breaker`: Reports open circuit breakers
+- `env`: Verifies required environment variables
+
+**Production Security:**
+
+In production (NODE_ENV=production), probe details are stripped to prevent topology leakage to unauthenticated callers.
+
+### Metrics Cardinality Guard
+
+HTTP metrics use Express route templates for the `route` label, for example
+`/api/v1/contracts/:id`, instead of concrete request paths with embedded user
+or resource identifiers. Unmatched requests are recorded as `unmatched`.
+
+`HTTP_METRICS_ROUTE_LABEL_LIMIT` caps the number of distinct route template
+labels retained by `http_requests_total` and `http_request_duration_seconds`.
+After the cap is reached, newly observed route templates are recorded as
+`other`, while existing route labels, `method`, and `status_code` remain intact.
 
 ### Contracts
 - `GET /api/v1/contracts` - List contracts (placeholder)
@@ -518,6 +761,12 @@ A pipeline for indexing escrow and dispute lifecycle updates from smart contract
 - **Endpoint**: `POST /api/v1/events`
 - **Supported Events**: `escrow:created`, `escrow:completed`, `dispute:initiated`, `dispute:resolved`.
 
+### 4. Request Context Propagation via AsyncLocalStorage
+A request-scoped storage utility backed by Node.js `AsyncLocalStorage` to automatically propagate `requestId` and `correlationId` context fields down the async execution tree.
+- **Middleware**: The `requestContext` middleware seeds the store with `requestId` and optional `correlationId` parsed from HTTP headers (`X-Request-Id` and `X-Correlation-Id`).
+- **Observability**: The global `Logger` automatically reads from this store when logging, ensuring logs emitted by downstream services, repository queries, and operations carry the correct correlation context without manual parameter passing.
+- **Safety**: Safe defaults (no IDs) are provided when running outside of a request context (e.g. background tasks or scheduled jobs), and request contexts are concurrently isolated to prevent cross-request context leakage.
+
 ## Testing
 
 Run unit and integration tests to verify these features:
@@ -546,6 +795,50 @@ The `TransactionPoller` service manages blockchain transaction confirmations usi
 - **Duration Ceiling**: An absolute wall-clock duration limit (`maxTotalDurationMs`) can be set as a circuit breaker. If the transaction takes longer than this ceiling, polling is halted and the transaction transitions to `TIMEOUT`. This acts as an absolute guard and takes precedence over `maxRetries` if reached first.
 - **Idempotent Polling**: Safely restarts after an app crash without duplicating tracking logic.
 
+### Transaction Persistence Model
+
+Transaction state is persisted in SQLite through the `transactions` table, keyed by transaction hash. The store is exposed via the `TransactionsDbInterface` with two implementations:
+
+| Implementation | Backing store | Feature flag |
+|---|---|---|
+| `SqliteTransactionStore` | SQLite `transactions` table via `better-sqlite3` | `USE_SQLITE_TRANSACTION_STORE=true` (default) |
+| `InMemoryTransactionStore` | In-memory `Map` | `USE_SQLITE_TRANSACTION_STORE=false` |
+
+The `TransactionPoller` accepts an optional `store` parameter in its constructor. When omitted, it uses the global `transactionsDb` instance, which is created by the factory function `createTransactionsDb()` based on the `USE_SQLITE_TRANSACTION_STORE` environment variable.
+
+#### Stored columns
+
+| Column | Type | Description |
+|---|---|---|
+| `hash` | `TEXT PRIMARY KEY` | Blockchain transaction hash |
+| `status` | `TEXT` | One of `PENDING`, `SUCCESS`, `FAILED`, `TIMEOUT` |
+| `receipt` | `TEXT` (JSON) | Full blockchain receipt, serialised as JSON |
+| `last_checked_at` | `TEXT` (ISO-8601) | Timestamp of the last poll attempt |
+| `retry_count` | `INTEGER` | Number of retries performed |
+| `started_at` | `TEXT` (ISO-8601) | When polling for this transaction began |
+
+#### SQLite storage behaviour
+
+- All queries use **parameterised prepared statements** — receipt JSON and other values are never interpolated into SQL strings.
+- Receipt data is serialised with `JSON.stringify` on write and parsed with a safe wrapper (`try/catch` around `JSON.parse`) on read. Malformed receipts are returned as `undefined` rather than crashing the caller.
+- The `INSERT ... ON CONFLICT(hash) DO UPDATE` pattern ensures that repeated calls to `set()` update the existing row without creating duplicates.
+- Schema migrations are handled by `src/db/migrations.ts` (versions 5 and 9 create the `transactions` table and add the `started_at` column).
+
+#### Restart recovery flow
+
+On application startup, call `recoverPendingTransactions()` to rehydrate in-flight polling:
+
+1. Load all rows from the `transactions` table where `status = 'PENDING'`.
+2. For each pending transaction, restore `retry_count` and `last_checked_at`.
+3. Resume the polling loop from the current retry index using `calculateDelay` from `src/utils/retry.ts`.
+4. Terminal transactions (`SUCCESS`, `FAILED`, `TIMEOUT`) are **not** reloaded — they remain in the database for audit but are excluded from recovery.
+
+### Security
+
+- **Parameterised SQL**: All queries use `?` placeholders. Receipt JSON is passed as a bound parameter, never concatenated.
+- **Corrupted receipts**: `safeParseReceipt` wraps `JSON.parse` in a try-catch. If a stored receipt is malformed, the field returns `undefined` and the transaction is handled safely.
+- **Fail closed**: A `get()` that throws (e.g., database I/O error) returns `undefined` rather than propagating the exception to the poller.
+
 ## Retry & Backoff Utilities
 
 Reusable retry policies for handling transient failures, located in `src/utils/retry.ts`.
@@ -571,3 +864,70 @@ const data = await withRetry(() => fetchFromApi(), {
 | `maxDelayMs` | number | 5000 | Max delay cap in ms |
 | `jitter` | boolean | true | Adds randomness to delay |
 | `isRetryable` | function | `() => true` | Controls which errors retry |
+
+
+## Optimistic Concurrency Control (OCC)
+
+Contract updates enforce optimistic concurrency via a monotonically increasing
+version column on the contracts table. This prevents lost-update anomalies
+when two clients edit the same contract concurrently.
+
+
+# How it works
+Read: GET /api/v1/contracts/:id returns the current version (starts at 0).
+Update: PATCH /api/v1/contracts/:id must include the version you last read.
+Atomic check: The database updates the row only if version matches;
+otherwise a 409 ERR_CONFLICT is returned.
+Version bump: On success the stored version is incremented by 1 atomically.
+
+## Request / response examples
+Successful update:
+curl -X PATCH http://localhost:3001/api/v1/contracts/abc-123 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer demo-user-token" \
+  -d '{"version": 0, "title": "Updated Title"}'
+  {
+  "status": "success",
+  "data": {
+    "id": "abc-123",
+    "title": "Updated Title",
+    "version": 1,
+    ...
+  }
+}
+
+Stale version (another client updated first):
+curl -X PATCH http://localhost:3001/api/v1/contracts/abc-123 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer demo-user-token" \
+  -d '{"version": 0, "title": "Late Update"}'
+  {
+  "error": {
+    "code": "ERR_CONFLICT",
+    "message": "Version conflict",
+    "requestId": "..."
+  }
+}
+Missing version:
+{
+  "error": {
+    "code": "ERR_MISSING_VERSION",
+    "message": "version field is required for updates",
+    "requestId": "..."
+  }
+}
+Invalid version:
+{
+  "error": {
+    "code": "ERR_INVALID_VERSION",
+    "message": "version must be a non-negative integer",
+    "requestId": "..."
+  }
+}
+
+## Security guarantees
+The version check is enforced at the database level via a single atomic
+UPDATE ... WHERE version = ? statement. It cannot be bypassed by omitting
+the version field — the API layer rejects such requests with 400 ERR_MISSING_VERSION.
+The version counter is a non-negative integer that starts at 0 and increments
+by exactly 1 on every successful update.

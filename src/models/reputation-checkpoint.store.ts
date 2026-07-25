@@ -21,7 +21,7 @@ export interface RecomputeCheckpoint {
  * Provides persistent storage for tracking progress of reputation recompute jobs.
  * Enables resuming from specific points to avoid repeated full recomputes.
  */
-class ReputationCheckpointStore {
+export class ReputationCheckpointStore {
   private checkpoints: Map<string, RecomputeCheckpoint>;
 
   constructor() {

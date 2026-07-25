@@ -16,8 +16,8 @@ describe('Validate Middleware', () => {
     mockResponse = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn(),
-      locals: {},
-    };
+      locals: { audit: { log: jest.fn() } },
+    } as Partial<Response>;
     mockNext = jest.fn();
   });
 

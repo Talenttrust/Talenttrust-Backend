@@ -75,7 +75,7 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
     databaseUrl: validated.DATABASE_URL,
     stellarNetwork: environment === 'production' ? 'mainnet' : 'testnet',
     maxRequestSize: validated.MAX_REQUEST_SIZE,
-    corsOrigins: validated.CORS_ORIGINS ?? ['http://localhost:3000'],
+    corsOrigins: validated.CORS_ALLOWED_ORIGINS ?? (validated.NODE_ENV === 'production' ? [] : ['http://localhost:3000']),
   };
   
   return baseConfig;

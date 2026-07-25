@@ -8,9 +8,21 @@
  *   - Invalid header values are rejected / replaced
  */
 
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'integration-test-secret';
+
 import request from 'supertest';
+import jwt from 'jsonwebtoken';
 import { app } from './index';
 import { validateExternalId } from './middleware/requestId';
+
+// The contracts list route enforces the deny-by-default authorization matrix,
+// so smoke requests authenticate as an admin.
+const adminToken = jwt.sign(
+  { sub: 'admin-1', email: 'admin@test.com', role: 'admin' },
+  process.env.JWT_SECRET as string,
+  { expiresIn: '1h' },
+);
+const adminAuth = { Authorization: `Bearer ${adminToken}` };
 
 describe('GET /health', () => {
   it('returns 200 with status ok', async () => {
@@ -69,7 +81,7 @@ describe('GET /health', () => {
 
 describe('GET /api/v1/contracts', () => {
   it('returns 200 with empty data array', async () => {
-    const res = await request(app).get('/api/v1/contracts');
+    const res = await request(app).get('/api/v1/contracts').set(adminAuth);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
       expect.objectContaining({ status: 'success', data: [] }),
@@ -77,7 +89,7 @@ describe('GET /api/v1/contracts', () => {
   });
 
   it('response includes X-Request-Id header', async () => {
-    const res = await request(app).get('/api/v1/contracts');
+    const res = await request(app).get('/api/v1/contracts').set(adminAuth);
     expect(res.headers['x-request-id']).toBeDefined();
   });
 });

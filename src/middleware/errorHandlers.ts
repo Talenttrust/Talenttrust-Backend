@@ -7,6 +7,15 @@ function isBodyParserSyntaxError(error: unknown): boolean {
   return error instanceof SyntaxError && 'status' in error;
 }
 
+/**
+ * The CORS middleware rejects a disallowed origin by passing a plain Error
+ * (`Not allowed by CORS policy`) to `next`. Surface that as a 403 rather than a
+ * generic 500 so blocked cross-origin requests get an accurate status.
+ */
+function isCorsPolicyError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Not allowed by CORS policy';
+}
+
 function redactedErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
     return typeof error === 'string' && !containsUnsafeContent(error) ? error : '[REDACTED]';
@@ -48,7 +57,9 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
 
   const errorForPolicy = isBodyParserSyntaxError(error)
     ? new AppError(400, 'invalid_json', 'Malformed JSON payload')
-    : error;
+    : isCorsPolicyError(error)
+      ? new AppError(403, 'forbidden', 'Origin not allowed by CORS policy')
+      : error;
   const mapped = mapErrorToPayload(errorForPolicy, requestId);
 
   const log = res.locals.log && typeof res.locals.log.error === 'function'

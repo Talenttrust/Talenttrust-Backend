@@ -365,5 +365,29 @@ single layer of the architecture:
 | `src/audit/audit.test.ts` | `AuditStore`, `auditMiddleware`, `auditRouter`, `protectedEndpointAuditMiddleware`, `redact` module | Broad integration + security threat-scenario coverage. |
 | `src/audit/service.test.ts` | `AuditService` contract | Routing of `action`/`actor`/`ipAddress`/`correlationId` to the repository, the redaction responsibility (callers must pre-process via `redactBody()`), write-failure surfacing, and convenience-wrapper severity rules. Uses a pure in-memory mock repository — no SQLite dependency. |
 | `src/audit/sqliteRepository.test.ts` | `SqliteAuditRepository` behaviour | Append → read round-trip with deeply nested metadata, every supported filter (`action`, `severity`, `actor`, `resource`, `resourceId`, `from`/`to`) and combinations thereof, pagination edge cases (`offset > count`, `limit = 0`), incremental `stream()`, transactional write-failure surfacing with no partial rows left behind, two-`:memory:`-DB isolation, and chain-integrity verification over a 100-entry chain. All tests run on a fresh in-memory SQLite connection (`':memory:'`) for determinism and DB isolation. |
+| `src/audit/exportService.test.ts` | `AuditExportService`, `neutraliseCsvInjection` | NDJSON round-trip fidelity, RFC 4180 CSV quoting (commas, embedded quotes, newlines), CSV-injection neutralisation for leading `=`/`+`/`-`/`@` formula prefixes, empty-dataset and large-dataset (1 500-row) streaming, `AuditExportResult` contract fields, `cleanup()` removes temp directory, `streamNdjsonExport`/`streamCsvExport` pipe helpers. All tests use a fresh in-memory `AuditStore` — no live database dependency. |
 
 Coverage targets: ≥ 95% for all audit modules.
+
+---
+
+## Export Security — CSV Injection
+
+The CSV export applies a two-layer defence against **formula injection** (also called CSV injection):
+
+1. **RFC 4180 quoting** — any cell value that contains a comma, double-quote, or newline is wrapped in double-quotes with internal quotes doubled (`""`).
+
+2. **Formula-prefix neutralisation** — before quoting, the `neutraliseCsvInjection` helper checks whether the stringified value begins with a character that spreadsheet applications (Excel, LibreOffice Calc, Google Sheets) interpret as a formula trigger:
+
+   | Trigger | Reason |
+   |---------|--------|
+   | `=`     | Standard formula prefix |
+   | `+`     | Lotus 1-2-3 / alternative formula prefix |
+   | `-`     | Negation evaluated as formula |
+   | `@`     | Legacy Lotus and modern Excel macro prefix |
+   | `\t`    | Tab character used in tab-separated injections |
+   | `\r`    | Carriage-return that can break row parsing |
+
+   Dangerous values are prefixed with a single-quote (`'`) so the cell is treated as plain text. This mitigation follows the [OWASP CSV Injection guidance](https://owasp.org/www-community/attacks/CSV_Injection).
+
+> **Note**: The NDJSON export is not affected by CSV injection because JSON parsers do not evaluate formula syntax.

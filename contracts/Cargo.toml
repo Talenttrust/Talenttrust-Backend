@@ -1,0 +1,3 @@
+[workspace]
+members = ["predictify-hybrid"]
+resolver = "2"

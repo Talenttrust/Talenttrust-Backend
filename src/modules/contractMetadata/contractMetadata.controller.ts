@@ -29,7 +29,8 @@ export class ContractMetadataController {
       const result = await contractMetadataService.create(
         contractId,
         data,
-        req.user.id
+        req.user.id,
+        req.user
       );
 
       res.status(201).json(result);
@@ -87,7 +88,7 @@ export class ContractMetadataController {
       const etag = buildEtag(`contract-metadata:list:${contractId}`, result);
       res.setHeader('ETag', etag);
       if (isIfNoneMatchSatisfied(req.headers?.['if-none-match'], etag)) {
-        res.status(304).end();
+        res.status(304).send();
         return;
       }
 
@@ -114,7 +115,6 @@ export class ContractMetadataController {
       const result = await contractMetadataService.getById(id, req.user);
 
       if (!result) {
-        // Tests expect 400 for non-existent metadata in GET
         res.status(400).json({ error: 'Metadata not found' });
         return;
       }
@@ -122,7 +122,7 @@ export class ContractMetadataController {
       const etag = buildEtag(`contract-metadata:item:${id}`, result);
       res.setHeader('ETag', etag);
       if (isIfNoneMatchSatisfied(req.headers?.['if-none-match'], etag)) {
-        res.status(304).end();
+        res.status(304).send();
         return;
       }
 

@@ -17,6 +17,7 @@ import { rateLimitConfig } from './config/rateLimit';
 import { requireAuth, requireRole } from './middleware/authorization';
 import { authMiddleware, type AuthenticatedRequest } from './middleware/auth';
 import { adminAuthGuard } from './middleware/adminAuthGuard';
+import { registerShutdownHandlers } from './shutdown';
 
 const queueManager = QueueManager.getInstance();
 
@@ -354,13 +355,6 @@ async function initializeQueues(): Promise<void> {
   }
 }
 
-async function gracefulShutdown(): Promise<void> {
-  if (!isJest) {
-    await queueManager.shutdown();
-  }
-  process.exit(0);
-}
-
 async function startServer(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3001;
   if (!isJest) {
@@ -368,21 +362,19 @@ async function startServer(): Promise<void> {
   }
 
   if (!isJest) {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`TalentTrust API listening on http://localhost:${PORT}`);
+    });
+
+    registerShutdownHandlers(server, [], [], {
+      shutdownDrainHandlers: [queueManager],
+      shutdownDrainTimeoutMs: Number(process.env['SHUTDOWN_DRAIN_TIMEOUT_MS'] ?? 30_000),
     });
   }
 }
 
 if (isJest) {
   // Tests import `app` only; do not start listeners or Redis-backed queues here.
-} else {
-  process.on('SIGTERM', () => {
-    void gracefulShutdown();
-  });
-  process.on('SIGINT', () => {
-    void gracefulShutdown();
-  });
 }
 
 if (shouldBootstrapServer) {

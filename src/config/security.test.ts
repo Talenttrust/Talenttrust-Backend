@@ -20,7 +20,7 @@ describe('Security Configuration', () => {
         describe('Wildcard Origin Validation', () => {
             it('should reject wildcard origin in production mode', () => {
                 process.env.NODE_ENV = 'production';
-                process.env.ALLOWED_ORIGINS = '*';
+                process.env.CORS_ALLOWED_ORIGINS = '*';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -31,7 +31,7 @@ describe('Security Configuration', () => {
 
             it('should accept wildcard origin in development mode', () => {
                 process.env.NODE_ENV = 'development';
-                process.env.ALLOWED_ORIGINS = '*';
+                process.env.CORS_ALLOWED_ORIGINS = '*';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -42,7 +42,7 @@ describe('Security Configuration', () => {
 
             it('should accept wildcard origin when NODE_ENV is not set', () => {
                 delete process.env.NODE_ENV;
-                process.env.ALLOWED_ORIGINS = '*';
+                process.env.CORS_ALLOWED_ORIGINS = '*';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -53,7 +53,7 @@ describe('Security Configuration', () => {
 
             it('should reject wildcard mixed with other origins in production', () => {
                 process.env.NODE_ENV = 'production';
-                process.env.ALLOWED_ORIGINS = 'https://example.com,*,https://other.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com,*,https://other.com';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -65,7 +65,7 @@ describe('Security Configuration', () => {
 
         describe('Origin Parsing', () => {
             it('should parse comma-separated origins', () => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com,https://other.com,http://localhost:3000';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com,https://other.com,http://localhost:3000';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -75,7 +75,7 @@ describe('Security Configuration', () => {
             });
 
             it('should trim whitespace from origins', () => {
-                process.env.ALLOWED_ORIGINS = ' https://example.com , https://other.com , http://localhost:3000 ';
+                process.env.CORS_ALLOWED_ORIGINS = ' https://example.com , https://other.com , http://localhost:3000 ';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -85,7 +85,7 @@ describe('Security Configuration', () => {
             });
 
             it('should filter out empty strings', () => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com,,https://other.com,,,';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com,,https://other.com,,,';
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -94,8 +94,8 @@ describe('Security Configuration', () => {
                 }).not.toThrow();
             });
 
-            it('should use default origins when ALLOWED_ORIGINS is not set', () => {
-                delete process.env.ALLOWED_ORIGINS;
+            it('should use default origins when CORS_ALLOWED_ORIGINS is not set', () => {
+                delete process.env.CORS_ALLOWED_ORIGINS;
 
                 expect(() => {
                     jest.isolateModules(() => {
@@ -106,31 +106,52 @@ describe('Security Configuration', () => {
         });
 
         describe('Empty Allowlist Validation', () => {
-            it('should reject empty allowlist', () => {
-                process.env.ALLOWED_ORIGINS = '';
+            it('should warn on empty allowlist in development (not throw)', () => {
+                const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+                process.env.CORS_ALLOWED_ORIGINS = '';
 
                 expect(() => {
                     jest.isolateModules(() => {
                         require('./security');
                     });
-                }).toThrow('CORS allowlist cannot be empty');
+                }).not.toThrow();
+                expect(consoleWarnSpy).toHaveBeenCalledWith(
+                    expect.stringContaining('empty')
+                );
+                consoleWarnSpy.mockRestore();
             });
 
-            it('should reject allowlist with only whitespace', () => {
-                process.env.ALLOWED_ORIGINS = '   ,  ,  ';
+            it('should warn on allowlist with only whitespace', () => {
+                const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+                process.env.CORS_ALLOWED_ORIGINS = '   ,  ,  ';
 
                 expect(() => {
                     jest.isolateModules(() => {
                         require('./security');
                     });
-                }).toThrow('CORS allowlist cannot be empty');
+                }).not.toThrow();
+                expect(consoleWarnSpy).toHaveBeenCalledWith(
+                    expect.stringContaining('empty')
+                );
+                consoleWarnSpy.mockRestore();
+            });
+
+            it('should accept empty allowlist in production (deny-by-default)', () => {
+                process.env.NODE_ENV = 'production';
+                process.env.CORS_ALLOWED_ORIGINS = '';
+
+                expect(() => {
+                    jest.isolateModules(() => {
+                        require('./security');
+                    });
+                }).not.toThrow();
             });
         });
 
         describe('Origin Format Validation', () => {
             it('should warn about origins without http:// or https://', () => {
                 const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
-                process.env.ALLOWED_ORIGINS = 'example.com,localhost:3000';
+                process.env.CORS_ALLOWED_ORIGINS = 'example.com,localhost:3000';
 
                 jest.isolateModules(() => {
                     require('./security');
@@ -148,7 +169,7 @@ describe('Security Configuration', () => {
 
             it('should not warn about valid http:// origins', () => {
                 const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
-                process.env.ALLOWED_ORIGINS = 'http://localhost:3000,http://example.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'http://localhost:3000,http://example.com';
 
                 jest.isolateModules(() => {
                     require('./security');
@@ -160,7 +181,7 @@ describe('Security Configuration', () => {
 
             it('should not warn about valid https:// origins', () => {
                 const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
-                process.env.ALLOWED_ORIGINS = 'https://example.com,https://other.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com,https://other.com';
 
                 jest.isolateModules(() => {
                     require('./security');
@@ -173,7 +194,7 @@ describe('Security Configuration', () => {
             it('should not warn about wildcard origin', () => {
                 const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
                 process.env.NODE_ENV = 'development';
-                process.env.ALLOWED_ORIGINS = '*';
+                process.env.CORS_ALLOWED_ORIGINS = '*';
 
                 jest.isolateModules(() => {
                     require('./security');
@@ -186,7 +207,7 @@ describe('Security Configuration', () => {
 
         describe('CORS Origin Callback', () => {
             it('should allow requests from allowed origins', (done) => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com,https://other.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com,https://other.com';
 
                 jest.isolateModules(() => {
                     const { corsConfig: config } = require('./security');
@@ -204,7 +225,7 @@ describe('Security Configuration', () => {
             });
 
             it('should reject requests from disallowed origins', (done) => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
 
                 jest.isolateModules(() => {
                     const { corsConfig: config } = require('./security');
@@ -222,7 +243,7 @@ describe('Security Configuration', () => {
             });
 
             it('should allow requests with no origin header', (done) => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
 
                 jest.isolateModules(() => {
                     const { corsConfig: config } = require('./security');
@@ -240,7 +261,7 @@ describe('Security Configuration', () => {
             });
 
             it('should perform case-sensitive origin matching', (done) => {
-                process.env.ALLOWED_ORIGINS = 'https://example.com';
+                process.env.CORS_ALLOWED_ORIGINS = 'https://example.com';
 
                 jest.isolateModules(() => {
                     const { corsConfig: config } = require('./security');
@@ -260,7 +281,7 @@ describe('Security Configuration', () => {
 
         describe('CORS Configuration Properties', () => {
             it('should maintain allowed methods', () => {
-                expect(corsConfig.methods).toEqual(['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']);
+                expect(corsConfig.methods).toEqual(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
             });
 
             it('should maintain allowed headers', () => {

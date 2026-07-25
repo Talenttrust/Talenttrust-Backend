@@ -11,7 +11,38 @@
  *   - Request logger utility
  */
 
-import { Logger, createLogger, logger, createRequestLogger, LogLevel, LogRecord, setWriteRecordImpl } from './logger';
+import { Logger, createLogger, logger, createRequestLogger, LogLevel, LogRecord, setWriteRecordImpl, writeRecord } from './logger';
+import { requestContextStore } from './middleware/requestContext';
+
+// ── Logger – initial default writer ──────────────────────────────────────────
+
+describe('Logger – initial default writer', () => {
+  it('default writeRecordImpl writes to stdout or stderr', () => {
+    const stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    try {
+      writeRecord({
+        timestamp: '2026-06-27T00:00:00.000Z',
+        level: 'info',
+        message: 'stdout test',
+        service: 'talenttrust-backend'
+      });
+      expect(stdoutSpy).toHaveBeenCalled();
+      
+      writeRecord({
+        timestamp: '2026-06-27T00:00:00.000Z',
+        level: 'error',
+        message: 'stderr test',
+        service: 'talenttrust-backend'
+      });
+      expect(stderrSpy).toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +168,12 @@ describe('Logger – base fields', () => {
     expect(rec['userId']).toBe('u1');
     expect(rec['action']).toBe('login');
     expect(rec.msg).toBe('ctx');
+  });
+
+  it('deletes undefined properties from log record', () => {
+    log.info('test undefined', { undefinedProp: undefined });
+    const rec = testLogger.logs[0]!;
+    expect('undefinedProp' in rec).toBe(false);
   });
 });
 
@@ -336,5 +373,94 @@ describe('createRequestLogger', () => {
     expect(rec['requestId']).toBe('req-only');
     expect(rec['correlationId']).toBeUndefined();
     expect(rec.msg).toBe('request log');
+  });
+});
+
+// ── Logger – AsyncLocalStorage integration ────────────────────────────────────
+
+describe('Logger – AsyncLocalStorage integration', () => {
+  let testLogger: { logger: Logger; logs: CapturedLog[]; restore: () => void };
+
+  beforeEach(() => { testLogger = createTestLogger(); });
+  afterEach(() => {
+    testLogger.restore();
+    requestContextStore.disable();
+  });
+
+  it('automatically extracts requestId and correlationId from AsyncLocalStorage if not bound', () => {
+    requestContextStore.run({ requestId: 'als-req-id', correlationId: 'als-corr-id' }, () => {
+      testLogger.logger.info('als log');
+    });
+
+    expect(testLogger.logs).toHaveLength(1);
+    const rec = testLogger.logs[0]!;
+    expect(rec['requestId']).toBe('als-req-id');
+    expect(rec['correlationId']).toBe('als-corr-id');
+    expect(rec.msg).toBe('als log');
+  });
+
+  it('prioritizes bound child logger context over AsyncLocalStorage store', () => {
+    const child = testLogger.logger.child({ requestId: 'bound-req', correlationId: 'bound-corr' });
+
+    requestContextStore.run({ requestId: 'als-req-id', correlationId: 'als-corr-id' }, () => {
+      child.info('override log');
+    });
+
+    expect(testLogger.logs).toHaveLength(1);
+    const rec = testLogger.logs[0]!;
+    expect(rec['requestId']).toBe('bound-req');
+    expect(rec['correlationId']).toBe('bound-corr');
+  });
+
+  it('propagates context correctly across nested awaits', async () => {
+    await requestContextStore.run({ requestId: 'async-req', correlationId: 'async-corr' }, async () => {
+      testLogger.logger.info('before await');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      testLogger.logger.info('after await');
+    });
+
+    expect(testLogger.logs).toHaveLength(2);
+    expect(testLogger.logs[0]!['requestId']).toBe('async-req');
+    expect(testLogger.logs[1]!['requestId']).toBe('async-req');
+    expect(testLogger.logs[0]!['correlationId']).toBe('async-corr');
+    expect(testLogger.logs[1]!['correlationId']).toBe('async-corr');
+  });
+
+  it('does not leak request contexts concurrently', async () => {
+    const runRequest = async (id: string) => {
+      await requestContextStore.run({ requestId: `req-${id}`, correlationId: `corr-${id}` }, async () => {
+        testLogger.logger.info(`start-${id}`);
+        await new Promise((resolve) => setTimeout(resolve, id === 'A' ? 25 : 10));
+        testLogger.logger.info(`end-${id}`);
+      });
+    };
+
+    await Promise.all([runRequest('A'), runRequest('B')]);
+
+    expect(testLogger.logs).toHaveLength(4);
+    
+    // Check logs for request A
+    const aLogs = testLogger.logs.filter(l => l.msg.endsWith('-A'));
+    expect(aLogs).toHaveLength(2);
+    aLogs.forEach(l => {
+      expect(l['requestId']).toBe('req-A');
+      expect(l['correlationId']).toBe('corr-A');
+    });
+
+    // Check logs for request B
+    const bLogs = testLogger.logs.filter(l => l.msg.endsWith('-B'));
+    expect(bLogs).toHaveLength(2);
+    bLogs.forEach(l => {
+      expect(l['requestId']).toBe('req-B');
+      expect(l['correlationId']).toBe('corr-B');
+    });
+  });
+
+  it('uses safe default (no id) when running outside of request context', () => {
+    testLogger.logger.info('no context');
+    expect(testLogger.logs).toHaveLength(1);
+    const rec = testLogger.logs[0]!;
+    expect(rec['requestId']).toBeUndefined();
+    expect(rec['correlationId']).toBeUndefined();
   });
 });

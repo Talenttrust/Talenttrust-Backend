@@ -6,7 +6,27 @@
  */
 
 import { QueueManager } from './queue-manager';
-import { JobType } from './types';
+import { queueConfig } from './config';
+import { jobProcessors } from './processors';
+import { JobResult, JobType } from './types';
+
+type TestableQueueManager = {
+  processJob(jobType: JobType, job: unknown): Promise<JobResult>;
+};
+
+const EMAIL_PAYLOAD = {
+  to: 'test@example.com',
+  subject: 'Test Email',
+  body: 'This is a test',
+};
+
+function makeJob(id: string, data = EMAIL_PAYLOAD) {
+  return {
+    id,
+    name: JobType.EMAIL_NOTIFICATION,
+    data,
+  };
+}
 
 describe('QueueManager', () => {
   let queueManager: QueueManager;
@@ -29,6 +49,101 @@ describe('QueueManager', () => {
 
   afterEach(async () => {
     await queueManager.shutdown();
+  });
+
+  describe('Per-job timeout and abort handling', () => {
+    const originalEmailProcessor = jobProcessors[JobType.EMAIL_NOTIFICATION];
+    const originalEmailTimeout = queueConfig.jobTimeout.perJobTypeMs[JobType.EMAIL_NOTIFICATION];
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      queueConfig.jobTimeout.perJobTypeMs[JobType.EMAIL_NOTIFICATION] = 25;
+    });
+
+    afterEach(() => {
+      jobProcessors[JobType.EMAIL_NOTIFICATION] = originalEmailProcessor;
+      queueConfig.jobTimeout.perJobTypeMs[JobType.EMAIL_NOTIFICATION] = originalEmailTimeout;
+      jest.useRealTimers();
+    });
+
+    it('aborts and fails a hanging job when its timeout elapses', async () => {
+      let abortSignal: AbortSignal | undefined;
+      const processor = jest.fn((_payload, context?: { signal: AbortSignal }) => {
+        abortSignal = context?.signal;
+        return new Promise<JobResult>(() => undefined);
+      });
+      jobProcessors[JobType.EMAIL_NOTIFICATION] = processor;
+
+      const result = (queueManager as unknown as TestableQueueManager).processJob(
+        JobType.EMAIL_NOTIFICATION,
+        makeJob('timeout-job-1'),
+      );
+
+      await Promise.resolve();
+      expect(processor).toHaveBeenCalledTimes(1);
+      expect(abortSignal).toBeInstanceOf(AbortSignal);
+      expect(abortSignal?.aborted).toBe(false);
+
+      jest.advanceTimersByTime(25);
+
+      await expect(result).rejects.toThrow('timed out after 25ms');
+      expect(abortSignal?.aborted).toBe(true);
+    });
+
+    it('fails a retry attempt without double-executing while the timed-out processor is still active', async () => {
+      const processor = jest.fn(() => new Promise<JobResult>(() => undefined));
+      jobProcessors[JobType.EMAIL_NOTIFICATION] = processor;
+      const job = makeJob('timeout-job-2');
+
+      const firstAttempt = (queueManager as unknown as TestableQueueManager).processJob(
+        JobType.EMAIL_NOTIFICATION,
+        job,
+      );
+
+      await Promise.resolve();
+      jest.advanceTimersByTime(25);
+      await expect(firstAttempt).rejects.toThrow('timed out after 25ms');
+
+      await expect(
+        (queueManager as unknown as TestableQueueManager).processJob(
+          JobType.EMAIL_NOTIFICATION,
+          job,
+        ),
+      ).rejects.toThrow('already has an active execution');
+      expect(processor).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows a later retry after a cooperative processor settles on abort', async () => {
+      const processor = jest.fn((_payload, context?: { signal: AbortSignal }) => {
+        if (processor.mock.calls.length === 1) {
+          return new Promise<JobResult>((_resolve, reject) => {
+            context?.signal.addEventListener('abort', () => reject(new Error('aborted')));
+          });
+        }
+
+        return Promise.resolve({ success: true, message: 'retried' });
+      });
+      jobProcessors[JobType.EMAIL_NOTIFICATION] = processor;
+      const job = makeJob('timeout-job-3');
+
+      const firstAttempt = (queueManager as unknown as TestableQueueManager).processJob(
+        JobType.EMAIL_NOTIFICATION,
+        job,
+      );
+
+      await Promise.resolve();
+      jest.advanceTimersByTime(25);
+      await expect(firstAttempt).rejects.toThrow('timed out after 25ms');
+      await Promise.resolve();
+
+      await expect(
+        (queueManager as unknown as TestableQueueManager).processJob(
+          JobType.EMAIL_NOTIFICATION,
+          job,
+        ),
+      ).resolves.toEqual({ success: true, message: 'retried' });
+      expect(processor).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('Singleton Pattern', () => {

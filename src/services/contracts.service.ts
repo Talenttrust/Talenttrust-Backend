@@ -1,12 +1,12 @@
 import { CreateContractDto, UpdateContractDto } from '../modules/contracts/dto/contract.dto';
 import { Contract } from '../db/types';
-import { ContractRepository } from '../repositories/contractRepository';
+import type { IContractRepository } from '../repositories/contractRepository';
 import { SorobanService } from './soroban.service';
 import type { CursorPaginationInput, CursorPage } from '../contracts/cursor.types';
 
 import { validateContractBounds, ContractBoundsError } from '../contracts/bounds';
 import { MAX_MILESTONES_PER_CONTRACT, MAX_CONTRACT_AMOUNT_STROOPS } from '../contracts/bounds';
-import { NotFoundError } from '../errors/appError';
+import { NotFoundError, MissingVersionError, InvalidVersionError, VersionConflictError } from '../errors/appError';
 
 /**
  * @dev Service layer for managing Freelancer Escrow Contracts.
@@ -14,13 +14,10 @@ import { NotFoundError } from '../errors/appError';
  * and orchestration with the Soroban smart contract service.
  */
 export class ContractsService {
-  private contractRepository: ContractRepository;
+  private contractRepository: IContractRepository;
   private sorobanService: SorobanService;
 
-  // Mock database (in-memory; replaced by a real DB repository in production)
-  private contracts: any[] = [];
-
-  constructor(contractRepository: ContractRepository) {
+  constructor(contractRepository: IContractRepository) {
     this.sorobanService = new SorobanService();
     this.contractRepository = contractRepository;
   }
@@ -45,50 +42,13 @@ export class ContractsService {
   /**
    * Returns a cursor-paginated page of contracts ordered by `createdAt DESC`.
    *
-   * The in-memory implementation mirrors the keyset semantics of the SQLite
-   * repository so behaviour is consistent across environments.
-   *
    * @param input - Optional `limit` (1–100) and opaque `cursor` string.
    * @returns A {@link CursorPage} with items and next-page cursor.
    */
   public async getContractsPage(
     input: CursorPaginationInput = {},
-  ): Promise<CursorPage<any>> {
-    // Import primitives here to keep the constructor lightweight
-    const { parseLimit, encodeCursor, decodeCursor } = await import(
-      '../contracts/cursor.repository'
-    );
-
-    const limit = parseLimit(input.limit);
-
-    // Sort descending by createdAt, then id as tie-breaker (mirrors the DB query)
-    const sorted = [...this.contracts].sort((a, b) => {
-      const tDiff =
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      if (tDiff !== 0) return tDiff;
-      return b.id < a.id ? -1 : b.id > a.id ? 1 : 0;
-    });
-
-    let startIndex = 0;
-    if (input.cursor) {
-      const pos = decodeCursor(input.cursor);
-      const anchorIndex = sorted.findIndex(
-        (c) => c.createdAt === pos.createdAt && c.id === pos.id,
-      );
-      startIndex = anchorIndex === -1 ? sorted.length : anchorIndex + 1;
-    }
-
-    const slice = sorted.slice(startIndex, startIndex + limit + 1);
-    const hasNextPage = slice.length > limit;
-    const pageItems = hasNextPage ? slice.slice(0, limit) : slice;
-
-    const lastItem = pageItems[pageItems.length - 1];
-    const nextCursor =
-      hasNextPage && lastItem
-        ? encodeCursor({ createdAt: lastItem.createdAt, id: lastItem.id })
-        : null;
-
-    return { data: pageItems, nextCursor, hasNextPage, limit };
+  ): Promise<CursorPage<Contract>> {
+    return this.contractRepository.findPage(input);
   }
 
   /**
@@ -104,7 +64,24 @@ export class ContractsService {
       throw new ContractBoundsError(boundsCheck.error);
     }
 
-    const newContract = this.contractRepository.create({
+    // Enforce that the sum of milestone amounts does not exceed the contract
+    // budget. `validateContractBounds` only guards the absolute policy cap
+    // (MAX_CONTRACT_AMOUNT_STROOPS); the per-contract budget is the tighter,
+    // caller-supplied limit that milestone payouts must never overrun.
+    if (data.milestones && data.milestones.length > 0) {
+      const totalMilestoneAmount = data.milestones.reduce(
+        (sum, milestone) => sum + milestone.amount,
+        0,
+      );
+      if (totalMilestoneAmount > data.budget) {
+        throw new ContractBoundsError(
+          `Total milestone amount exceeds maximum contract amount ` +
+            `(milestones total ${totalMilestoneAmount} exceeds budget of ${data.budget})`,
+        );
+      }
+    }
+
+    const newContract = await this.contractRepository.create({
       title: data.title,
       clientId: data.clientId,
       freelancerId: data.freelancerId ?? '',
@@ -123,7 +100,12 @@ export class ContractsService {
   }
 
   /**
-   * Updates a contract using Optimistic Concurrency Control.
+   * Updates a contract using Optimistic Concurrency Control (OCC).
+   *
+   * Requires the caller to supply the `version` they last observed. The update
+   * succeeds only when the stored version matches the supplied value; the version
+   * is then atomically incremented by 1. If the stored version differs (another
+   * writer got there first), a {@link VersionConflictError} is thrown.
    *
    * Maps every updatable field from {@link UpdateContractDto} into the update
    * payload and re-runs {@link validateContractBounds} whenever `budget` or
@@ -131,18 +113,34 @@ export class ContractsService {
    * validation error so callers receive a clear signal rather than a misleading
    * 200 that changed nothing.
    *
-   * @param id  - UUID of the contract to update.
+   * @param id - UUID of the contract to update.
    * @param dto - Partial update payload including the OCC `version`.
-   * @throws ContractBoundsError  when amount or milestone bounds are violated.
-   * @throws ValidationError      when the patch is empty.
-   * @throws VersionConflictError when the version is stale.
+   * @returns The updated Contract with an incremented version.
+   * @throws {MissingVersionError} When `version` is not provided.
+   * @throws {InvalidVersionError} When `version` is not a non-negative integer.
+   * @throws {ContractBoundsError} When amount or milestone bounds are violated.
+   * @throws {VersionConflictError} When the version is stale (another update won).
+   * @throws {NotFoundError} When the contract ID does not exist.
+   *
+   * @security The version check is enforced at the database level via a single
+   * atomic `UPDATE ... WHERE version = ?` statement. It cannot be bypassed by
+   * omitting the version field because this method validates it before calling
+   * the repository.
    */
   public async updateContract(id: string, dto: UpdateContractDto): Promise<Contract> {
     const { version, ...fields } = dto;
 
+    // Defense-in-depth: validate version even though middleware already checked
+    if (version === undefined || version === null) {
+      throw new MissingVersionError();
+    }
+    if (!Number.isInteger(version) || version < 0) {
+      throw new InvalidVersionError();
+    }
+
     // Reject no-op updates
     const hasFields = Object.keys(fields).some(
-      (k) => (fields as Record<string, unknown>)[k] !== undefined
+      (k) => (fields as Record<string, unknown>)[k] !== undefined,
     );
     if (!hasFields) {
       throw new Error('At least one field must be provided for an update.');
@@ -172,7 +170,7 @@ export class ContractsService {
    * Deletes a contract by ID.
    */
   public async deleteContract(id: string): Promise<void> {
-    const deleted = this.contractRepository.delete(id);
+    const deleted = await this.contractRepository.delete(id);
     if (!deleted) {
       throw new NotFoundError(`Contract with id ${id} not found`);
     }

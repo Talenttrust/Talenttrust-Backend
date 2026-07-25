@@ -42,6 +42,14 @@ describe('validateContractBounds', () => {
     it('accepts budget of 1', () => {
       expect(validateContractBounds(1).valid).toBe(true);
     });
+
+    it('accepts budget of 0', () => {
+      expect(validateContractBounds(0).valid).toBe(true);
+    });
+
+    it('accepts negative budget', () => {
+      expect(validateContractBounds(-1).valid).toBe(true);
+    });
   });
 
   describe('milestone count cap', () => {
@@ -105,6 +113,16 @@ describe('validateContractBounds', () => {
       const result = validateContractBounds(1000, milestones);
       expect(result.valid).toBe(false);
       if (!result.valid) expect(result.error).toMatch(/Total milestone amount/);
+    });
+
+    it('accepts milestone with zero amount', () => {
+      const milestones: Milestone[] = [{ title: 'Zero', amount: 0 }];
+      expect(validateContractBounds(1000, milestones).valid).toBe(true);
+    });
+
+    it('accepts milestone with negative amount', () => {
+      const milestones: Milestone[] = [{ title: 'Neg', amount: -1 }];
+      expect(validateContractBounds(1000, milestones).valid).toBe(true);
     });
   });
 

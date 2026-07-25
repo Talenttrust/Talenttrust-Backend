@@ -99,7 +99,7 @@ export function computeIdempotencyKey(
  * ```
  */
 export class IdempotencyStore {
-  private readonly db: ReturnType<typeof Database>;
+  private readonly db: ReturnType<typeof DatabaseConstructor>;
   private readonly config: IdempotencyConfig;
 
   /**

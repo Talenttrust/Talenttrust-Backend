@@ -35,8 +35,18 @@ jobs:
     steps:
       - name: Set environment
         id: set-env
+        env:
+          # Deployment is opt-in: it only runs when the org has configured the
+          # deploy secrets. Without them the production config validation and the
+          # deploy steps cannot succeed, so we skip the deploy pipeline (a clean
+          # no-op) instead of failing every push to a protected branch.
+          DEPLOY_ENABLED: ${{ secrets.DEPLOY_ENABLED }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ -z "$DEPLOY_ENABLED" ]; then
+            echo "Deploy secrets are not configured (DEPLOY_ENABLED unset); skipping the deployment pipeline."
+            echo "environment=none" >> $GITHUB_OUTPUT
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
             echo "should-deploy=true" >> $GITHUB_OUTPUT
           elif [ "${{ github.ref }}" = "refs/heads/main" ]; then

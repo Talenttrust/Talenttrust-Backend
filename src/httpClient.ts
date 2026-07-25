@@ -11,6 +11,23 @@ import { redactHeaders, redactUrl, normalizeUrlPath } from './redact';
 // Symbol used to stamp the request start time onto the config object
 const START_TIME = Symbol('startTime');
 
+/** Typed error thrown by the HTTP client so callers can branch on HTTP status. */
+export class HttpResponseError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly statusText: string,
+    public readonly body: unknown,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'HttpResponseError';
+  }
+
+  get isRetryable(): boolean {
+    return this.status === 429 || this.status >= 500;
+  }
+}
+
 interface TimedAxiosConfig extends InternalAxiosRequestConfig {
   [START_TIME]?: number;
 }
@@ -115,6 +132,17 @@ export function createHttpClient(
           safeError,
         )
       );
+
+      if (error.response) {
+        return Promise.reject(
+          new HttpResponseError(
+            error.response.status,
+            error.response.statusText,
+            error.response.data,
+            `HTTP ${error.response.status} ${error.response.statusText}`,
+          ),
+        );
+      }
 
       return Promise.reject(error);
     },

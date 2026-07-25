@@ -5,6 +5,10 @@
  * This allows tests to run without requiring a running Redis instance.
  */
 
+import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
+import { z } from 'zod';
+extendZodWithOpenApi(z);
+
 // Mock BullMQ classes
 jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({
@@ -41,9 +45,12 @@ jest.mock('ioredis', () => ({
   })),
 }));
 
-// Set test environment variables
 process.env.NODE_ENV = 'test';
 process.env.REDIS_HOST = 'localhost';
 process.env.REDIS_PORT = '6379';
 process.env.COMPLIANCE_AUDIT_SECRET = 'a'.repeat(32);
+process.env.STELLAR_HORIZON_URL = 'https://horizon-testnet.stellar.org';
+process.env.SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org';
+process.env.STELLAR_RPC_URL = 'https://rpc-testnet.stellar.org';
+process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
 

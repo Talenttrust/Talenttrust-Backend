@@ -1,6 +1,7 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { rpc } from '@stellar/stellar-sdk';
 import { sorobanEnv } from '../../sorobanEnv';
+import { withRetry } from '../../utils/retry';
 
 /**
  * Soroban RPC Service
@@ -16,6 +17,7 @@ export class SorobanRpcService {
 
   /**
    * Retrieves specific data from a contract.
+   * [IDEMPOTENT READ] Retried automatically on transient failures.
    *
    * @param contractId - The exact standard base32 string representing the contract id.
    * @param key - The StellarSdk.xdr.ScVal key for the contract data.
@@ -34,7 +36,13 @@ export class SorobanRpcService {
         })
       );
       // rpc.Server.getLedgerEntries is the standard method for getting contract state
-      const response = await this.server.getLedgerEntries(ledgerKey);
+      const response = await withRetry(
+        () => this.server.getLedgerEntries(ledgerKey),
+        {
+          maxAttempts: sorobanEnv.sorobanRpcRetryAttempts,
+          baseDelayMs: sorobanEnv.sorobanRpcRetryBaseDelayMs,
+        }
+      );
       if (response.entries && response.entries.length > 0) {
         return response.entries[0];
       }
@@ -47,6 +55,7 @@ export class SorobanRpcService {
 
   /**
    * Fetches the most recent ledger known to the RPC server.
+   * [IDEMPOTENT READ] Retried automatically on transient failures.
    *
    * Used by sync workers to discover the chain head so they only scan up to a
    * real, settled ledger instead of an arbitrary upper bound.
@@ -55,7 +64,13 @@ export class SorobanRpcService {
    */
   public async getLatestLedger(): Promise<rpc.Api.GetLatestLedgerResponse> {
     try {
-      return await this.server.getLatestLedger();
+      return await withRetry(
+        () => this.server.getLatestLedger(),
+        {
+          maxAttempts: sorobanEnv.sorobanRpcRetryAttempts,
+          baseDelayMs: sorobanEnv.sorobanRpcRetryBaseDelayMs,
+        }
+      );
     } catch (error) {
       console.error('Error fetching latest ledger:', error);
       throw error;
@@ -64,6 +79,7 @@ export class SorobanRpcService {
 
   /**
    * Queries contract events from the network for a given filter/ledger window.
+   * [IDEMPOTENT READ] Retried automatically on transient failures.
    *
    * Thin pass-through to the underlying RPC `getEvents` call. Pagination is left
    * to the caller via the returned `cursor` so large windows can be streamed.
@@ -75,7 +91,13 @@ export class SorobanRpcService {
     request: rpc.Server.GetEventsRequest
   ): Promise<rpc.Api.GetEventsResponse> {
     try {
-      return await this.server.getEvents(request);
+      return await withRetry(
+        () => this.server.getEvents(request),
+        {
+          maxAttempts: sorobanEnv.sorobanRpcRetryAttempts,
+          baseDelayMs: sorobanEnv.sorobanRpcRetryBaseDelayMs,
+        }
+      );
     } catch (error) {
       console.error('Error fetching contract events:', error);
       throw error;
@@ -84,6 +106,7 @@ export class SorobanRpcService {
 
   /**
    * Simulates a given transaction on the Soroban network to calculate fees and resource usage.
+   * [IDEMPOTENT READ] Retried automatically on transient failures.
    *
    * @param transaction - The unsigned or signed transaction to be simulated.
    * @returns The simulation result, potentially including the expected return value and auth/resource events.
@@ -92,7 +115,13 @@ export class SorobanRpcService {
     transaction: StellarSdk.Transaction
   ): Promise<rpc.Api.SimulateTransactionResponse> {
     try {
-      return await this.server.simulateTransaction(transaction);
+      return await withRetry(
+        () => this.server.simulateTransaction(transaction),
+        {
+          maxAttempts: sorobanEnv.sorobanRpcRetryAttempts,
+          baseDelayMs: sorobanEnv.sorobanRpcRetryBaseDelayMs,
+        }
+      );
     } catch (error) {
       console.error('Error simulating transaction:', error);
       throw error;
@@ -101,6 +130,7 @@ export class SorobanRpcService {
 
   /**
    * Submits a signed Soroban transaction to the network.
+   * [NON-IDEMPOTENT MUTATING CALL] Never retried automatically.
    *
    * @param transaction - A constructed, signed transaction.
    * @returns The initial response after attempting to submit the transaction.
@@ -118,6 +148,7 @@ export class SorobanRpcService {
 
   /**
    * Periodically checks the status of a specific transaction until it is successful, failed, or timed out.
+   * [IDEMPOTENT READ] The inner RPC queries are retried automatically on transient failures.
    *
    * @param hash - The hash of the submitted transaction.
    * @param timeoutMs - Maximum amount of time to wait in milliseconds (default 30 seconds)
@@ -132,7 +163,13 @@ export class SorobanRpcService {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeoutMs) {
-      const txResponse = await this.server.getTransaction(hash);
+      const txResponse = await withRetry(
+        () => this.server.getTransaction(hash),
+        {
+          maxAttempts: sorobanEnv.sorobanRpcRetryAttempts,
+          baseDelayMs: sorobanEnv.sorobanRpcRetryBaseDelayMs,
+        }
+      );
 
       if (txResponse.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
         return txResponse;

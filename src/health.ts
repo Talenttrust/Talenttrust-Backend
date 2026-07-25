@@ -69,7 +69,7 @@ healthRouter.get("/ready", async (_req: Request, res: Response) => {
     const checks: ProbeSnapshot[] = [db, rpc, queue].map((result, index) => {
       const name = ["db", "stellar-rpc", "queue"][index];
       if (result.status === "fulfilled") {
-        return sanitizeProbe({ name, ok: result.value.ok, latencyMs: result.value.latencyMs, detail: result.value.detail });
+        return sanitizeProbe({ name, ok: result.value.ok || false, latencyMs: result.value.latencyMs, detail: result.value.detail });
       }
 
       return sanitizeProbe({

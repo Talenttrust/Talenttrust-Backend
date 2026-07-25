@@ -32,6 +32,38 @@ export interface WorkerLike {
  * }
  * ```
  */
+export interface DrainableShutdownHandler {
+  /**
+   * Human-readable handler name used in shutdown logs.
+   */
+  readonly name: string;
+
+  /**
+   * Prevents new work from being accepted.
+   * Called immediately on SIGTERM, before any waiting begins.
+   * Must be synchronous and idempotent.
+   */
+  stopAccepting(): void;
+
+  /**
+   * Resolves when all in-flight work has completed.
+   * The caller races this against the shutdown grace period.
+   */
+  drain(): Promise<void>;
+
+  /**
+   * Persists any remaining state that still needs to survive shutdown.
+   * Called when the grace period expires before `drain()` completes.
+   */
+  checkpoint(): Promise<void>;
+
+  /**
+   * Optional finalizer invoked after draining/checkpointing to release any
+   * underlying resources owned by the handler.
+   */
+  close?(): Promise<void>;
+}
+
 export interface DrainableWebhookService {
   /**
    * Number of deliveries currently in-flight.
@@ -84,6 +116,18 @@ export interface ShutdownOptions {
    * When omitted the drain phase is skipped entirely.
    */
   webhookService?: DrainableWebhookService;
+  /**
+   * Optional drainable handlers for long-running background work such as the
+   * transaction poller or queue workers. They stop new work, wait for in-flight
+   * work, and checkpoint any remaining state if the grace period expires.
+   */
+  shutdownDrainHandlers?: DrainableShutdownHandler[];
+  /**
+   * Max ms to wait for registered shutdown drain handlers to finish in-flight
+   * work before checkpointing remaining state and continuing shutdown.
+   * Default: 30 s.
+   */
+  shutdownDrainTimeoutMs?: number;
 }
 
 export interface CloseableConnection {
@@ -162,18 +206,18 @@ async function drainWebhookDeliveries(
 
   const inFlight = service.inFlightCount;
   if (inFlight === 0) {
-    logger.info('webhook_deliveries_drained', { inFlight: 0 });
+    logger.info('webhook_deliveries_drained');
     return;
   }
 
-  logger.info('webhook_drain_started', { inFlight, timeoutMs });
+  logger.info('webhook_drain_started');
 
   let timedOut = false;
 
   await Promise.race([
     service.drain().then(() => {
       if (!timedOut) {
-        logger.info('webhook_deliveries_drained', { inFlight });
+        logger.info('webhook_deliveries_drained');
       }
     }),
     new Promise<void>((resolve) =>
@@ -185,19 +229,92 @@ async function drainWebhookDeliveries(
   ]);
 
   if (timedOut) {
-    const remaining = service.inFlightCount;
-    logger.warn('webhook_drain_timeout', { remaining, timeoutMs });
+    logger.warn('webhook_drain_timeout');
     // Force-flush remaining deliveries to DLQ so they are not silently lost.
     // flushToDLQ() must be idempotent and must NOT include raw secrets in the
     // persisted payload (enforced by WebhookDLQStorage).
     // Errors are caught so a DLQ write failure never prevents process.exit().
     try {
       await service.flushToDLQ();
-      logger.info('webhook_drain_flushed_to_dlq', { flushed: remaining });
-    } catch (flushErr) {
-      logger.warn('webhook_drain_flush_error', { err: flushErr });
+      logger.info('webhook_drain_flushed_to_dlq');
+    } catch {
+      logger.warn('webhook_drain_flush_error');
     }
   }
+}
+
+async function drainShutdownHandlers(
+  handlers: DrainableShutdownHandler[],
+  timeoutMs: number,
+): Promise<void> {
+  if (handlers.length === 0) {
+    return;
+  }
+
+  for (const handler of handlers) {
+    try {
+      handler.stopAccepting();
+    } catch {
+      logger.warn('shutdown_handler_stop_accepting_error');
+    }
+  }
+
+  logger.info('shutdown_drainers_started');
+
+  let timedOut = false;
+
+  await Promise.race([
+    Promise.allSettled(
+      handlers.map(async (handler) => {
+        try {
+          await handler.drain();
+        } catch {
+          logger.warn('shutdown_handler_drain_error');
+        }
+      }),
+    ).then(() => {
+      if (!timedOut) {
+        logger.info('shutdown_drainers_drained');
+      }
+    }),
+    new Promise<void>((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, timeoutMs);
+    }),
+  ]);
+
+  if (timedOut) {
+    logger.warn('shutdown_drainers_timeout');
+
+    try {
+      await Promise.allSettled(
+        handlers.map(async (handler) => {
+          try {
+            await handler.checkpoint();
+          } catch {
+            logger.warn('shutdown_handler_checkpoint_error');
+          }
+        }),
+      );
+      logger.info('shutdown_drainers_checkpointed');
+    } catch {
+      logger.warn('shutdown_drainers_checkpoint_error');
+    }
+  }
+
+  await Promise.allSettled(
+    handlers.map(async (handler) => {
+      try {
+        if (handler.close) {
+          await handler.close();
+        }
+      } catch {
+        logger.warn('shutdown_handler_close_error');
+      }
+    }),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -244,24 +361,26 @@ export function registerShutdownHandlers(
     httpTimeoutMs = 30_000,
     workerTimeoutMs = 30_000,
     webhookDrainTimeoutMs = Number(process.env['WEBHOOK_DRAIN_TIMEOUT_MS'] ?? 30_000),
+    shutdownDrainTimeoutMs = 30_000,
     webhookService,
+    shutdownDrainHandlers = [],
   } = options;
 
   let shuttingDown = false;
 
-  async function shutdown(signal: string): Promise<void> {
+  async function shutdown(_signal: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     draining = true;
 
-    logger.info('shutdown_initiated', { signal });
+    logger.info('shutdown_initiated');
 
     // ── 1. HTTP server ──────────────────────────────────────────────────────
     try {
       await closeHttpServer(server, httpTimeoutMs);
       logger.info('http_drained');
-    } catch (err) {
-      logger.warn('http_drain_timeout', { err });
+    } catch {
+      logger.warn('http_drain_timeout');
     }
 
     // ── 2. Webhook delivery drain ───────────────────────────────────────────
@@ -271,26 +390,31 @@ export function registerShutdownHandlers(
       await drainWebhookDeliveries(webhookService, webhookDrainTimeoutMs);
     }
 
-    // ── 3. BullMQ workers ───────────────────────────────────────────────────
+    // ── 3. Registered shutdown drain handlers ─────────────────────────────
+    if (shutdownDrainHandlers.length > 0) {
+      await drainShutdownHandlers(shutdownDrainHandlers, shutdownDrainTimeoutMs);
+    }
+
+    // ── 4. BullMQ workers ───────────────────────────────────────────────────
     await Promise.allSettled(
       workers.map(async (w) => {
         try {
           await closeWorker(w, workerTimeoutMs);
-          logger.info('bullmq_worker_closed', { worker: w.name });
-        } catch (err) {
-          logger.warn('bullmq_worker_timeout', { worker: w.name, err });
+          logger.info('bullmq_worker_closed');
+        } catch {
+          logger.warn('bullmq_worker_timeout');
         }
       }),
     );
 
-    // ── 4. Downstream connections ───────────────────────────────────────────
+    // ── 5. Downstream connections ───────────────────────────────────────────
     await Promise.allSettled(
       connections.map(async (conn) => {
         try {
           await conn.close();
-          logger.info('connection_closed', { connection: conn.name });
-        } catch (err) {
-          logger.warn('connection_close_error', { connection: conn.name, err });
+          logger.info('connection_closed');
+        } catch {
+          logger.warn('connection_close_error');
         }
       }),
     );

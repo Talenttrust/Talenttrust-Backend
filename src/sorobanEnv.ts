@@ -52,6 +52,20 @@ const sorobanEnvSchema = z.object({
     .string()
     .regex(/^[0-9a-fA-F]{64}$/, 'SOROBAN_ESCROW_CONTRACT_METADATA_HASH must be a 64-character hex string')
     .optional(),
+
+  /** Number of retry attempts for idempotent RPC calls. */
+  SOROBAN_RPC_RETRY_ATTEMPTS: z
+    .string()
+    .default('5')
+    .transform((val) => val === '' ? 5 : parseInt(val, 10))
+    .pipe(z.number().int().positive()),
+
+  /** Base delay between retries in milliseconds. */
+  SOROBAN_RPC_RETRY_BASE_DELAY_MS: z
+    .string()
+    .default('200')
+    .transform((val) => val === '' ? 200 : parseInt(val, 10))
+    .pipe(z.number().int().positive()),
 });
 
 /** Raw validated shape (SCREAMING_SNAKE_CASE keys from zod). */
@@ -64,6 +78,8 @@ export interface SorobanEnv {
   sorobanEscrowContractId?: string;
   sorobanTokenContractId?: string;
   sorobanEscrowContractMetadataHash?: string;
+  sorobanRpcRetryAttempts: number;
+  sorobanRpcRetryBaseDelayMs: number;
 }
 
 function toSorobanEnv(raw: RawSorobanEnv): SorobanEnv {
@@ -73,6 +89,8 @@ function toSorobanEnv(raw: RawSorobanEnv): SorobanEnv {
     sorobanEscrowContractId: raw.SOROBAN_ESCROW_CONTRACT_ID,
     sorobanTokenContractId: raw.SOROBAN_TOKEN_CONTRACT_ID,
     sorobanEscrowContractMetadataHash: raw.SOROBAN_ESCROW_CONTRACT_METADATA_HASH,
+    sorobanRpcRetryAttempts: raw.SOROBAN_RPC_RETRY_ATTEMPTS,
+    sorobanRpcRetryBaseDelayMs: raw.SOROBAN_RPC_RETRY_BASE_DELAY_MS,
   };
 }
 

@@ -16,9 +16,34 @@ import {
   getRequestLogger,
   getRequestContext,
   buildWebhookHeaders,
+  isValidCorrelationId,
+  sanitizeCorrelationId,
 } from './correlationId';
 
 describe('correlationId utilities', () => {
+  describe('sanitizeCorrelationId', () => {
+    it('should accept alphanumeric, hyphen, and underscore IDs up to 128 chars', () => {
+      const id = `Trace_ID-${'a'.repeat(119)}`;
+
+      expect(isValidCorrelationId(id)).toBe(true);
+      expect(sanitizeCorrelationId(id)).toBe(id);
+    });
+
+    it('should reject CRLF header injection payloads', () => {
+      const malicious = 'trace\r\nX-Injected-Header: yes';
+
+      expect(isValidCorrelationId(malicious)).toBe(false);
+      expect(sanitizeCorrelationId(malicious)).toBeUndefined();
+    });
+
+    it('should reject empty, non-string, and over-length IDs', () => {
+      expect(sanitizeCorrelationId('')).toBeUndefined();
+      expect(sanitizeCorrelationId(123)).toBeUndefined();
+      expect(sanitizeCorrelationId(null)).toBeUndefined();
+      expect(sanitizeCorrelationId('a'.repeat(129))).toBeUndefined();
+    });
+  });
+
   describe('getCorrelationId', () => {
     /**
      * Should return the correlation ID from response locals when present.
@@ -57,6 +82,14 @@ describe('correlationId utilities', () => {
       const result = getCorrelationId(res);
 
       expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when locals contains an unsafe correlation ID', () => {
+      const res = {
+        locals: { correlationId: 'bad\nheader' },
+      } as any as Response;
+
+      expect(getCorrelationId(res)).toBeUndefined();
     });
   });
 
@@ -257,6 +290,20 @@ describe('correlationId utilities', () => {
       const headers = buildWebhookHeaders(longId);
 
       expect(headers['X-Correlation-Id']).toBe(longId);
+    });
+
+    it('should omit unsafe correlation IDs from webhook headers', () => {
+      const headers = buildWebhookHeaders('trace\r\nX-Evil: yes');
+
+      expect(headers['X-Correlation-Id']).toBeUndefined();
+      expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('should omit over-length correlation IDs from webhook headers', () => {
+      const headers = buildWebhookHeaders('a'.repeat(129));
+
+      expect(headers['X-Correlation-Id']).toBeUndefined();
+      expect(headers['Content-Type']).toBe('application/json');
     });
   });
 });

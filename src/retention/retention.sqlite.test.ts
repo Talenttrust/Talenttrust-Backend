@@ -373,15 +373,14 @@ describe('SqliteStorageProvider', () => {
         // And `getArchiveStats()` reflects persisted rows after the restart:
         // the issue requires stats to match persisted rows, so wire the same
         // SqliteStorageProvider into both the local and archive buckets of the
-        // StorageManager. (The double-counting of COLD_STORAGE / ENCRYPTED_ARCHIVE
-        // is a pre-existing quirk of `getArchiveStats()` shared with the in-memory
-        // tests; we exercise the survival guarantee here, not aggregation.)
+        // StorageManager. We exercise the survival guarantee here, not the
+        // per-storage-type aggregation: the single persisted row is counted
+        // exactly once (providers shared across storage types are de-duplicated).
         const engine = new RetentionPolicyEngine();
         const manager = new StorageManager(provider, provider);
         const archival = new DataArchivalService(manager, engine, false);
         const stats = await archival.getArchiveStats();
-        expect(stats.byStorageType[ArchivalStorageType.COLD_STORAGE]).toBe(1);
-        expect(stats.byStorageType[ArchivalStorageType.ENCRYPTED_ARCHIVE]).toBe(1);
+        expect(stats.totalArchived).toBe(1);
 
         // Wipe and ensure subsequent deletes stick across another reopen.
         expect(await provider.delete('restart-1')).toBe(true);

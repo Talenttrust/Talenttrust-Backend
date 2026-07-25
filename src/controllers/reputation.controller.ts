@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { ReputationService } from '../services/reputation.service';
 import { ForbiddenError, ConflictError, ValidationError, AppError } from '../errors/appError';
 import { AuthenticatedRequest } from '../auth/authenticate';
+import { isValidReputationRatingPayload } from './reputation.validation';
 
 /**
  * @title Reputation Controller
@@ -58,16 +59,7 @@ export class ReputationController {
       const requestId =
         typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
 
-      // Defense-in-depth: validate rating range and integrality even if middleware was bypassed
-      const rating = payload?.rating;
-      const isValidRating =
-        typeof rating === 'number' &&
-        Number.isFinite(rating) &&
-        Number.isInteger(rating) &&
-        rating >= 1 &&
-        rating <= 5;
-
-      if (!payload || !payload.reviewerId || !isValidRating) {
+      if (!isValidReputationRatingPayload(payload)) {
         res.status(400).json({
           error: {
             code: 'bad_request',

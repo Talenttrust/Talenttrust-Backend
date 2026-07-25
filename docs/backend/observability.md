@@ -61,6 +61,7 @@ If auth is missing/invalid, route returns `401`.
 | `SERVICE_NAME` | `talenttrust-backend` | Name used in health payload and metrics labels |
 | `METRICS_ENABLED` | `true` | Set to `false` to return `404` on `/metrics` |
 | `METRICS_AUTH_TOKEN` | _unset_ | Enables bearer-token protection for `/metrics` |
+| `HTTP_METRICS_ROUTE_LABEL_LIMIT` | `100` | Maximum distinct HTTP route template labels before new routes are recorded as `other` |
 
 ## Exported Prometheus Metrics
 
@@ -87,6 +88,9 @@ Mitigation:
 Mitigation:
 
 - Route labels use bounded path values from Express route templates.
+- Route labels include the static mount path plus the matched template, for example `/api/v1/contracts/:id`.
+- Unmatched requests collapse into the shared `unmatched` bucket.
+- `HTTP_METRICS_ROUTE_LABEL_LIMIT` caps distinct route labels; routes first seen after the cap are recorded as `other`.
 - No request payload, IDs, or user-provided fields are added as labels.
 - Rate limit metrics use redacted provider IDs (first 4 chars + `****`) to bound cardinality.
 

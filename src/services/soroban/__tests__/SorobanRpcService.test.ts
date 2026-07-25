@@ -29,6 +29,18 @@ jest.mock('@stellar/stellar-sdk', () => {
   };
 });
 
+jest.mock('../../../sorobanEnv', () => {
+  const actual = jest.requireActual('../../../sorobanEnv');
+  return {
+    ...actual,
+    sorobanEnv: {
+      ...actual.sorobanEnv,
+      sorobanRpcRetryAttempts: 5,
+      sorobanRpcRetryBaseDelayMs: 1, // 1ms delay to speed up tests
+    },
+  };
+});
+
 describe('SorobanRpcService', () => {
   let service: SorobanRpcService;
 
@@ -64,13 +76,32 @@ describe('SorobanRpcService', () => {
       expect(result).toBeUndefined();
     });
 
-    it('should throw an error if getLedgerEntries fails', async () => {
+    it('should retry on transient failures and throw final error when retries are exhausted', async () => {
       mockGetLedgerEntries.mockRejectedValue(new Error('Network Error'));
 
       const contractId = 'CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5';
       const key = StellarSdk.xdr.ScVal.scvSymbol('Test');
 
       await expect(service.getContractData(contractId, key)).rejects.toThrow('Network Error');
+      // Should retry up to maxAttempts (default 5 in our extended config)
+      expect(mockGetLedgerEntries).toHaveBeenCalledTimes(5);
+    });
+
+    it('should succeed if a transient error is resolved on subsequent attempts', async () => {
+      const mockEntry = { key: 'mockKey', val: 'mockVal' };
+      mockGetLedgerEntries
+        .mockRejectedValueOnce(new Error('Transient Error 1'))
+        .mockRejectedValueOnce(new Error('Transient Error 2'))
+        .mockResolvedValueOnce({
+          entries: [mockEntry],
+        });
+
+      const contractId = 'CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5';
+      const key = StellarSdk.xdr.ScVal.scvSymbol('Test');
+
+      const result = await service.getContractData(contractId, key);
+      expect(result).toEqual(mockEntry);
+      expect(mockGetLedgerEntries).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -84,9 +115,10 @@ describe('SorobanRpcService', () => {
       expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw if the RPC call fails', async () => {
+    it('should retry on failure and throw if all attempts fail', async () => {
       mockGetLatestLedger.mockRejectedValue(new Error('Ledger Error'));
       await expect(service.getLatestLedger()).rejects.toThrow('Ledger Error');
+      expect(mockGetLatestLedger).toHaveBeenCalledTimes(5);
     });
   });
 
@@ -101,10 +133,11 @@ describe('SorobanRpcService', () => {
       expect(mockGetEvents).toHaveBeenCalledWith(request);
     });
 
-    it('should throw if the RPC call fails', async () => {
+    it('should retry on failure and throw if all attempts fail', async () => {
       mockGetEvents.mockRejectedValue(new Error('Events Error'));
       const request = { filters: [{ type: 'contract' as const }], startLedger: 1 };
       await expect(service.getEvents(request)).rejects.toThrow('Events Error');
+      expect(mockGetEvents).toHaveBeenCalledTimes(5);
     });
   });
 
@@ -119,16 +152,17 @@ describe('SorobanRpcService', () => {
       expect(mockSimulateTransaction).toHaveBeenCalledWith(tx);
     });
 
-    it('should throw an error if simulation fails', async () => {
+    it('should retry on failure and throw if all attempts fail', async () => {
       mockSimulateTransaction.mockRejectedValue(new Error('Sim Error'));
       const tx = {} as StellarSdk.Transaction;
 
       await expect(service.simulateTransaction(tx)).rejects.toThrow('Sim Error');
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(5);
     });
   });
 
   describe('sendTransaction', () => {
-    it('should submit transaction and return response', async () => {
+    it('should submit transaction and return response and NOT retry on failure', async () => {
       const mockResponse = { status: 'PENDING' };
       mockSendTransaction.mockResolvedValue(mockResponse);
 
@@ -136,13 +170,15 @@ describe('SorobanRpcService', () => {
       const result = await service.sendTransaction(tx);
       expect(result).toEqual(mockResponse);
       expect(mockSendTransaction).toHaveBeenCalledWith(tx);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw an error if submit fails', async () => {
+    it('should throw immediately and NOT retry if submit fails', async () => {
       mockSendTransaction.mockRejectedValue(new Error('Submit Error'));
       const tx = {} as StellarSdk.Transaction;
 
       await expect(service.sendTransaction(tx)).rejects.toThrow('Submit Error');
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -160,7 +196,7 @@ describe('SorobanRpcService', () => {
       expect(mockGetTransaction).toHaveBeenCalledWith('testhash');
     });
 
-    it('should poll until timeout if status is NOT_FOUND', async () => {
+    it('should poll until timeout if status is NOT_FOUND and retry inner call if it fails', async () => {
       mockGetTransaction.mockResolvedValue({
         status: rpc.Api.GetTransactionStatus.NOT_FOUND,
       });
@@ -178,6 +214,17 @@ describe('SorobanRpcService', () => {
         /Transaction polling timed out/
       );
       expect(mockGetTransaction.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it('should retry the inner getTransaction call on transient RPC failure', async () => {
+      mockGetTransaction
+        .mockRejectedValueOnce(new Error('Transient RPC Error 1'))
+        .mockRejectedValueOnce(new Error('Transient RPC Error 2'))
+        .mockResolvedValueOnce({ status: rpc.Api.GetTransactionStatus.SUCCESS });
+
+      const result = await service.getTransactionStatus('testhash', 1000, 10);
+      expect(result).toEqual({ status: rpc.Api.GetTransactionStatus.SUCCESS });
+      expect(mockGetTransaction).toHaveBeenCalledTimes(3);
     });
 
     it('should resolve if it becomes found after a few polls', async () => {

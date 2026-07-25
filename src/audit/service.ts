@@ -14,7 +14,7 @@
  *   strict mode so tests can assert on them.
  */
 
-import type { AuditEntry, AuditQuery, AuditSeverity, CreateAuditEntryInput, IntegrityReport } from './types';
+import type { AuditEntry, AuditQuery, AuditSeverity, CreateAuditEntryInput, IntegrityReport, AuditQueryResult } from './types';
 import type { AuditAction } from './types';
 import { createDefaultAuditRepository, type AuditLogRepository } from './repository';
 
@@ -160,6 +160,16 @@ export class AuditService {
    */
   query(query: AuditQuery = {}): AuditEntry[] {
     return this.repository.query(query);
+  }
+
+  /**
+   * Queries the audit log with cursor-based pagination.
+   *
+   * @param query - Filter and pagination options including cursor.
+   * @returns Paginated result with entries and next cursor.
+   */
+  queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
+    return this.repository.queryWithCursor(query);
   }
 
   /**

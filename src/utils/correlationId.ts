@@ -14,6 +14,27 @@
 
 import { Response } from 'express';
 
+const SAFE_CORRELATION_ID_PATTERN = /^[a-zA-Z0-9\-_]{1,128}$/;
+
+/**
+ * Returns true when a value is a safe correlation ID for logs and HTTP headers.
+ *
+ * Correlation IDs are limited to alphanumeric characters, hyphen, and
+ * underscore with a maximum length of 128 characters. This rejects CR/LF and
+ * other control characters so caller-supplied IDs cannot inject headers.
+ */
+export function isValidCorrelationId(value: unknown): value is string {
+  return typeof value === 'string' && SAFE_CORRELATION_ID_PATTERN.test(value);
+}
+
+/**
+ * Returns a safe correlation ID or undefined when the caller-supplied value is
+ * missing or invalid.
+ */
+export function sanitizeCorrelationId(value: unknown): string | undefined {
+  return isValidCorrelationId(value) ? value : undefined;
+}
+
 /**
  * Extract correlation ID from Express response locals.
  *
@@ -33,7 +54,7 @@ import { Response } from 'express';
  * ```
  */
 export function getCorrelationId(res: Response): string | undefined {
-  return res.locals['correlationId'] as string | undefined;
+  return sanitizeCorrelationId(res.locals['correlationId']);
 }
 
 /**
@@ -128,8 +149,9 @@ export function buildWebhookHeaders(
     'Content-Type': 'application/json',
   };
 
-  if (correlationId) {
-    headers['X-Correlation-Id'] = correlationId;
+  const safeCorrelationId = sanitizeCorrelationId(correlationId);
+  if (safeCorrelationId) {
+    headers['X-Correlation-Id'] = safeCorrelationId;
   }
 
   return headers;

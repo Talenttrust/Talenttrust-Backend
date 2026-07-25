@@ -19,6 +19,9 @@ describe('Environment Configuration', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; the SSRF-guard
+    // assertions here verify the fail-closed default, so clear the bypass flag.
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
   });
 
   afterAll(() => {
@@ -66,6 +69,8 @@ describe('Environment Configuration', () => {
 
     it('should load production configuration', () => {
       process.env.NODE_ENV = 'production';
+      // Production requires a JWT_SECRET (see the JWT_SECRET validation suite).
+      process.env.JWT_SECRET = 'a'.repeat(32);
       const config = loadEnvironmentConfig();
 
       expect(config.environment).toBe('production');
@@ -114,7 +119,7 @@ describe('Environment Configuration', () => {
 
     it('should parse CORS origins from comma-separated list', () => {
       process.env.NODE_ENV = 'development';
-      process.env.CORS_ORIGINS = 'https://app1.com,https://app2.com';
+      process.env.CORS_ALLOWED_ORIGINS = 'https://app1.com,https://app2.com';
       const config = loadEnvironmentConfig();
 
       expect(config.corsOrigins).toEqual(['https://app1.com', 'https://app2.com']);
@@ -173,12 +178,12 @@ describe('Environment Configuration', () => {
       expect(() => loadEnvironmentConfig()).toThrow();
     });
 
-    it('should handle empty CORS_ORIGINS using default', () => {
+    it('should use empty array when CORS_ALLOWED_ORIGINS is set to empty string', () => {
       process.env.NODE_ENV = 'development';
-      process.env.CORS_ORIGINS = '';
+      process.env.CORS_ALLOWED_ORIGINS = '';
       const config = loadEnvironmentConfig();
 
-      expect(config.corsOrigins).toEqual(['http://localhost:3000']);
+      expect(config.corsOrigins).toEqual([]);
     });
 
     it('should handle DEBUG=false', () => {
@@ -253,6 +258,25 @@ describe('Environment Configuration', () => {
         '/api/upload': 1048576,
         '/api/data': 2048
       });
+    });
+
+    it('should parse HTTP_METRICS_ROUTE_LABEL_LIMIT with a safe default', () => {
+      delete process.env.HTTP_METRICS_ROUTE_LABEL_LIMIT;
+      expect(validateEnv(process.env).HTTP_METRICS_ROUTE_LABEL_LIMIT).toBe(100);
+
+      process.env.HTTP_METRICS_ROUTE_LABEL_LIMIT = '250';
+      expect(validateEnv(process.env).HTTP_METRICS_ROUTE_LABEL_LIMIT).toBe(250);
+    });
+
+    it('should reject invalid HTTP_METRICS_ROUTE_LABEL_LIMIT values', () => {
+      process.env.HTTP_METRICS_ROUTE_LABEL_LIMIT = '0';
+      expect(() => validateEnv(process.env)).toThrow();
+
+      process.env.HTTP_METRICS_ROUTE_LABEL_LIMIT = '10001';
+      expect(() => validateEnv(process.env)).toThrow();
+
+      process.env.HTTP_METRICS_ROUTE_LABEL_LIMIT = 'not-a-number';
+      expect(() => validateEnv(process.env)).toThrow();
     });
 
     it('should reject malformed ROUTE_BODY_LIMITS', () => {

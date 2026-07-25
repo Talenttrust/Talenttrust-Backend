@@ -29,25 +29,18 @@
 import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'crypto';
 import { logger } from '../logger';
+import { sanitizeCorrelationId } from '../utils/correlationId';
 
 /** Header names used for propagation. */
 export const REQUEST_ID_HEADER = 'x-request-id';
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
 
 /**
- * Allowlist pattern for externally supplied IDs.
- * Accepts UUID v4 format OR alphanumeric strings with hyphens/underscores
- * up to 128 characters.
- */
-const SAFE_ID_PATTERN = /^[a-zA-Z0-9\-_]{1,128}$/;
-
-/**
  * Validate an externally supplied ID string.
  * Returns the value unchanged if valid, otherwise returns undefined.
  */
 export function validateExternalId(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  return SAFE_ID_PATTERN.test(value) ? value : undefined;
+  return sanitizeCorrelationId(value);
 }
 
 /**

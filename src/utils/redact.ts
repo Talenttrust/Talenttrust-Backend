@@ -7,6 +7,20 @@
  */
 
 const REDACTED = '[REDACTED]';
+const SENSITIVE_KEY_PATTERN = /secret|signature|token|key|password|authorization|nonce|cookie/i;
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'x-api-secret',
+  'x-auth-token',
+  'x-access-token',
+  'proxy-authorization',
+  'x-forwarded-for',
+  'x-real-ip',
+]);
+const DEFAULT_HEADER_VALUE_MAX_LENGTH = 200;
 
 /**
  * Replaces a secret value with a fixed redaction marker.
@@ -25,10 +39,9 @@ export function redactSecret(_value: unknown): string {
  * @returns A new object with sensitive values replaced by `[REDACTED]`.
  */
 export function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
-  const SENSITIVE = /secret|signature|token|key|password|authorization|nonce/i;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
-    if (SENSITIVE.test(k)) {
+    if (SENSITIVE_KEY_PATTERN.test(k)) {
       out[k] = REDACTED;
     } else if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
       out[k] = redactObject(v as Record<string, unknown>);
@@ -37,6 +50,42 @@ export function redactObject(obj: Record<string, unknown>): Record<string, unkno
     }
   }
   return out;
+}
+
+/**
+ * Redacts sensitive HTTP header values while preserving non-sensitive headers.
+ * Header matching is case-insensitive and known sensitive headers are always masked.
+ * Non-sensitive string values are truncated to a bounded length for log safety.
+ *
+ * @param headers - Header map from Express request/response objects.
+ * @param maxValueLength - Maximum length for non-sensitive string header values.
+ * @returns A new object safe to include in structured logs.
+ */
+export function redactHeaders(
+  headers: Record<string, unknown> | undefined,
+  maxValueLength = DEFAULT_HEADER_VALUE_MAX_LENGTH,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+
+  if (!headers) {
+    return sanitized;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (SENSITIVE_HEADER_NAMES.has(key.toLowerCase())) {
+      sanitized[key] = REDACTED;
+      continue;
+    }
+
+    if (typeof value === 'string' && value.length > maxValueLength) {
+      sanitized[key] = value.slice(0, maxValueLength) + '...';
+      continue;
+    }
+
+    sanitized[key] = value;
+  }
+
+  return sanitized;
 }
 
 /**

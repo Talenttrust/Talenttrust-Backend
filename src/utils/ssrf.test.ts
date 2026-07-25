@@ -50,7 +50,7 @@ describe('SSRF Protection Utility', () => {
 
     it('should identify decimal-encoded IPv4 as private', () => {
       expect(isPrivateHost('2130706433')).toBe(true); // 127.0.0.1
-      expect(isPrivateHost('16777343')).toBe(true); // 10.0.0.1
+      expect(isPrivateHost('167772161')).toBe(true); // 10.0.0.1
     });
 
     it('should identify octal-encoded IPv4 as private', () => {
@@ -70,6 +70,10 @@ describe('SSRF Protection Utility', () => {
     beforeEach(() => {
       jest.resetModules();
       process.env = { ...originalEnv };
+      // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS so unrelated
+      // suites can deliver to loopback. These cases assert the fail-closed
+      // default, so clear it and let each test opt in explicitly.
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
     });
 
     afterEach(() => {

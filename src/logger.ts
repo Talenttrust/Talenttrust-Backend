@@ -20,6 +20,8 @@
  */
 
 
+import { getRequestContext } from './middleware/requestContext';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 /** Fields that every log record must carry. */
@@ -86,6 +88,10 @@ const SENSITIVE_KEYS = new Set([
   'credit_card',
   'webhooksecret',
   'webhook_secret',
+  'privatekey',
+  'mnemonic',
+  'seed',
+  'email',
 ]);
 
 const redactionPaths = Array.from(SENSITIVE_KEYS).flatMap(key => [
@@ -157,6 +163,11 @@ export class Logger {
   ): void {
     const { requestId, correlationId, ...rest } = this.context;
 
+    // Retrieve active request context from AsyncLocalStorage if not explicitly bound
+    const store = getRequestContext();
+    const resolvedRequestId = requestId ?? store?.requestId;
+    const resolvedCorrelationId = correlationId ?? store?.correlationId;
+
     // Merge context + caller extras, then sanitise the whole thing.
     const merged = sanitize({ ...rest, ...extra });
 
@@ -165,8 +176,8 @@ export class Logger {
       level,
       message,
       service: SERVICE_NAME,
-      ...(requestId !== undefined && { requestId }),
-      ...(correlationId !== undefined && { correlationId }),
+      ...(resolvedRequestId !== undefined && { requestId: resolvedRequestId }),
+      ...(resolvedCorrelationId !== undefined && { correlationId: resolvedCorrelationId }),
       ...merged,
     };
 

@@ -11,6 +11,22 @@ const BASE_ENV = {
 };
 
 describe('parseSorobanEnv', () => {
+  const originalAllowFlag = process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+
+  beforeEach(() => {
+    // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; the SSRF case
+    // below asserts the fail-closed default, so clear the bypass flag.
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+  });
+
+  afterEach(() => {
+    if (originalAllowFlag === undefined) {
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+    } else {
+      process.env.SSRF_ALLOW_PRIVATE_HOSTS = originalAllowFlag;
+    }
+  });
+
   describe('all values present and valid', () => {
     it('parses minimal required config', () => {
       const env = parseSorobanEnv(BASE_ENV);

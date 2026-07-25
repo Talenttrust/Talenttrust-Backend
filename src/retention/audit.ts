@@ -1,15 +1,15 @@
 /**
  * Compliance Audit Logging Service
- * 
+ *
  * Tracks all data retention, archival, and deletion actions for
  * compliance auditing, regulatory reporting, and forensic analysis.
- * 
+ *
  * @module retention/audit
  */
 
-import { ComplianceAuditLog, RetentionAction, DataEntityType } from './types';
-import * as crypto from 'crypto';
-
+import { ComplianceAuditLog, RetentionAction, DataEntityType } from "./types";
+import * as crypto from "crypto";
+import { validateEnv } from "../config/env.schema";
 /**
  * Compliance audit log entry builder
  * @interface AuditLogEntry
@@ -40,10 +40,10 @@ export interface AuditLogFilter {
 
 /**
  * Compliance audit logging service
- * 
+ *
  * Maintains immutable audit logs of all retention-related operations
  * for compliance verification and forensic investigation.
- * 
+ *
  * @class ComplianceAuditLogger
  */
 export class ComplianceAuditLogger {
@@ -53,10 +53,10 @@ export class ComplianceAuditLogger {
 
   /**
    * Log a retention-related action
-   * 
+   *
    * Creates an immutable audit trail entry for retention operations,
    * useful for compliance verification and regulatory reporting.
-   * 
+   *
    * @param {AuditLogEntry} entry - Audit log entry details
    * @returns {ComplianceAuditLog} Created audit log
    */
@@ -69,12 +69,15 @@ export class ComplianceAuditLogger {
       actor: entry.actor,
       timestamp: new Date(),
       details: entry.details,
-      compliance: entry.compliance || 'GENERAL',
+      compliance: entry.compliance || "GENERAL",
       notes: entry.notes,
     };
 
     // Generate proof for deletion or if explicitly requested
-    if (entry.action === RetentionAction.DELETE || entry.action === RetentionAction.ARCHIVE) {
+    if (
+      entry.action === RetentionAction.DELETE ||
+      entry.action === RetentionAction.ARCHIVE
+    ) {
       auditLog.proof = this.generateProof(auditLog);
     }
 
@@ -87,7 +90,7 @@ export class ComplianceAuditLogger {
 
   /**
    * Generate a verifiable cryptographic proof for an audit entry
-   * 
+   *
    * @param {Omit<ComplianceAuditLog, 'id' | 'proof'>} log - Audit log entry
    * @returns {string} SHA-256 HMAC signature
    * @private
@@ -103,19 +106,15 @@ export class ComplianceAuditLogger {
       compliance: log.compliance,
     });
 
-    // In production, use a secure key from environment variables
-    const secret = process.env.COMPLIANCE_AUDIT_SECRET;
-    if (!secret) { throw new Error('COMPLIANCE_AUDIT_SECRET is required'); }
-    
-    return crypto
-      .createHmac('sha256', secret)
-      .update(payload)
-      .digest('hex');
+    // Use the validated runtime configuration instead of reading raw env values.
+    const secret = validateEnv(process.env).COMPLIANCE_AUDIT_SECRET;
+
+    return crypto.createHmac("sha256", secret).update(payload).digest("hex");
   }
 
   /**
    * Verify an audit log entry proof
-   * 
+   *
    * @param {ComplianceAuditLog} log - Audit log entry to verify
    * @returns {boolean}
    */
@@ -127,10 +126,10 @@ export class ComplianceAuditLogger {
 
   /**
    * Retrieve audit logs for a specific data entity
-   * 
+   *
    * Returns complete audit trail for a data entity, showing all
    * operations performed on it.
-   * 
+   *
    * @param {string} entityId - Entity identifier
    * @returns {ComplianceAuditLog[]} All audit logs for entity
    */
@@ -139,17 +138,17 @@ export class ComplianceAuditLogger {
     if (!logIds) return [];
 
     return Array.from(logIds)
-      .map(id => this.auditLogs.get(id))
+      .map((id) => this.auditLogs.get(id))
       .filter((log): log is ComplianceAuditLog => log !== undefined)
       .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
   }
 
   /**
    * Query audit logs with filters
-   * 
+   *
    * Searches audit logs based on multiple criteria for compliance
    * reporting and investigation.
-   * 
+   *
    * @param {AuditLogFilter} filter - Query filters
    * @returns {ComplianceAuditLog[]} Matching audit logs
    */
@@ -157,39 +156,41 @@ export class ComplianceAuditLogger {
     let results = Array.from(this.auditLogs.values());
 
     if (filter.entityId) {
-      results = results.filter(log => log.entityId === filter.entityId);
+      results = results.filter((log) => log.entityId === filter.entityId);
     }
 
     if (filter.entityType) {
-      results = results.filter(log => log.entityType === filter.entityType);
+      results = results.filter((log) => log.entityType === filter.entityType);
     }
 
     if (filter.action) {
-      results = results.filter(log => log.action === filter.action);
+      results = results.filter((log) => log.action === filter.action);
     }
 
     if (filter.actor) {
-      results = results.filter(log => log.actor === filter.actor);
+      results = results.filter((log) => log.actor === filter.actor);
     }
 
     if (filter.compliance) {
-      results = results.filter(log => log.compliance === filter.compliance);
+      results = results.filter((log) => log.compliance === filter.compliance);
     }
 
     if (filter.startDate) {
-      results = results.filter(log => log.timestamp >= filter.startDate!);
+      results = results.filter((log) => log.timestamp >= filter.startDate!);
     }
 
     if (filter.endDate) {
-      results = results.filter(log => log.timestamp <= filter.endDate!);
+      results = results.filter((log) => log.timestamp <= filter.endDate!);
     }
 
-    return results.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    return results.sort(
+      (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+    );
   }
 
   /**
    * Get audit log by ID
-   * 
+   *
    * @param {string} logId - Audit log identifier
    * @returns {ComplianceAuditLog | undefined}
    */
@@ -199,14 +200,20 @@ export class ComplianceAuditLogger {
 
   /**
    * Get compliance report for audit trail
-   * 
+   *
    * Generates a summary report of retention and archival activities
    * grouped by compliance standard.
-   * 
+   *
    * @returns {Record<string, {count: number; actions: Record<string, number>}>} Compliance report
    */
-  getComplianceReport(): Record<string, { count: number; actions: Record<string, number> }> {
-    const report: Record<string, { count: number; actions: Record<string, number> }> = {};
+  getComplianceReport(): Record<
+    string,
+    { count: number; actions: Record<string, number> }
+  > {
+    const report: Record<
+      string,
+      { count: number; actions: Record<string, number> }
+    > = {};
 
     for (const log of this.auditLogs.values()) {
       if (!report[log.compliance]) {
@@ -226,7 +233,7 @@ export class ComplianceAuditLogger {
 
   /**
    * Get audit trail summary for entity
-   * 
+   *
    * @param {string} entityId - Entity identifier
    * @returns {{entity: string; firstAction: Date; lastAction: Date; actionCount: number; actions: string[]}}
    */
@@ -249,7 +256,7 @@ export class ComplianceAuditLogger {
       };
     }
 
-    const actions = Array.from(new Set(logs.map(log => log.action)));
+    const actions = Array.from(new Set(logs.map((log) => log.action)));
 
     return {
       entity: entityId,
@@ -262,18 +269,20 @@ export class ComplianceAuditLogger {
 
   /**
    * Export audit logs as JSON for compliance reporting
-   * 
+   *
    * @param {AuditLogFilter} [filter] - Optional filter criteria
    * @returns {ComplianceAuditLog[]} Audit logs as JSON-serializable array
    */
   exportLogs(filter?: AuditLogFilter): ComplianceAuditLog[] {
-    const logs = filter ? this.queryLogs(filter) : Array.from(this.auditLogs.values());
+    const logs = filter
+      ? this.queryLogs(filter)
+      : Array.from(this.auditLogs.values());
     return logs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
   }
 
   /**
    * Clear audit logs (use with caution - for testing only)
-   * 
+   *
    * @returns {void}
    */
   clearLogs(): void {
@@ -284,7 +293,7 @@ export class ComplianceAuditLogger {
 
   /**
    * Get total audit log count
-   * 
+   *
    * @returns {number}
    */
   getLogCount(): number {

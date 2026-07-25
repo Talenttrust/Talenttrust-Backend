@@ -19,7 +19,8 @@ export class ContractMetadataService {
   async create(
     contractId: string,
     data: CreateContractMetadataRequest,
-    userId: string
+    userId: string,
+    user?: AuthenticatedRequest['user']
   ): Promise<ContractMetadataResponse> {
     // Check if contract exists
     const contract = await contractMetadataRepository.getContractById(contractId);
@@ -42,7 +43,7 @@ export class ContractMetadataService {
       created_by: userId
     });
 
-    return this.formatResponse(metadata);
+    return this.formatResponse(metadata, user);
   }
 
   /**
@@ -139,6 +140,13 @@ export class ContractMetadataService {
 
   /**
    * Format metadata record for API response
+   * 
+   * SECURITY RULE: Fail-closed masking for sensitive contract metadata.
+   * If metadata.is_sensitive is true, the value MUST be masked with ***REDACTED*** 
+   * unless the caller is explicitly verified to be the owner of the record 
+   * (metadata.created_by === user.id) or an administrator (user.role === 'admin').
+   * If the user object is missing, undefined, or unauthenticated, it is ALWAYS masked.
+   * 
    * @param metadata - Metadata record
    * @param user - Authenticated user for sensitive data masking
    * @returns Formatted response
@@ -148,9 +156,7 @@ export class ContractMetadataService {
     user?: AuthenticatedRequest['user']
   ): ContractMetadataResponse {
     const shouldMaskValue = metadata.is_sensitive && 
-      user && 
-      metadata.created_by !== user.id && 
-      user.role !== 'admin';
+      (!user || (metadata.created_by !== user.id && user.role !== 'admin'));
 
     return {
       id: metadata.id,

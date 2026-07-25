@@ -3,12 +3,17 @@
  * @description Shared types for the health check subsystem.
  */
 
+/** Status of a probe: up = healthy, degraded = slow/warning, down = failure. */
+export type ProbeStatus = "up" | "degraded" | "down";
+
 /** Result of a single dependency probe. */
 export interface ProbeResult {
   /** Human-readable name of the dependency. */
   name: string;
-  /** Whether the probe succeeded. */
-  ok: boolean;
+  /** Probe status: up, degraded, or down. Kept for backward compatibility. */
+  ok?: boolean;
+  /** Probe health status. */
+  status?: ProbeStatus;
   /** Optional detail message (error text or latency note). */
   detail?: string;
   /** Round-trip latency in milliseconds. */

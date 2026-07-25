@@ -75,6 +75,56 @@ describe('WebhookService (iterative retry)', () => {
     expect(mockDLQ.addEntry).not.toHaveBeenCalled();
   });
 
+  it('passes a bounded timeout to each delivery attempt', async () => {
+    (axios.post as jest.Mock).mockResolvedValueOnce({ status: 200 });
+
+    await service.send(makePayload());
+
+    expect(axios.post).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({
+        timeout: 10_000,
+      }),
+    );
+  });
+
+  it('treats axios timeout errors as retryable failures', async () => {
+    const timeoutError = Object.assign(new Error('timeout of 10000ms exceeded'), {
+      code: 'ECONNABORTED',
+    });
+    (axios.post as jest.Mock)
+      .mockRejectedValueOnce(timeoutError)
+      .mockResolvedValueOnce({ status: 200 });
+
+    const payload = makePayload();
+    await service.send(payload);
+
+    expect(axios.post).toHaveBeenCalledTimes(2);
+    expect(payload.retryCount).toBe(1);
+    expect(mockDLQ.addEntry).not.toHaveBeenCalled();
+  });
+
+  it('DLQs after all timeout attempts are exhausted', async () => {
+    const timeoutError = Object.assign(new Error('timeout of 10000ms exceeded'), {
+      code: 'ECONNABORTED',
+    });
+    (axios.post as jest.Mock).mockRejectedValue(timeoutError);
+    (mockDLQ.addEntry as jest.Mock).mockResolvedValueOnce(undefined);
+
+    await service.send(makePayload());
+
+    expect(axios.post).toHaveBeenCalledTimes(4);
+    expect(mockDLQ.addEntry).toHaveBeenCalledWith(
+      'webhook-1',
+      'https://example.com/hook',
+      { event: 'test' },
+      expect.any(Number),
+      'timeout of 10000ms exceeded',
+      undefined,
+    );
+  });
+
   it('retries and succeeds mid-retry', async () => {
     (axios.post as jest.Mock)
       .mockRejectedValueOnce(new Error('timeout'))
@@ -127,6 +177,15 @@ describe('WebhookService (iterative retry)', () => {
     );
   });
 
+  it('omits invalid correlation ID header values', async () => {
+    (axios.post as jest.Mock).mockResolvedValueOnce({ status: 200 });
+
+    await service.send(makePayload({ correlationId: 'trace\nX-Injected: true' }));
+
+    const call = (axios.post as jest.Mock).mock.calls[0];
+    expect(call[2].headers).not.toHaveProperty('X-Correlation-Id');
+  });
+
   it('adds signature headers when webhookSecret provided', async () => {
     (axios.post as jest.Mock).mockResolvedValueOnce({ status: 200 });
 
@@ -153,4 +212,3 @@ describe('WebhookService (iterative retry)', () => {
     expect(call[2].headers).not.toHaveProperty('X-Signature');
   });
 });
-

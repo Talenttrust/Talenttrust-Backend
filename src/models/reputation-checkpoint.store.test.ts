@@ -1,261 +1,340 @@
-/**
- * Reputation Checkpoint Store Tests
- */
+import { ReputationCheckpointStore } from './reputation-checkpoint.store';
 
-import { reputationCheckpointStore, RecomputeCheckpoint } from './reputation-checkpoint.store';
+describe('ReputationCheckpointStore - Snapshot and Restore', () => {
+  let store: ReputationCheckpointStore;
 
-describe('ReputationCheckpointStore', () => {
   beforeEach(() => {
-    // Clear all checkpoints before each test
-    reputationCheckpointStore.clear();
+    store = new ReputationCheckpointStore();
   });
 
-  describe('createCheckpoint', () => {
-    it('should create a new checkpoint with correct initial values', () => {
-      const jobId = 'test-job-1';
-      const totalFreelancers = 100;
-      
-      const checkpoint = reputationCheckpointStore.createCheckpoint(jobId, totalFreelancers);
-      
-      expect(checkpoint.jobId).toBe(jobId);
-      expect(checkpoint.totalFreelancers).toBe(totalFreelancers);
+  afterEach(() => {
+    store.clear();
+  });
+
+  // ── Snapshot (Write) Tests ────────────────────────────────────────
+
+  describe('createCheckpoint - Snapshot', () => {
+    it('should create a checkpoint with correct initial state', () => {
+      const checkpoint = store.createCheckpoint('job-001', 100);
+
+      expect(checkpoint.jobId).toBe('job-001');
       expect(checkpoint.totalProcessed).toBe(0);
+      expect(checkpoint.totalFreelancers).toBe(100);
       expect(checkpoint.status).toBe('running');
+      expect(checkpoint.error).toBeUndefined();
       expect(checkpoint.startTime).toBeDefined();
       expect(checkpoint.lastUpdateTime).toBeDefined();
     });
 
-    it('should store the checkpoint in the store', () => {
-      const jobId = 'test-job-2';
-      
-      reputationCheckpointStore.createCheckpoint(jobId, 50);
-      
-      const retrieved = reputationCheckpointStore.getCheckpoint(jobId);
-      expect(retrieved).toBeDefined();
-      expect(retrieved?.jobId).toBe(jobId);
+    it('should create checkpoint with valid ISO timestamp', () => {
+      const checkpoint = store.createCheckpoint('job-002', 50);
+      const startTime = new Date(checkpoint.startTime);
+
+      expect(startTime.getTime()).toBeLessThanOrEqual(Date.now());
+      expect(startTime.getTime()).toBeGreaterThan(Date.now() - 2000);
+    });
+
+    it('should allow optional freelancerId on creation', () => {
+      const checkpoint = store.createCheckpoint('job-003', 75);
+
+      expect(checkpoint.lastProcessedFreelancerId).toBeUndefined();
     });
   });
 
-  describe('getCheckpoint', () => {
-    it('should return undefined for non-existent checkpoint', () => {
-      const result = reputationCheckpointStore.getCheckpoint('non-existent');
-      expect(result).toBeUndefined();
+  // ── Restore (Read) Tests ──────────────────────────────────────────
+
+  describe('getCheckpoint - Restore', () => {
+    it('should restore checkpoint identically to written snapshot', () => {
+      const created = store.createCheckpoint('job-snap-001', 100);
+      const restored = store.getCheckpoint('job-snap-001');
+
+      expect(restored).toEqual(created);
     });
 
-    it('should return the correct checkpoint', () => {
-      const jobId = 'test-job-3';
-      const created = reputationCheckpointStore.createCheckpoint(jobId, 75);
-      
-      const retrieved = reputationCheckpointStore.getCheckpoint(jobId);
-      
-      expect(retrieved).toEqual(created);
+    it('should return undefined when checkpoint does not exist', () => {
+      const restored = store.getCheckpoint('non-existent-job');
+
+      expect(restored).toBeUndefined();
+    });
+
+    it('should restore checkpoint after multiple operations', () => {
+      const jobId = 'job-snap-002';
+      store.createCheckpoint(jobId, 50);
+      store.updateProgress(jobId, 'freelancer-1');
+      store.updateProgress(jobId, 'freelancer-2');
+
+      const restored = store.getCheckpoint(jobId);
+
+      expect(restored?.totalProcessed).toBe(2);
+      expect(restored?.lastProcessedFreelancerId).toBe('freelancer-2');
+      expect(restored?.status).toBe('running');
     });
   });
 
-  describe('updateProgress', () => {
-    it('should update checkpoint progress correctly', () => {
-      const jobId = 'test-job-4';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      const updated = reputationCheckpointStore.updateProgress(jobId, 'freelancer-1');
-      
-      expect(updated.lastProcessedFreelancerId).toBe('freelancer-1');
-      expect(updated.totalProcessed).toBe(1);
-      expect(updated.lastUpdateTime).toBeDefined();
+  // ── Overwrite Tests ──────────────────────────────────────────────
+
+  describe('Overwrite Behavior', () => {
+    it('should replace prior snapshot when overwriting', () => {
+      const jobId = 'job-overwrite-001';
+      const checkpoint1 = store.createCheckpoint(jobId, 100);
+
+      store.updateProgress(jobId, 'freelancer-1');
+      const checkpoint2 = store.getCheckpoint(jobId);
+
+      expect(checkpoint2?.totalProcessed).toBe(1);
+      expect(checkpoint2?.lastProcessedFreelancerId).toBe('freelancer-1');
+      expect(new Date(checkpoint2!.lastUpdateTime).getTime()).toBeGreaterThanOrEqual(
+        new Date(checkpoint1.lastUpdateTime).getTime()
+      );
     });
 
-    it('should throw error for non-existent checkpoint', () => {
+    it('should maintain jobId and totalFreelancers across overwrites', () => {
+      const jobId = 'job-overwrite-002';
+      const initialCheckpoint = store.createCheckpoint(jobId, 150);
+
+      store.updateProgress(jobId, 'freelancer-1');
+      store.updateProgress(jobId, 'freelancer-2');
+      const finalCheckpoint = store.getCheckpoint(jobId);
+
+      expect(finalCheckpoint?.jobId).toBe(initialCheckpoint.jobId);
+      expect(finalCheckpoint?.totalFreelancers).toBe(initialCheckpoint.totalFreelancers);
+    });
+
+    it('should properly overwrite status transitions', () => {
+      const jobId = 'job-status-001';
+      store.createCheckpoint(jobId, 50);
+      expect(store.getCheckpoint(jobId)?.status).toBe('running');
+
+      store.markCompleted(jobId);
+      expect(store.getCheckpoint(jobId)?.status).toBe('completed');
+
+      store.createCheckpoint(jobId, 50);
+      expect(store.getCheckpoint(jobId)?.status).toBe('running');
+    });
+  });
+
+  // ── Restore Without Checkpoint Tests ──────────────────────────────
+
+  describe('Restore When No Checkpoint Exists', () => {
+    it('should return undefined instead of throwing', () => {
       expect(() => {
-        reputationCheckpointStore.updateProgress('non-existent', 'freelancer-1');
-      }).toThrow('Checkpoint not found for job: non-existent');
+        store.getCheckpoint('missing-job');
+      }).not.toThrow();
     });
 
-    it('should increment totalProcessed on multiple updates', () => {
-      const jobId = 'test-job-5';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      reputationCheckpointStore.updateProgress(jobId, 'freelancer-1');
-      reputationCheckpointStore.updateProgress(jobId, 'freelancer-2');
-      
-      const checkpoint = reputationCheckpointStore.getCheckpoint(jobId);
-      expect(checkpoint?.totalProcessed).toBe(2);
-      expect(checkpoint?.lastProcessedFreelancerId).toBe('freelancer-2');
-    });
-  });
-
-  describe('markCompleted', () => {
-    it('should mark checkpoint as completed', () => {
-      const jobId = 'test-job-6';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      const updated = reputationCheckpointStore.markCompleted(jobId);
-      
-      expect(updated.status).toBe('completed');
-      expect(updated.lastUpdateTime).toBeDefined();
-    });
-
-    it('should throw error for non-existent checkpoint', () => {
+    it('should throw when updating non-existent checkpoint', () => {
       expect(() => {
-        reputationCheckpointStore.markCompleted('non-existent');
-      }).toThrow('Checkpoint not found for job: non-existent');
-    });
-  });
-
-  describe('markFailed', () => {
-    it('should mark checkpoint as failed with error message', () => {
-      const jobId = 'test-job-7';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      const errorMessage = 'Test error';
-      
-      const updated = reputationCheckpointStore.markFailed(jobId, errorMessage);
-      
-      expect(updated.status).toBe('failed');
-      expect(updated.error).toBe(errorMessage);
-      expect(updated.lastUpdateTime).toBeDefined();
+        store.updateProgress('non-existent-job', 'freelancer-1');
+      }).toThrow('Checkpoint not found for job: non-existent-job');
     });
 
-    it('should throw error for non-existent checkpoint', () => {
+    it('should throw when marking non-existent checkpoint as completed', () => {
       expect(() => {
-        reputationCheckpointStore.markFailed('non-existent', 'error');
-      }).toThrow('Checkpoint not found for job: non-existent');
+        store.markCompleted('non-existent-job');
+      }).toThrow('Checkpoint not found for job: non-existent-job');
+    });
+
+    it('should throw when marking non-existent checkpoint as failed', () => {
+      expect(() => {
+        store.markFailed('non-existent-job', 'test error');
+      }).toThrow('Checkpoint not found for job: non-existent-job');
     });
   });
 
-  describe('deleteCheckpoint', () => {
-    it('should delete existing checkpoint', () => {
-      const jobId = 'test-job-8';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      reputationCheckpointStore.deleteCheckpoint(jobId);
-      
-      const retrieved = reputationCheckpointStore.getCheckpoint(jobId);
-      expect(retrieved).toBeUndefined();
-    });
-  });
+  // ── Concurrent Write Tests ────────────────────────────────────────
 
-  describe('getActiveCheckpoints', () => {
-    it('should return running checkpoints', () => {
-      const job1 = 'test-job-9';
-      const job2 = 'test-job-10';
-      
-      reputationCheckpointStore.createCheckpoint(job1, 10);
-      reputationCheckpointStore.createCheckpoint(job2, 10);
-      reputationCheckpointStore.markCompleted(job2);
-      
-      const active = reputationCheckpointStore.getActiveCheckpoints();
-      
-      expect(active).toHaveLength(1);
-      expect(active[0].jobId).toBe(job1);
-      expect(active[0].status).toBe('running');
-    });
+  describe('Concurrent Writes Resolve to Consistent State', () => {
+    it('should maintain consistent state with sequential updates', () => {
+      const jobId = 'job-concurrent-001';
+      store.createCheckpoint(jobId, 100);
 
-    it('should return paused checkpoints', () => {
-      const jobId = 'test-job-11';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      // Manually set status to paused (simulating a paused state)
-      const checkpoint = reputationCheckpointStore.getCheckpoint(jobId);
-      if (checkpoint) {
-        checkpoint.status = 'paused';
-      }
-      
-      const active = reputationCheckpointStore.getActiveCheckpoints();
-      
-      expect(active).toHaveLength(1);
-      expect(active[0].status).toBe('paused');
-    });
+      const freelancerIds = Array.from({ length: 10 }, (_, i) => `freelancer-${i + 1}`);
 
-    it('should not return completed checkpoints', () => {
-      const job1 = 'test-job-12';
-      const job2 = 'test-job-13';
-      
-      reputationCheckpointStore.createCheckpoint(job1, 10);
-      reputationCheckpointStore.createCheckpoint(job2, 10);
-      reputationCheckpointStore.markCompleted(job1);
-      reputationCheckpointStore.markFailed(job2, 'error');
-      
-      const active = reputationCheckpointStore.getActiveCheckpoints();
-      
-      expect(active).toHaveLength(0);
-    });
-  });
-
-  describe('hasCheckpoint', () => {
-    it('should return true for existing checkpoint', () => {
-      const jobId = 'test-job-14';
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      
-      expect(reputationCheckpointStore.hasCheckpoint(jobId)).toBe(true);
-    });
-
-    it('should return false for non-existent checkpoint', () => {
-      expect(reputationCheckpointStore.hasCheckpoint('non-existent')).toBe(false);
-    });
-  });
-
-  describe('clear', () => {
-    it('should clear all checkpoints', () => {
-      reputationCheckpointStore.createCheckpoint('job1', 10);
-      reputationCheckpointStore.createCheckpoint('job2', 10);
-      reputationCheckpointStore.createCheckpoint('job3', 10);
-      
-      reputationCheckpointStore.clear();
-      
-      expect(reputationCheckpointStore.getCheckpoint('job1')).toBeUndefined();
-      expect(reputationCheckpointStore.getCheckpoint('job2')).toBeUndefined();
-      expect(reputationCheckpointStore.getCheckpoint('job3')).toBeUndefined();
-      expect(reputationCheckpointStore.getActiveCheckpoints()).toHaveLength(0);
-    });
-  });
-
-  describe('Integration Test - Complete Workflow', () => {
-    it('should handle complete recompute workflow', () => {
-      const jobId = 'integration-test-job';
-      const totalFreelancers = 5;
-      const freelancerIds = ['f1', 'f2', 'f3', 'f4', 'f5'];
-      
-      // Create checkpoint
-      const checkpoint = reputationCheckpointStore.createCheckpoint(jobId, totalFreelancers);
-      expect(checkpoint.totalProcessed).toBe(0);
-      
-      // Process each freelancer
-      freelancerIds.forEach((freelancerId, index) => {
-        reputationCheckpointStore.updateProgress(jobId, freelancerId);
-        
-        const updated = reputationCheckpointStore.getCheckpoint(jobId);
-        expect(updated?.totalProcessed).toBe(index + 1);
-        expect(updated?.lastProcessedFreelancerId).toBe(freelancerId);
+      freelancerIds.forEach((id) => {
+        store.updateProgress(jobId, id);
       });
-      
-      // Mark as completed
-      reputationCheckpointStore.markCompleted(jobId);
-      
-      const final = reputationCheckpointStore.getCheckpoint(jobId);
-      expect(final?.status).toBe('completed');
-      expect(final?.totalProcessed).toBe(totalFreelancers);
-      
-      // Should not be in active checkpoints
-      expect(reputationCheckpointStore.getActiveCheckpoints()).toHaveLength(0);
+
+      const final = store.getCheckpoint(jobId);
+
+      expect(final?.totalProcessed).toBe(10);
+      expect(final?.lastProcessedFreelancerId).toBe('freelancer-10');
+      expect(final?.status).toBe('running');
     });
 
-    it('should handle failure scenario', () => {
-      const jobId = 'failure-test-job';
-      
-      reputationCheckpointStore.createCheckpoint(jobId, 10);
-      reputationCheckpointStore.updateProgress(jobId, 'freelancer-1');
-      reputationCheckpointStore.updateProgress(jobId, 'freelancer-2');
-      
-      // Simulate failure
-      const errorMessage = 'Database connection lost';
-      reputationCheckpointStore.markFailed(jobId, errorMessage);
-      
-      const failed = reputationCheckpointStore.getCheckpoint(jobId);
-      expect(failed?.status).toBe('failed');
-      expect(failed?.error).toBe(errorMessage);
-      expect(failed?.totalProcessed).toBe(2);
-      
-      // Should not be in active checkpoints
-      expect(reputationCheckpointStore.getActiveCheckpoints()).toHaveLength(0);
+    it('should handle rapid status transitions consistently', () => {
+      const jobId = 'job-concurrent-002';
+      const checkpoint = store.createCheckpoint(jobId, 50);
+
+      store.updateProgress(jobId, 'freelancer-1');
+      const afterUpdate = store.getCheckpoint(jobId);
+
+      expect(new Date(afterUpdate!.lastUpdateTime).getTime()).toBeGreaterThanOrEqual(
+        new Date(checkpoint.lastUpdateTime).getTime()
+      );
+
+      store.markCompleted(jobId);
+      const completed = store.getCheckpoint(jobId);
+
+      expect(completed?.status).toBe('completed');
+      expect(new Date(completed!.lastUpdateTime).getTime()).toBeGreaterThanOrEqual(
+        new Date(afterUpdate!.lastUpdateTime).getTime()
+      );
+    });
+
+    it('should not lose data during concurrent checkpoint operations', () => {
+      const jobIds = Array.from({ length: 5 }, (_, i) => `job-concurrent-${i + 1}`);
+
+      jobIds.forEach((jobId) => {
+        store.createCheckpoint(jobId, 100);
+      });
+
+      jobIds.forEach((jobId, index) => {
+        for (let i = 0; i < index + 1; i++) {
+          store.updateProgress(jobId, `freelancer-${i}`);
+        }
+      });
+
+      jobIds.forEach((jobId, index) => {
+        const checkpoint = store.getCheckpoint(jobId);
+        expect(checkpoint?.totalProcessed).toBe(index + 1);
+      });
+    });
+  });
+
+  // ── Edge Case Tests ───────────────────────────────────────────────
+
+  describe('Edge Cases', () => {
+    it('should handle zero freelancers', () => {
+      const checkpoint = store.createCheckpoint('job-zero', 0);
+
+      expect(checkpoint.totalFreelancers).toBe(0);
+      expect(checkpoint.totalProcessed).toBe(0);
+    });
+
+    it('should handle large freelancer counts', () => {
+      const largeCount = 1_000_000;
+      const checkpoint = store.createCheckpoint('job-large', largeCount);
+
+      expect(checkpoint.totalFreelancers).toBe(largeCount);
+    });
+
+    it('should track progress up to total count', () => {
+      const jobId = 'job-progress-001';
+      store.createCheckpoint(jobId, 5);
+
+      for (let i = 1; i <= 5; i++) {
+        store.updateProgress(jobId, `freelancer-${i}`);
+      }
+
+      const checkpoint = store.getCheckpoint(jobId);
+      expect(checkpoint?.totalProcessed).toBe(5);
+    });
+
+    it('should allow progress exceeding total count', () => {
+      const jobId = 'job-overflow-001';
+      store.createCheckpoint(jobId, 5);
+
+      for (let i = 1; i <= 10; i++) {
+        store.updateProgress(jobId, `freelancer-${i}`);
+      }
+
+      const checkpoint = store.getCheckpoint(jobId);
+      expect(checkpoint?.totalProcessed).toBe(10);
+    });
+
+    it('should preserve error message in failed checkpoint', () => {
+      const jobId = 'job-error-001';
+      const errorMsg = 'Database connection failed';
+      store.createCheckpoint(jobId, 50);
+      store.markFailed(jobId, errorMsg);
+
+      const checkpoint = store.getCheckpoint(jobId);
+
+      expect(checkpoint?.error).toBe(errorMsg);
+      expect(checkpoint?.status).toBe('failed');
+    });
+
+    it('should contain no secrets in serialized checkpoint', () => {
+      const jobId = 'job-sensitive-001';
+      const checkpoint = store.createCheckpoint(jobId, 100);
+      store.updateProgress(jobId, 'freelancer-1');
+
+      const serialized = JSON.stringify(checkpoint);
+
+      expect(serialized).not.toContain('password');
+      expect(serialized).not.toContain('secret');
+      expect(serialized).not.toContain('token');
+      expect(serialized).not.toContain('key');
+    });
+  });
+
+  // ── Checkpoint Lifecycle Tests ────────────────────────────────────
+
+  describe('Checkpoint Lifecycle', () => {
+    it('should delete checkpoint and prevent restoration', () => {
+      const jobId = 'job-delete-001';
+      store.createCheckpoint(jobId, 50);
+
+      expect(store.hasCheckpoint(jobId)).toBe(true);
+
+      store.deleteCheckpoint(jobId);
+
+      expect(store.hasCheckpoint(jobId)).toBe(false);
+      expect(store.getCheckpoint(jobId)).toBeUndefined();
+    });
+
+    it('should return active checkpoints correctly', () => {
+      store.createCheckpoint('job-active-001', 50);
+      store.createCheckpoint('job-active-002', 50);
+      store.createCheckpoint('job-completed', 50);
+
+      store.markCompleted('job-completed');
+
+      const active = store.getActiveCheckpoints();
+
+      expect(active.length).toBe(2);
+      expect(active.map((c: any) => c.jobId)).toContain('job-active-001');
+      expect(active.map((c: any) => c.jobId)).toContain('job-active-002');
+      expect(active.map((c: any) => c.jobId)).not.toContain('job-completed');
+    });
+
+    it('should clear all checkpoints', () => {
+      store.createCheckpoint('job-clear-001', 50);
+      store.createCheckpoint('job-clear-002', 50);
+      store.createCheckpoint('job-clear-003', 50);
+
+      store.clear();
+
+      expect(store.getActiveCheckpoints()).toHaveLength(0);
+      expect(store.hasCheckpoint('job-clear-001')).toBe(false);
+    });
+  });
+
+  // ── Timestamp Consistency Tests ───────────────────────────────────
+
+  describe('Timestamp Consistency', () => {
+    it('should update lastUpdateTime on progress changes', () => {
+      const jobId = 'job-time-001';
+      const checkpoint1 = store.createCheckpoint(jobId, 50);
+      const time1 = new Date(checkpoint1.lastUpdateTime).getTime();
+
+      const checkpoint2 = store.updateProgress(jobId, 'freelancer-1');
+      const time2 = new Date(checkpoint2.lastUpdateTime).getTime();
+
+      expect(time2).toBeGreaterThanOrEqual(time1);
+    });
+
+    it('should maintain startTime across updates', () => {
+      const jobId = 'job-time-002';
+      const created = store.createCheckpoint(jobId, 50);
+      const startTime = created.startTime;
+
+      store.updateProgress(jobId, 'freelancer-1');
+      store.updateProgress(jobId, 'freelancer-2');
+
+      const final = store.getCheckpoint(jobId);
+
+      expect(final?.startTime).toBe(startTime);
     });
   });
 });

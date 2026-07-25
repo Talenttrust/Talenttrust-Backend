@@ -4,18 +4,21 @@
  *
  * ## Environment Variables
  *
- * | Variable                  | Default    | Description                              |
- * |---------------------------|------------|------------------------------------------|
- * | RL_STANDARD_MAX           | 600        | Max requests per window (standard tier)  |
- * | RL_SENSITIVE_MAX          | 300        | Max requests per window (sensitive tier)  |
- * | RL_STRICT_MAX             | 180        | Max requests per window (strict tier)    |
- * | RL_STANDARD_WINDOW_MS     | 60000      | Window duration in ms (standard)         |
- * | RL_SENSITIVE_WINDOW_MS    | 60000      | Window duration in ms (sensitive)         |
- * | RL_STRICT_WINDOW_MS       | 60000      | Window duration in ms (strict)           |
- * | RL_ABUSE_THRESHOLD        | 5/3        | Violations before hard block             |
- * | RL_BLOCK_WINDOW_MS        | 300000     | Violation observation window             |
- * | RL_BLOCK_DURATION_MS      | 600000     | Initial block duration                   |
- * | RL_MAX_BLOCK_MS           | 86400000   | Maximum block duration (24h)             |
+ * | Variable                   | Default    | Description                              |
+ * |----------------------------|------------|------------------------------------------|
+ * | RL_STANDARD_MAX            | 600        | Max requests per window (standard tier)  |
+ * | RL_SENSITIVE_MAX           | 300        | Max requests per window (sensitive tier) |
+ * | RL_STRICT_MAX              | 180        | Max requests per window (strict tier)    |
+ * | RL_AUTH_MAX                | 30         | Max requests per window (auth tier)      |
+ * | RL_STANDARD_WINDOW_MS      | 60000      | Window duration in ms (standard)         |
+ * | RL_SENSITIVE_WINDOW_MS     | 60000      | Window duration in ms (sensitive)        |
+ * | RL_STRICT_WINDOW_MS        | 60000      | Window duration in ms (strict)           |
+ * | RL_AUTH_WINDOW_MS          | 60000      | Window duration in ms (auth)             |
+ * | RL_AUTH_ABUSE_THRESHOLD    | 3          | Violations before hard block (auth)      |
+ * | RL_ABUSE_THRESHOLD         | 5/3        | Violations before hard block             |
+ * | RL_BLOCK_WINDOW_MS         | 300000     | Violation observation window             |
+ * | RL_BLOCK_DURATION_MS       | 600000     | Initial block duration                   |
+ * | RL_MAX_BLOCK_MS            | 86400000   | Maximum block duration (24h)             |
  *
  * ## Tier Descriptions
  *
@@ -25,8 +28,26 @@
  * **Sensitive (300 req/min):** Write operations (POST/PUT/DELETE). Reduces to
  * ~5 req/s to deter automated attacks while allowing legitimate batch operations.
  *
- * **Strict (180 req/min):** Auth endpoints, job creation. ~3 req/s prevents
- * credential stuffing and brute-force attacks.
+ * **Auth (30 req/min, issue #756):** Authentication endpoints
+ * (login/register/refresh/logout). Enforced per-client using an `X-API-Key`
+ * header when present, otherwise the client IP. All four endpoints share
+ * the same per-client bucket — this is intentional; the issue only asked
+ * for an "auth" tier, and a spammer exhausting `/login` cannot reach
+ * `/logout`/`/refresh` for the same window but is also not allowed to
+ * lock out unrelated endpoints. ~0.5 req/s prevents credential stuffing
+ * and brute-force attacks while leaving comfortable headroom for
+ * legitimate clients.
+ *
+ * Trade-off: a single client that exhausts one endpoint's quota cannot
+ * reach the others either, but cross-endpoint reuse of the same key is
+ * rare in legitimate traffic. To split quota per endpoint, define
+ * further tiers and bind them in `src/routes/auth.routes.ts`.
+ *
+ * Hard-block: the abuse-guard escalates to a hard block after
+ * `RL_AUTH_ABUSE_THRESHOLD` (default 3) violations.
+ *
+ * **Strict (180 req/min):** Other sensitive write endpoints, job creation.
+ * ~3 req/s prevents coordinated abuse while preserving throughput.
  *
  * ## Production Recommendations
  *
@@ -102,13 +123,36 @@ export const rateLimitConfig = {
   } satisfies RateLimiterConfig,
 
   /**
-   * Strict tier: auth/login endpoints, job creation.
-   * Very strict (~3 req/s) to prevent credential stuffing.
+   * Strict tier: other sensitive write endpoints, job creation.
+   * Very strict (~3 req/s) to deter coordinated abuse.
    */
   strict: {
     maxRequests: toCount(process.env.RL_STRICT_MAX, 180),
     windowMs: toMs(process.env.RL_STRICT_WINDOW_MS, 60_000),
     abuseThreshold: toCount(process.env.RL_ABUSE_THRESHOLD, 3),
+    blockWindowMs: toMs(process.env.RL_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
+   * Auth tier: login/register/refresh/logout endpoints (issue #756).
+   *
+   * Tuned tighter than the general `strict` tier to deter credential
+   * stuffing and brute-force probing. Defaults support roughly 0.5 req/s
+   * per client — well above legitimate client throughput while making
+   * automated abuse expensive.
+   *
+   * The per-client key is derived by `createAuthKeyFn` in
+   * `src/auth/rateLimitKey.ts`, which prefers `X-API-Key` (for service-to-service
+   * calls) and falls back to the client IP. Each key gets a dedicated bucket.
+   */
+  auth: {
+    maxRequests: toCount(process.env.RL_AUTH_MAX, 30),
+    windowMs: toMs(process.env.RL_AUTH_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_AUTH_ABUSE_THRESHOLD, 3),
     blockWindowMs: toMs(process.env.RL_BLOCK_WINDOW_MS, 300_000),
     blockDurationMs: toMs(process.env.RL_BLOCK_DURATION_MS, 600_000),
     maxBlockDurationMs: toMs(process.env.RL_MAX_BLOCK_MS, 86_400_000),
@@ -132,11 +176,27 @@ export const rateLimitConfig = {
   } satisfies RateLimiterConfig,
 
   /**
+   * Disputes tier: dispute creation, resolution, and management.
+   * Write-heavy endpoints with moderate limits (~5 req/s).
+   */
+  disputes: {
+    maxRequests: toCount(process.env.RL_DISPUTES_MAX, 300),
+    windowMs: toMs(process.env.RL_DISPUTES_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_DISPUTES_ABUSE_THRESHOLD, 5),
+    blockWindowMs: toMs(process.env.RL_DISPUTES_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_DISPUTES_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_DISPUTES_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
    * Webhook token bucket configuration for rate limiting outbound webhook deliveries.
    */
   webhook: {
     capacity: toCount(process.env.WEBHOOK_BUCKET_CAPACITY, 10),
     refillRatePerSec: toCount(process.env.WEBHOOK_REFILL_RATE_PER_SEC, 2),
+    maxQueueDepth: toCount(process.env.WEBHOOK_MAX_QUEUE_DEPTH, 1000),
   },
 };
 
@@ -148,6 +208,16 @@ export interface WebhookTokenBucketConfig {
   capacity: number;
   /** Number of tokens added to each bucket per second. */
   refillRatePerSec: number;
+  /**
+   * Hard cap on the number of pending waiters queued per provider.
+   * When the queue reaches this depth, new acquisitions are rejected
+   * with a {@link import('../rateLimit').RateLimitQueueFullError}
+   * so the caller can route the delivery to the DLQ instead of
+   * accumulating unbounded memory.
+   *
+   * @default 1000
+   */
+  maxQueueDepth: number;
 }
 
 /**
@@ -159,9 +229,11 @@ export interface WebhookTokenBucketConfig {
 export function loadWebhookTokenBucketConfig(env: NodeJS.ProcessEnv = process.env): WebhookTokenBucketConfig {
   const rawCapacity = env.WEBHOOK_BUCKET_CAPACITY ?? '10';
   const rawRefill = env.WEBHOOK_REFILL_RATE_PER_SEC ?? '2';
+  const rawMaxQueueDepth = env.WEBHOOK_MAX_QUEUE_DEPTH ?? '1000';
 
   const capacity = Number(rawCapacity);
   const refillRatePerSec = Number(rawRefill);
+  const maxQueueDepth = Number(rawMaxQueueDepth);
 
   if (!Number.isFinite(capacity) || capacity <= 0) {
     throw new Error(
@@ -177,5 +249,12 @@ export function loadWebhookTokenBucketConfig(env: NodeJS.ProcessEnv = process.en
     );
   }
 
-  return { capacity, refillRatePerSec };
+  if (!Number.isFinite(maxQueueDepth) || maxQueueDepth <= 0 || !Number.isInteger(maxQueueDepth)) {
+    throw new Error(
+      `[rateLimit] Invalid WEBHOOK_MAX_QUEUE_DEPTH="${rawMaxQueueDepth}". ` +
+        'Must be a finite positive integer greater than zero.',
+    );
+  }
+
+  return { capacity, refillRatePerSec, maxQueueDepth };
 }

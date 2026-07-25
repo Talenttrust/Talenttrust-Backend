@@ -1,20 +1,24 @@
 /**
  * @file src/auth/authenticate.test.ts
  *
- * Regression suite for the algorithm-confusion hardening: the auth path
- * must accept ONLY HS256-signed JWTs. Any other algorithm in the token
- * header — most notably `alg: none` and HS/RS confusion attempts — must
- * cause the request to fail with the standard 401 path even if the rest
- * of the payload is structurally valid and signed with what an attacker
- * could plausibly know.
+ * Comprehensive negative test suite for the `requireAuth` middleware.
+ *
+ * Tests cover:
+ * - JWT expiry: expired tokens are rejected with appropriate error message
+ * - Signature: tokens signed with wrong secret are rejected
+ * - Malformed tokens: tampered signatures, invalid base64, corrupted structure
+ * - Algorithm confusion: alg: none, RS256, HS384, HS512, missing alg are rejected
+ * - Missing claims: tokens without sub/email/role are rejected
+ * - Header parsing: missing Authorization, malformed Bearer prefix, empty token
+ *
+ * The auth path accepts ONLY HS256-signed JWTs. Any other algorithm in the token
+ * header — most notably `alg: none` and HS/RS confusion attempts — cause the
+ * request to fail with HTTP 401.
  *
  * These tests exercise the real `requireAuth` middleware exported from
- * `src/middleware/authorization.ts` (that is what production routes
- * actually mount as `Authorization: Bearer <jwt>`) and the real
- * `adminAuthGuard` middleware (which has its own JWT verification path).
- * The shared `JWT_VERIFY_OPTIONS` constant exported from
- * `src/auth/jwtConfig.ts` is also asserted directly so a future caller
- * cannot accidentally bypass the allowlist.
+ * `src/middleware/authorization.ts` and the `adminAuthGuard` middleware.
+ * The shared `JWT_VERIFY_OPTIONS` constant from `src/auth/jwtConfig.ts` is
+ * also asserted directly.
  */
 
 // Configure the secret BEFORE other imports so the middleware's lazy
@@ -232,6 +236,87 @@ describe("requireAuth — algorithm-confusion hardening", () => {
     const res = await get(tok);
     expect(res.status).toBe(401);
     expect(res.body.error.message).toMatch(/expired/i);
+  });
+
+  // ─── Missing / malformed claims ───────────────────────────────────────────────
+
+  it("rejects a token missing the required 'sub' claim", async () => {
+    const tok = jwt.sign({ email: "test@tt.com", role: "client" }, SECRET, {
+      algorithm: "HS256",
+      expiresIn: "1h",
+    });
+    const res = await get(tok);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/missing required claims/i);
+  });
+
+  it("rejects a token missing the required 'email' claim", async () => {
+    const tok = jwt.sign({ sub: "user-1", role: "client" }, SECRET, {
+      algorithm: "HS256",
+      expiresIn: "1h",
+    });
+    const res = await get(tok);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/missing required claims/i);
+  });
+
+  it("rejects a token missing the required 'role' claim", async () => {
+    const tok = jwt.sign({ sub: "user-1", email: "test@tt.com" }, SECRET, {
+      algorithm: "HS256",
+      expiresIn: "1h",
+    });
+    const res = await get(tok);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/unrecognised role/i);
+  });
+
+  // ─── Header edge cases ───────────────────────────────────────────────────────
+
+  it("rejects missing Authorization header", async () => {
+    const res = await request(app).get("/test");
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("unauthorized");
+  });
+
+  it("rejects malformed Bearer prefix (no space)", async () => {
+    const tok = jwt.sign(userPayload(), SECRET, { algorithm: "HS256" });
+    const res = await request(app).get("/test").set("Authorization", `Bearer${tok}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/malformed/i);
+  });
+
+  it("rejects empty token after Bearer", async () => {
+    const res = await request(app).get("/test").set("Authorization", "Bearer ");
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/malformed/i);
+  });
+
+  it("rejects malformed Bearer prefix (wrong prefix)", async () => {
+    const tok = jwt.sign(userPayload(), SECRET, { algorithm: "HS256" });
+    const res = await request(app).get("/test").set("Authorization", `Basic ${tok}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.message).toMatch(/malformed/i);
+  });
+
+  // ─── Tampered signature (malformed token) ───────────────────────────────────────
+
+  it("rejects a token with a tampered signature", async () => {
+    const tok = jwt.sign(userPayload(), SECRET, { algorithm: "HS256" });
+    // Tamper with the signature by flipping bits in the last character
+    const parts = tok.split(".");
+    const tamperedSig = parts[2].slice(0, -1) + "X";
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`;
+    const res = await request(app).get("/test").set("Authorization", `Bearer ${tampered}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("unauthorized");
+  });
+
+  it("rejects a token with malformed base64 payload", async () => {
+    // Token with invalid base64 in payload section
+    const malformed = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aGVsbG8#world.signature`;
+    const res = await request(app).get("/test").set("Authorization", `Bearer ${malformed}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("unauthorized");
   });
 });
 

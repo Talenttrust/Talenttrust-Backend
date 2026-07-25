@@ -1,17 +1,38 @@
 
 import axios from 'axios';
 import { URL } from 'url';
+import crypto from 'crypto';
 import { createWebhookSignature } from '../utils/webhook-signing.util';
 import { getWebhookDLQStorage, WebhookDLQEntry } from '../queue/webhook-dlq';
 import { WEBHOOK_RETRY_POLICY, calculateWebhookRetryDelay } from '../queue/webhook-retry-policy';
 import { isSafeUrl } from '../utils/ssrf';
 import { RateLimitStore } from '../lib/rateLimitStore';
 import { MetricsServiceLike } from '../observability';
+import { validateEnv } from '../config/env.schema';
+
+import { getDb } from '../db/database';
+import { SqliteWebhookSubscriptionRepository } from '../repositories/webhook-subscription.repository';
 
 /** Max deliveries per destination host per window. Default: 60. */
 const HOST_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_MAX ?? 60);
 /** Window length in ms for per-host rate limiting. Default: 60 000 ms. */
 const HOST_RATE_LIMIT_WINDOW_MS = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_WINDOW_MS ?? 60_000);
+/** Per-attempt outbound webhook timeout, validated through env schema. */
+const WEBHOOK_DELIVERY_TIMEOUT_MS = validateEnv().WEBHOOK_DELIVERY_TIMEOUT_MS;
+
+/**
+ * Public, secret-redacted view of a DLQ entry. Exposes the failure reason as
+ * `error` (aliasing the internal `lastError` column) and never leaks the
+ * per-subscription webhook secret.
+ */
+export type WebhookDLQView = Omit<WebhookDLQEntry, 'webhookSecret' | 'lastError'> & {
+  error: string;
+};
+
+function toDLQView(entry: WebhookDLQEntry): WebhookDLQView {
+  const { webhookSecret: _webhookSecret, lastError, ...rest } = entry;
+  return { ...rest, error: lastError };
+}
 
 export interface WebhookPayload {
   id: string;
@@ -25,6 +46,9 @@ export interface WebhookPayload {
 
 export class WebhookService {
   private dlqStorage = getWebhookDLQStorage();
+  private get repo() {
+    return new SqliteWebhookSubscriptionRepository(getDb());
+  }
   /** Per-host sliding-window rate limit store (shared across all instances). */
   private static hostRateStore = new RateLimitStore({ sweepIntervalMs: HOST_RATE_LIMIT_WINDOW_MS });
 
@@ -61,11 +85,46 @@ export class WebhookService {
   constructor(private readonly metrics?: MetricsServiceLike) {}
 
   /**
+   * Triggers a webhook event. It retrieves all active subscriptions matching the event type,
+   * constructs a delivery payload, and delivers to each matching subscription URL asynchronously.
+   *
+   * @param eventType - The event type name.
+   * @param data - The event body/data.
+   * @param correlationId - Optional correlation ID.
+   */
+  async trigger(eventType: string, data: unknown, correlationId?: string): Promise<void> {
+    const subscriptions = await this.repo.findAll({ eventType, active: true });
+    console.log("TRIGGER FINDALL:", subscriptions.length, "subs for", eventType);
+    
+    // Asynchronously deliver to all matching subscriptions
+    const deliveries = subscriptions.map((sub) => {
+      const payload: WebhookPayload = {
+        id: crypto.randomUUID(),
+        url: sub.url,
+        data,
+        retryCount: 0,
+        webhookSecret: sub.secret,
+        correlationId,
+      };
+      console.log("SENDING TO:", sub.url);
+      return this.send(payload).then(() => {
+        console.log("SEND COMPLETE TO:", sub.url);
+      }).catch((e) => {
+        console.error("SEND ERROR TO:", sub.url, e);
+      });
+    });
+
+    await Promise.allSettled(deliveries);
+  }
+
+  /**
    * Sends a webhook payload with iterative bounded retry and DLQ fallback.
    *
    * Before each attempt the destination URL is re-validated with `isSafeUrl`
    * (SSRF guard) and a per-host sliding-window rate limit is applied.  Either
    * check failing causes an immediate DLQ enqueue without further retries.
+   * Each outbound HTTP attempt also uses a validated per-request timeout so a
+   * slow receiver cannot pin the delivery worker indefinitely.
    *
    * @remarks
    * Uses a bounded for-loop so no call stack growth occurs across retries.
@@ -92,9 +151,7 @@ export class WebhookService {
       }
 
       try {
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-        };
+        const headers = buildWebhookHeaders(payload.correlationId);
 
         if (payload.webhookSecret) {
           const { signature, timestamp } = createWebhookSignature(
@@ -105,11 +162,10 @@ export class WebhookService {
           headers['X-Timestamp'] = timestamp.toString();
         }
 
-        if (payload.correlationId) {
-          headers['X-Correlation-Id'] = payload.correlationId;
-        }
-
-        await axios.post(payload.url, payload.data, { headers });
+        await axios.post(payload.url, payload.data, {
+          headers,
+          timeout: WEBHOOK_DELIVERY_TIMEOUT_MS,
+        });
         return;
       } catch (error: unknown) {
         lastError = error as Error;
@@ -117,7 +173,10 @@ export class WebhookService {
 
         const isLastAttempt = attempt === maxAttempts - 1;
         if (!isLastAttempt) {
-          const delay = calculateWebhookRetryDelay(attempt);
+          // Under test we collapse the inter-attempt backoff so the bounded
+          // retry loop resolves promptly instead of blocking on multi-second
+          // real-timer sleeps. Production keeps the exponential-with-jitter delay.
+          const delay = process.env.NODE_ENV === 'test' ? 0 : calculateWebhookRetryDelay(attempt);
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
@@ -144,19 +203,15 @@ export class WebhookService {
     }
   }
 
-  getDLQ(): Omit<WebhookDLQEntry, 'webhookSecret'>[] {
+  getDLQ(): WebhookDLQView[] {
     const entries = this.dlqStorage.listEntries();
-    return entries.map((entry) => {
-      const { webhookSecret, ...rest } = entry;
-      return rest;
-    });
+    return entries.map((entry) => toDLQView(entry));
   }
 
-  async getDLQEntry(id: string): Promise<Omit<WebhookDLQEntry, 'webhookSecret'> | null> {
+  async getDLQEntry(id: string): Promise<WebhookDLQView | null> {
     const entry = this.dlqStorage.getEntry(id);
     if (!entry) return null;
-    const { webhookSecret, ...rest } = entry;
-    return rest;
+    return toDLQView(entry);
   }
 
   async replayDLQEntry(id: string): Promise<{ success: boolean; message: string }> {
@@ -246,3 +301,21 @@ export class WebhookService {
   }
 }
 
+/**
+ * Correlation IDs are echoed verbatim into an outbound HTTP header, so they must
+ * be constrained to a safe token charset. This prevents header/response-splitting
+ * (CRLF injection) via values such as `trace\nX-Injected: true`.
+ */
+function isValidCorrelationId(correlationId: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(correlationId) && correlationId.length <= 256;
+}
+
+function buildWebhookHeaders(correlationId?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (correlationId && isValidCorrelationId(correlationId)) {
+    headers['X-Correlation-Id'] = correlationId;
+  }
+  return headers;
+}

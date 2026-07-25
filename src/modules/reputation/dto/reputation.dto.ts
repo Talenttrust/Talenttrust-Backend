@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../../../docs/setup-zod';
 import { registry } from '../../../docs/openapi-registry';
 
 /**

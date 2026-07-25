@@ -6,7 +6,6 @@
  * ## Responsibilities
  * - Initialize the DLQ store (in-memory or Redis-backed).
  * - Start the DLQ metrics sampling loop.
- * - Provide a health-check endpoint for monitoring.
  * - Expose authenticated endpoints for idempotent DLQ message replay.
  *
  * ## Configuration (environment variables)
@@ -18,23 +17,64 @@
  * Call {@link initializeJobs} once at application startup (e.g., from `index.ts`).
  */
 
+import axios from 'axios';
 import { Router, Request, Response, NextFunction } from 'express';
-import { body, param, validationResult } from 'express-validator';
-import { InMemoryDlqStore, type DlqStore } from '../dlqStore';
 import { startDlqMetricsSampling, incrementDlqReplay } from '../webhookMetrics';
 import { redactPayload } from '../utils/redact';
-import { WebhookDeliveryService } from '../services/WebhookDeliveryService';
 import { IdempotencyLayer } from '../events/idempotency';
-import { isAdminAuth } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/authorization';
+
+// ---------------------------------------------------------------------------
+// Store contract
+// ---------------------------------------------------------------------------
+
+/** A single replayable DLQ record as consumed by the replay endpoints. */
+export interface ReplayableDlqItem {
+  id: string;
+  eventId: string;
+  targetUrl: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Minimal store contract required by the DLQ replay endpoints. Implementations
+ * may be in-memory (development/testing) or backed by Redis/SQLite.
+ */
+export interface ReplayableDlqStore {
+  getEntryById(id: string): Promise<ReplayableDlqItem | null> | ReplayableDlqItem | null;
+  removeEntry(id: string): Promise<void> | void;
+  incrementReplayAttempts(id: string): Promise<void> | void;
+}
 
 // ---------------------------------------------------------------------------
 // Module-level state
 // ---------------------------------------------------------------------------
 
-let dlqStore: DlqStore | null = null;
+let dlqStore: ReplayableDlqStore | null = null;
 let stopSampling: (() => void) | null = null;
 
 const router = Router();
+
+/**
+ * Deliver a raw DLQ payload to its target URL.
+ *
+ * @returns `true` when the destination responded with a 2xx status.
+ */
+async function deliverRaw(
+  targetUrl: string,
+  eventId: string,
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    const response = await axios.post(targetUrl, payload, {
+      headers: { 'X-Event-Id': eventId },
+      validateStatus: () => true,
+    });
+    return response.status >= 200 && response.status < 300;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -69,26 +109,21 @@ function loadDlqMetricsInterval(): number {
  * This function is idempotent — calling it multiple times will stop the
  * previous sampling loop and start a new one.
  *
- * @param customDlqStore - Optional custom DLQ store (for testing or Redis-backed stores).
+ * @param customDlqStore - The DLQ store backing replay operations.
  * @returns The initialized DLQ store.
  */
-export function initializeJobs(customDlqStore?: DlqStore): DlqStore {
+export function initializeJobs(customDlqStore: ReplayableDlqStore): ReplayableDlqStore {
   // Stop any existing sampling loop
   if (stopSampling !== null) {
     stopSampling();
     stopSampling = null;
   }
 
-  // Initialize DLQ store
-  dlqStore = customDlqStore ?? new InMemoryDlqStore();
+  dlqStore = customDlqStore;
 
   // Start DLQ metrics sampling
   const intervalMs = loadDlqMetricsInterval();
   stopSampling = startDlqMetricsSampling(dlqStore, intervalMs);
-
-  console.log(
-    `[api/jobs] DLQ metrics sampling started (interval: ${intervalMs} ms).`,
-  );
 
   return dlqStore;
 }
@@ -105,8 +140,6 @@ export function shutdownJobs(): void {
   }
 
   dlqStore = null;
-
-  console.log('[api/jobs] Background jobs stopped.');
 }
 
 /**
@@ -114,7 +147,7 @@ export function shutdownJobs(): void {
  *
  * @returns The DLQ store, or `null` if {@link initializeJobs} has not been called.
  */
-export function getDlqStore(): DlqStore | null {
+export function getDlqStore(): ReplayableDlqStore | null {
   return dlqStore;
 }
 
@@ -122,19 +155,25 @@ export function getDlqStore(): DlqStore | null {
 // REST API Routing Interface Endpoints
 // ---------------------------------------------------------------------------
 
+const adminOnly = [requireAuth, requireRole('admin')];
+
 /**
  * POST /jobs/dlq/:id/replay
  * Replays an individual dead letter queue message back through the delivery stack.
  */
 router.post(
   '/jobs/dlq/:id/replay',
-  isAdminAuth,
-  param('id').isString().notEmpty().withMessage('Invalid DLQ record ID'),
-  body('reason').isString().isLength({ min: 5 }).withMessage('Audit trail reason must be at least 5 characters long'),
+  ...adminOnly,
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ errors: errors.array() });
+    const id = String(req.params.id ?? '');
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+
+    if (id.length === 0) {
+      res.status(400).json({ error: 'Invalid DLQ record ID' });
+      return;
+    }
+    if (reason.length < 5) {
+      res.status(400).json({ error: 'Audit trail reason must be at least 5 characters long' });
       return;
     }
 
@@ -144,9 +183,6 @@ router.post(
         return;
       }
 
-      const { id } = req.params;
-      const { reason } = req.body;
-      
       const dlqItem = await dlqStore.getEntryById(id);
       if (!dlqItem) {
         res.status(404).json({ error: 'DLQ item not found' });
@@ -164,7 +200,7 @@ router.post(
       // Redact sensitive payload properties before delivery logic processing
       const safePayload = redactPayload(dlqItem.payload);
 
-      const deliverySuccess = await WebhookDeliveryService.deliverRaw(dlqItem.targetUrl, dlqItem.eventId, safePayload);
+      const deliverySuccess = await deliverRaw(dlqItem.targetUrl, dlqItem.eventId, safePayload);
 
       if (deliverySuccess) {
         await dlqStore.removeEntry(id);
@@ -180,7 +216,7 @@ router.post(
       incrementDlqReplay('error');
       next(error);
     }
-  }
+  },
 );
 
 /**
@@ -189,13 +225,17 @@ router.post(
  */
 router.post(
   '/jobs/dlq/replay',
-  isAdminAuth,
-  body('ids').isArray({ min: 1 }).withMessage('An array of valid IDs is required'),
-  body('reason').isString().isLength({ min: 5 }).withMessage('Audit trail reason must be at least 5 characters long'),
+  ...adminOnly,
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ errors: errors.array() });
+    const ids: unknown = req.body?.ids;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+
+    if (!Array.isArray(ids) || ids.length === 0 || !ids.every((v) => typeof v === 'string')) {
+      res.status(400).json({ error: 'An array of valid IDs is required' });
+      return;
+    }
+    if (reason.length < 5) {
+      res.status(400).json({ error: 'Audit trail reason must be at least 5 characters long' });
       return;
     }
 
@@ -205,10 +245,9 @@ router.post(
         return;
       }
 
-      const { ids, reason }: { ids: string[]; reason: string } = req.body;
       const summary = { successCount: 0, noOpCount: 0, failureCount: 0 };
 
-      for (const id of ids) {
+      for (const id of ids as string[]) {
         const dlqItem = await dlqStore.getEntryById(id);
         if (!dlqItem) {
           summary.failureCount++;
@@ -223,7 +262,7 @@ router.post(
         }
 
         const safePayload = redactPayload(dlqItem.payload);
-        const deliverySuccess = await WebhookDeliveryService.deliverRaw(dlqItem.targetUrl, dlqItem.eventId, safePayload);
+        const deliverySuccess = await deliverRaw(dlqItem.targetUrl, dlqItem.eventId, safePayload);
 
         if (deliverySuccess) {
           await dlqStore.removeEntry(id);
@@ -241,7 +280,7 @@ router.post(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 export { router as jobsRouter };

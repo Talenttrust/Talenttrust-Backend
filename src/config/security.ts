@@ -25,11 +25,6 @@ function validateCorsAllowlist(origins: string[]): void {
         throw new Error('Localhost CORS origin is not allowed in production mode');
     }
     
-    // Check for empty allowlist
-    if (origins.length === 0) {
-        throw new Error('CORS allowlist cannot be empty');
-    }
-    
     // Warn about invalid origin formats
     origins.forEach(origin => {
         if (origin !== '*' && !origin.startsWith('http://') && !origin.startsWith('https://')) {
@@ -40,18 +35,37 @@ function validateCorsAllowlist(origins: string[]): void {
 
 /**
  * @notice Parses and validates CORS allowed origins from environment
- * @dev Trims whitespace and filters empty strings
+ * @dev Production defaults to deny-by-default (empty list).
+ *      Non-production defaults to localhost origins for convenience.
  * @returns Array of validated allowed origins
  */
 function parseAllowedOrigins(): string[] {
-    // Check if ALLOWED_ORIGINS is explicitly set (even if empty)
-    const hasAllowedOrigins = 'ALLOWED_ORIGINS' in process.env;
+    const isProduction = process.env.NODE_ENV === 'production';
+    const hasAllowedOrigins = 'CORS_ALLOWED_ORIGINS' in process.env;
     
-    const origins = hasAllowedOrigins
-        ? process.env.ALLOWED_ORIGINS!.split(',').map(o => o.trim()).filter(Boolean)
-        : ['http://localhost:3000', 'http://localhost:3001'];
+    let origins: string[];
+    if (hasAllowedOrigins) {
+        const raw = process.env.CORS_ALLOWED_ORIGINS!;
+        origins = raw ? raw.split(',').map(o => o.trim()).filter(Boolean) : [];
+    } else {
+        // Production defaults to deny-by-default; development defaults to localhost
+        origins = isProduction ? [] : ['http://localhost:3000', 'http://localhost:3001'];
+    }
     
-    validateCorsAllowlist(origins);
+    if (origins.length > 0) {
+        validateCorsAllowlist(origins);
+    } else if (!isProduction) {
+        // Warn (do not throw) in non-production when the resolved allowlist is empty —
+        // whether CORS_ALLOWED_ORIGINS was explicitly set to an empty/whitespace value or
+        // omitted entirely. An empty allowlist blocks all browser cross-origin requests,
+        // which is almost certainly a misconfiguration in dev/staging, but it should not
+        // hard-crash the process. Production legitimately starts with deny-by-default.
+        console.warn(
+            '[CORS] Allowlist is empty — all cross-origin requests from browsers will be rejected. ' +
+            'Provide at least one allowed origin via CORS_ALLOWED_ORIGINS or remove the variable to use the defaults.',
+        );
+    }
+    
     return origins;
 }
 
@@ -59,24 +73,35 @@ function parseAllowedOrigins(): string[] {
 const allowedOrigins = parseAllowedOrigins();
 
 /**
- * @notice CORS configuration options
- * @dev Rejects requests from origins not in the allowed pool
+ * @notice Creates a CORS configuration from an explicit allowlist.
+ * @dev Used when the validated environment config drives CORS (preferred over process.env).
+ * @param origins Array of allowed origins
  */
-export const corsConfig: CorsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        // Allow requests with no origin (like server-to-server or curl requests) if desired
-        // In this secure baseline, we restrict it unless it matches allowed origins.
-        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS policy'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-    maxAge: 86400, // 24 hours
-};
+export function createCorsConfig(origins: string[]): CorsOptions {
+    if (origins.length > 0) {
+        validateCorsAllowlist(origins);
+    }
+    return {
+        origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+            if (!origin || origins.indexOf(origin) !== -1) {
+                callback(null, true);
+            } else {
+                callback(new Error('Not allowed by CORS policy'));
+            }
+        },
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
+        credentials: true,
+        maxAge: 86400,
+    };
+}
+
+/**
+ * @notice CORS configuration options
+ * @dev Rejects requests from origins not in the allowed pool.
+ *      Never echoes arbitrary origins and never uses wildcard with credentials enabled.
+ */
+export const corsConfig: CorsOptions = createCorsConfig(allowedOrigins);
 
 /**
  * @notice Helmet configuration options

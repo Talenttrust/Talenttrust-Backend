@@ -163,6 +163,31 @@ export class InMemoryDlqStore implements DlqStore {
   }
 
   /**
+   * Atomically remove up to `replayCap` entries and return them.
+   * If the queue has more than `replayCap` entries, only the oldest `replayCap`
+   * are removed. The removal and cap check happen in a single synchronous step so
+   * concurrent callers (in the same process) cannot observe an intermediate state
+   * where entries are removed but the cap has not yet been enforced.
+   *
+   * @param providerId - Provider whose entries to drain.
+   * @param replayCap - Maximum number of entries to remove in this batch.
+   * @returns Array of removed entries (at most `replayCap`).
+   */
+  public drainWithCap(providerId: string, replayCap: number): DlqEntry[] {
+    if (replayCap <= 0) return [];
+
+    const queue = this.entries.get(providerId);
+    if (!queue || queue.length === 0) return [];
+
+    // Splice is synchronous — read + remove in one operation
+    const batch = queue.splice(0, replayCap);
+    if (queue.length === 0) {
+      this.entries.delete(providerId);
+    }
+    return batch;
+  }
+
+  /**
    * Remove all entries from the DLQ.
    * Intended for use in tests only.
    *

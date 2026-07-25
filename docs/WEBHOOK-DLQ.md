@@ -31,6 +31,14 @@ that cannot finish within the grace window are force-flushed to the DLQ.
 - 10 % jitter to prevent thundering herd
 - Max delay cap: 30 s
 
+### Delivery Timeout
+
+Each outbound webhook HTTP attempt is capped by `WEBHOOK_DELIVERY_TIMEOUT_MS`.
+The default is `10000` ms. Values are validated at startup and must be an
+integer between `100` and `120000` ms. Timeout failures count as ordinary
+transient delivery failures: the attempt increments `retryCount`, uses the
+configured retry backoff, and moves to the DLQ when retries are exhausted.
+
 ### Admin Endpoints (`src/routes/admin.routes.ts`)
 
 | Method | Endpoint                                      | Description            |

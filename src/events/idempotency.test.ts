@@ -1,12 +1,17 @@
+import { register } from 'prom-client';
 import { InMemoryIdempotencyStore } from '../db/idempotencyStore';
 import {
   hashEventPayload,
   IdempotencyConflictError,
   runIdempotentEvent,
+  idempotencyEvictions,
 } from './idempotency';
 import { redact } from './redact';
 
 describe('event idempotency', () => {
+  beforeEach(() => {
+    register.clear();
+  });
   it('stores the payload hash and result on the first write path', async () => {
     const store = new InMemoryIdempotencyStore();
     const result = await runIdempotentEvent(
@@ -120,6 +125,37 @@ describe('event idempotency', () => {
     store.clear();
 
     expect(store.get('event-6')).toBeUndefined();
+  });
+
+  it('treats an expired key as a new ingestion and emits eviction metric', async () => {
+    const store = new InMemoryIdempotencyStore();
+    const handler = jest.fn(() => ({ status: 'processed-new' }));
+
+    // Insert an expired key manually
+    store.set({
+      key: 'event-expired',
+      payloadHash: hashEventPayload({ old: true }),
+      result: { status: 'old' },
+      createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000), // 48 hours ago
+      expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000), // expired 24 hours ago
+    });
+
+    const result = await runIdempotentEvent(
+      'event-expired',
+      { newPayload: true },
+      handler,
+      { store },
+    );
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      result: { status: 'processed-new' },
+      replayed: false,
+    });
+
+    // Check that the metric was incremented
+    const evictionsMetric = await idempotencyEvictions.get();
+    expect(evictionsMetric.values[0].value).toBe(1);
   });
 
   it('redacts nested arrays and secret-bearing metadata fields', () => {

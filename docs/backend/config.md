@@ -41,7 +41,7 @@ src/config/
 - **Numeric variables** (e.g. `PORT`) are automatically parsed and validated as integers.
 - **Enums** (e.g. `NODE_ENV`) are strictly validated against allowed values.
 - **URLs** (e.g. `STELLAR_HORIZON_URL`) must be valid URL formats.
-- **Transformation**: Comma-separated strings (e.g. `CORS_ORIGINS`) are automatically converted to arrays.
+- **Transformation**: Comma-separated strings (e.g. `CORS_ALLOWED_ORIGINS`) are automatically converted to arrays.
 - **Fail-Fast**: If validation fails, the application prints a safe error (no secret values leaked) and exits with code `1`.
 
 ### Adding a New Variable

@@ -38,6 +38,7 @@ export interface AppConfig {
    */
   webhookCircuitBreaker: CircuitBreakerConfig;
   idempotencyTtlMs: number;
+  allowedAssets: string[];
 }
 
 const MAX_TIMEOUT_MS = 10_000;
@@ -132,5 +133,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       timeoutMs: clamp(toNumber(env.WEBHOOK_CB_TIMEOUT_MS, 60_000), 1_000, 300_000),
     },
     idempotencyTtlMs,
+    allowedAssets: _parseAssets(env.ALLOWED_ASSETS),
   };
 }

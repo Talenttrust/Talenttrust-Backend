@@ -8,7 +8,10 @@ export interface IdempotencyRecord<TResult = unknown> {
 
 export interface IdempotencyStore {
   get<TResult = unknown>(key: string): IdempotencyRecord<TResult> | undefined;
+  getRaw<TResult = unknown>(key: string): IdempotencyRecord<TResult> | undefined;
   set<TResult>(record: IdempotencyRecord<TResult>): void;
+  delete(key: string): void;
+  size(): number;
   clear(): void;
   purgeExpired(now?: Date): number;
 }
@@ -54,6 +57,18 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     return record;
+  }
+
+  getRaw<TResult = unknown>(key: string): IdempotencyRecord<TResult> | undefined {
+    return this.records.get(key) as IdempotencyRecord<TResult> | undefined;
+  }
+
+  delete(key: string): void {
+    this.records.delete(key);
+  }
+
+  size(): number {
+    return this.records.size;
   }
 
   set<TResult>(record: IdempotencyRecord<TResult>): void {

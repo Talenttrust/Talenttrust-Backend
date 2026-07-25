@@ -25,17 +25,53 @@ const PRIVATE_HOSTNAMES = [
  * - IPv4-mapped IPv6 (::ffff:127.0.0.1)
  * @returns The parsed IPv4 as four numbers [a, b, c, d], or null if not parsable
  */
-function parseIpv4Like(host: string): [number, number, number, number] | null {
-  let normalized = host.toLowerCase().trim();
-
-  // Remove brackets from IPv6 literals
-  if (normalized.startsWith('[') && normalized.endsWith(']')) {
-    normalized = normalized.slice(1, -1);
+/**
+ * Strips IPv6 literal decoration so a bare address remains:
+ * - a leading `[` and/or trailing `]` (even when unmatched, e.g. `[fd00::`)
+ * - a scope/zone identifier (`%eth0`)
+ */
+function stripIpv6Wrapper(host: string): string {
+  let h = host.toLowerCase().trim();
+  if (h.startsWith('[')) {
+    h = h.slice(1);
   }
+  if (h.endsWith(']')) {
+    h = h.slice(0, -1);
+  }
+  const zoneIdx = h.indexOf('%');
+  if (zoneIdx !== -1) {
+    h = h.slice(0, zoneIdx);
+  }
+  return h;
+}
+
+/**
+ * Decodes the compressed-hex form of an IPv4-mapped IPv6 suffix, e.g. the
+ * `7f00:1` in `::ffff:7f00:1` (which is 127.0.0.1). Returns null when the input
+ * is not exactly two hex groups.
+ */
+function parseHexMappedIpv4(mapped: string): [number, number, number, number] | null {
+  const groups = mapped.split(':').filter((g) => g.length > 0);
+  if (groups.length !== 2) return null;
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  const hi = parseInt(groups[0], 16);
+  const lo = parseInt(groups[1], 16);
+  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
+}
+
+function parseIpv4Like(host: string): [number, number, number, number] | null {
+  let normalized = stripIpv6Wrapper(host);
 
   // Strip IPv4-mapped IPv6 prefix
   if (normalized.startsWith('::ffff:')) {
-    normalized = normalized.slice('::ffff:'.length);
+    const mapped = normalized.slice('::ffff:'.length);
+    // Dotted-quad form (::ffff:127.0.0.1) falls through to the dotted parser
+    // below; compressed hex form (::ffff:7f00:1) is decoded here.
+    if (!mapped.includes('.')) {
+      const octets = parseHexMappedIpv4(mapped);
+      if (octets) return octets;
+    }
+    normalized = mapped;
   } else if (normalized.startsWith('0000:0000:0000:0000:0000:ffff:')) {
     normalized = normalized.slice('0000:0000:0000:0000:0000:ffff:'.length);
   }
@@ -76,10 +112,7 @@ function parseIpv4Like(host: string): [number, number, number, number] | null {
  * Checks if an IPv6 host is private
  */
 function isPrivateIpv6(host: string): boolean {
-  const normalized = host.toLowerCase().trim();
-  const noBrackets = normalized.startsWith('[') && normalized.endsWith(']')
-    ? normalized.slice(1, -1)
-    : normalized;
+  const noBrackets = stripIpv6Wrapper(host);
 
   // IPv6 loopback (::1)
   if (noBrackets === '::1' || noBrackets === '0000:0000:0000:0000:0000:0000:0000:0001') {

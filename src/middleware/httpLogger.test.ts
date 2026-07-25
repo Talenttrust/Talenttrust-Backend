@@ -9,6 +9,7 @@
  *   - IP resolution with and without TRUST_PROXY
  */
 
+import { IncomingHttpHeaders } from 'http';
 import { Request, Response, NextFunction } from 'express';
 import { EventEmitter } from 'events';
 import { httpLoggerMiddleware } from './httpLogger';
@@ -19,12 +20,14 @@ import { Logger } from '../logger';
 interface FakeRes extends EventEmitter {
   locals: Record<string, unknown>;
   statusCode: number;
+  getHeaders?: () => Record<string, unknown>;
 }
 
 function makeReqRes(overrides: {
   method?: string;
   originalUrl?: string;
-  headers?: Record<string, string>;
+  headers?: IncomingHttpHeaders;
+  responseHeaders?: Record<string, unknown>;
   remoteAddress?: string;
   statusCode?: number;
   locals?: Record<string, unknown>;
@@ -32,6 +35,7 @@ function makeReqRes(overrides: {
   const res = new EventEmitter() as FakeRes;
   res.locals = overrides.locals ?? {};
   res.statusCode = overrides.statusCode ?? 200;
+  res.getHeaders = jest.fn().mockReturnValue(overrides.responseHeaders ?? {});
 
   const req: Partial<Request> = {
     method: overrides.method ?? 'GET',
@@ -197,5 +201,74 @@ describe('httpLoggerMiddleware', () => {
     res.emit('finish');
 
     expect(logged[0]!['ip']).toBe('192.168.1.1');
+  });
+
+  it('redacts sensitive request and response headers before logging', () => {
+    const logged: Array<Record<string, unknown>> = [];
+    const mockLog = { info: jest.fn((_msg: string, ctx: Record<string, unknown>) => logged.push(ctx)) };
+    const bearerToken = 'Bearer super-secret-token';
+    const cookieValue = 'session=abc123; refresh=def456';
+    const setCookieValues = ['sid=one; HttpOnly', 'csrf=two; Secure'];
+    const apiKeyValue = 'internal-api-key';
+
+    const { req, res, next } = makeReqRes({
+      headers: {
+        authorization: bearerToken,
+        Cookie: cookieValue,
+        'X-API-Key': apiKeyValue,
+        'user-agent': 'TalentTrustTest/1.0',
+        accept: 'application/json',
+      },
+      responseHeaders: {
+        'set-cookie': setCookieValues,
+        Authorization: bearerToken,
+        'x-auth-token': 'response-auth-token',
+        'content-type': 'application/json',
+      },
+      locals: { log: mockLog },
+    });
+
+    httpLoggerMiddleware(req as Request, res as unknown as Response, next as NextFunction);
+    res.emit('finish');
+
+    const requestHeaders = logged[0]!['requestHeaders'] as Record<string, unknown>;
+    const responseHeaders = logged[0]!['responseHeaders'] as Record<string, unknown>;
+    const serialized = JSON.stringify(logged[0]);
+
+    expect(requestHeaders['authorization']).toBe('[REDACTED]');
+    expect(requestHeaders['Cookie']).toBe('[REDACTED]');
+    expect(requestHeaders['X-API-Key']).toBe('[REDACTED]');
+    expect(requestHeaders['accept']).toBe('application/json');
+
+    expect(responseHeaders['set-cookie']).toBe('[REDACTED]');
+    expect(responseHeaders['Authorization']).toBe('[REDACTED]');
+    expect(responseHeaders['x-auth-token']).toBe('[REDACTED]');
+    expect(responseHeaders['content-type']).toBe('application/json');
+
+    expect(serialized).not.toContain(bearerToken);
+    expect(serialized).not.toContain(cookieValue);
+    expect(serialized).not.toContain(setCookieValues[0]);
+    expect(serialized).not.toContain(setCookieValues[1]);
+    expect(serialized).not.toContain(apiKeyValue);
+  });
+
+  it('handles missing headers and preserves non-sensitive multi-value headers', () => {
+    const logged: Array<Record<string, unknown>> = [];
+    const mockLog = { info: jest.fn((_msg: string, ctx: Record<string, unknown>) => logged.push(ctx)) };
+    const { req, res, next } = makeReqRes({
+      headers: {},
+      responseHeaders: {
+        vary: ['Origin', 'Accept-Encoding'],
+      },
+      locals: { log: mockLog },
+    });
+
+    httpLoggerMiddleware(req as Request, res as unknown as Response, next as NextFunction);
+    res.emit('finish');
+
+    expect(logged[0]!['requestHeaders']).toEqual({});
+    expect(logged[0]!['responseHeaders']).toEqual({
+      vary: ['Origin', 'Accept-Encoding'],
+    });
   });
 });

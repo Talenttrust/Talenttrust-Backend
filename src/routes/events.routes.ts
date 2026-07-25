@@ -6,9 +6,11 @@ import { validateContractEventPayload } from '../contracts/validation';
 import { getCorrelationId } from '../utils/correlationId';
 import { validateSchema } from '../middleware/validate.middleware';
 
-const eventAuditService = new EventAuditService(new InMemoryEventAuditRepository());
+const defaultEventAuditService = new EventAuditService(new InMemoryEventAuditRepository());
 
-export function createEventsRouter(): Router {
+export function createEventsRouter(
+  eventAuditService: EventAuditService = defaultEventAuditService,
+): Router {
   const router = Router();
 
   router.post('/events', async (req: Request, res: Response) => {

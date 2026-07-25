@@ -2,8 +2,31 @@ import { KeyEscrowEvent, EmailPayload, WebPayload } from '../types/notification.
 import { NotificationTransport, ConsoleTransport, NotificationResult, SMTPTransport, SESTransport, SendGridTransport } from './notification.transport';
 import { NotificationRepository } from '../repositories/notificationRepository';
 import { getDb } from '../db/database';
-import { validateEnv } from '../config/env.schema';
+import { EnvConfig, validateEnv } from '../config/env.schema';
 import { logger } from '../logger';
+
+/** Resolve the synchronous notification email transport from validated config. */
+export function createNotificationEmailTransport(env: EnvConfig = validateEnv()): NotificationTransport {
+  if (env.EMAIL_PROVIDER === 'smtp') {
+    if (!env.SMTP_HOST || !env.SMTP_PORT || !env.SMTP_FROM) {
+      throw new Error('SMTP email transport selected but SMTP_HOST, SMTP_PORT, and SMTP_FROM are required');
+    }
+    return new SMTPTransport({ host: env.SMTP_HOST, port: env.SMTP_PORT, user: env.SMTP_USER, password: env.SMTP_PASSWORD, from: env.SMTP_FROM, secure: env.SMTP_SECURE }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  if (env.EMAIL_PROVIDER === 'ses') {
+    if (!env.SMTP_FROM || !env.AWS_REGION || !env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
+      throw new Error('SES email transport selected but SMTP_FROM, AWS_REGION, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY are required');
+    }
+    return new SESTransport({ accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY, region: env.AWS_REGION, from: env.SMTP_FROM }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  if (env.EMAIL_PROVIDER === 'sendgrid') {
+    if (!env.SMTP_FROM || !env.SENDGRID_API_KEY) {
+      throw new Error('SendGrid email transport selected but SMTP_FROM and SENDGRID_API_KEY are required');
+    }
+    return new SendGridTransport({ apiKey: env.SENDGRID_API_KEY, from: env.SMTP_FROM }, env.EMAIL_SEND_TIMEOUT_MS);
+  }
+  return ConsoleTransport;
+}
 
 /**
  * @title NotificationService
@@ -20,61 +43,57 @@ export class NotificationService {
   /**
    * Creates an email transport based on the environment configuration.
    */
-  private static createEmailTransport(): NotificationTransport {
-    const env = validateEnv();
-
-    if (env.EMAIL_PROVIDER === 'smtp') {
-      if (!env.SMTP_HOST || !env.SMTP_PORT || !env.SMTP_FROM) {
-        logger.warn('[NotificationService] SMTP configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SMTPTransport({
-        host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        user: env.SMTP_USER,
-        password: env.SMTP_PASSWORD,
-        from: env.SMTP_FROM,
-        secure: env.SMTP_SECURE,
-      });
-    } else if (env.EMAIL_PROVIDER === 'ses') {
-      if (!env.SMTP_FROM) {
-        logger.warn('[NotificationService] SES configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SESTransport({
-        accessKeyId: env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-        region: env.AWS_REGION,
-        from: env.SMTP_FROM,
-      });
-    } else if (env.EMAIL_PROVIDER === 'sendgrid') {
-      if (!env.SMTP_FROM) {
-        logger.warn('[NotificationService] SendGrid configuration incomplete, falling back to console');
-        return ConsoleTransport;
-      }
-      return new SendGridTransport({
-        apiKey: env.SENDGRID_API_KEY,
-        from: env.SMTP_FROM,
-      });
-    }
-    return ConsoleTransport;
-  }
-
   constructor(options?: {
     emailTransport?: NotificationTransport;
     webTransport?: NotificationTransport;
     repo?: NotificationRepository;
   }) {
-    this.emailTransport = options?.emailTransport ?? NotificationService.createEmailTransport();
+    this.emailTransport = options?.emailTransport ?? createNotificationEmailTransport();
     this.webTransport = options?.webTransport ?? ConsoleTransport;
     this.repo = options?.repo ?? new NotificationRepository(getDb(process.env['DB_PATH'] ?? ':memory:'));
   }
 
+  /**
+   * Validates a single recipient email address before it is handed to an email
+   * transport.
+   *
+   * The check is intentionally strict because validated addresses flow into the
+   * (soon real) SMTP/SES/SendGrid transports, where permissive input enables
+   * header- and recipient-injection attacks. The rules are:
+   *
+   *  - Reject empty input and any CR/LF (header-injection) characters.
+   *  - Reject control characters and whitespace anywhere in the address.
+   *  - Reject comma/semicolon-separated multi-recipient strings
+   *    (e.g. `a@b.com,c@d.com`).
+   *  - Reject quoting/backslash forms (`"x"@y.com`, `a\b@c.com`) that SMTP can
+   *    misinterpret.
+   *  - Accept normal RFC-shaped single addresses with exactly one `@` and a
+   *    dotted domain with a TLD.
+   *
+   * The method keeps its boolean contract and signature unchanged so callers and
+   * the email transport can rely on deterministic behaviour.
+   *
+   * @param address The candidate recipient address.
+   * @returns `true` if the address is a safe, single, RFC-shaped recipient.
+   */
   private isValidEmail(address: string): boolean {
     if (!address) return false;
-    // Basic sanity check + header injection protection (no CR/LF)
-    if (/[\r\n]/.test(address)) return false;
-    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // Header-injection protection: reject CR/LF and other control characters.
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f]/.test(address)) return false;
+    // Reject multi-recipient separators that could smuggle extra recipients.
+    if (/[,;]/.test(address)) return false;
+    // Reject quoting/backslash forms that SMTP can misinterpret.
+    if (/["\\]/.test(address)) return false;
+    // Reject angle brackets / display-name forms.
+    if (/[<>()[\]]/.test(address)) return false;
+    // Exactly one '@' separating local part and domain.
+    const parts = address.split('@');
+    if (parts.length !== 2) return false;
+    const [local, domain] = parts;
+    if (!local || !domain) return false;
+    // Strict, single-address shape with a dotted domain and a TLD.
+    const re = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
     return re.test(address);
   }
 
@@ -148,13 +167,12 @@ export class NotificationService {
         message: `Details: ${JSON.stringify(data || {})}`,
       };
 
-      // Persist so the UI can read past notifications
+      // Persist so the UI can read past notifications — propagate failure to caller
       try {
-        this.repo.saveWebNotification(payload.userId, payload.title, payload.message);
+        await Promise.resolve(this.repo.saveWebNotification(payload.userId, payload.title, payload.message));
       } catch (err: unknown) {
-        logger.error('[NotificationService:Web] Failed to persist web notification', {
-          err,
-        });
+        logger.error('[NotificationService:Web] Failed to persist web notification', { err });
+        return { success: false, message: `Persistence failure: ${(err as Error).message}` };
       }
 
       if (this.webTransport.sendWebNotification) {

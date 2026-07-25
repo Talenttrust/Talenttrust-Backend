@@ -23,12 +23,18 @@ import { createRequestLimitsMiddleware } from './middleware/requestLimits';
 
 import contractsModuleRouter from './routes/contracts.routes';
 import eventsRouter from './routes/events.routes';
+import disputesRouter from './routes/disputes.routes';
+import { createMetricsRouter } from './routes/metrics.routes';
+import { metricsAuthMiddleware } from './middleware/metricsAuth';
 
 import reputationRouter from './routes/reputation.routes';
+import apiKeysRouter from './routes/apiKeys.routes';
+import authRouter from './routes/auth.routes';
 import configRouter from './routes/config.routes';
 import dependencyScanRouter from './routes/dependency-scan.routes';
 import { adminRouter } from './routes/admin.routes';
 import { deployRouter } from './routes/deploy.routes';
+import { webhookSubscriptionRouter } from './routes/webhook-subscription.routes';
 import { requestIdMiddleware } from './middleware/requestId';
 import { httpLoggerMiddleware } from './middleware/httpLogger';
 import { ReputationService } from './services/reputation.service';
@@ -56,14 +62,16 @@ export function attachTerminalHandlers(app: express.Application): void {
  */
 export function createApp(options?: AppFactoryOptions): express.Application {
   const includeTerminalHandlers = options?.includeTerminalHandlers ?? true;
-  validateEnv();
+  const env = validateEnv();
   const app = express();
 
   // ── Security Middleware ───────────────────────────────────────────────────
-  applySecurityMiddleware(app);
+  applySecurityMiddleware(app, env.CORS_ALLOWED_ORIGINS);
 
   const metricsService = new MetricsService(
     process.env['SERVICE_NAME'] ?? 'talenttrust-backend',
+    undefined,
+    { httpRouteLabelLimit: env.HTTP_METRICS_ROUTE_LABEL_LIMIT },
   );
 
   // ── Middleware ────────────────────────────────────────────────────────────
@@ -83,15 +91,37 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/health', readinessHealthRouter);
   app.use('/api/config', configRouter);
   app.use('/api/v1', eventsRouter);
+  app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1', apiKeysRouter);
   app.use('/api/v1/contracts', contractsModuleRouter);
+  app.use('/api/v1/disputes', disputesRouter);
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
   app.use('/api/v1/admin', adminRouter);
   app.use('/api/v1/admin/deploy', deployRouter);
+  app.use('/api/v1/webhook-subscriptions', webhookSubscriptionRouter);
+  app.use('/api/v1/metrics', metricsAuthMiddleware, createMetricsRouter(metricsService));
 
   if (includeTerminalHandlers) {
     attachTerminalHandlers(app);
   }
+
+  // Harden the underlying HTTP server against malformed / smuggled requests.
+  // When Node's HTTP parser rejects a request at the protocol layer — e.g. a
+  // body larger than the declared Content-Length, or a chunked upload past the
+  // size limit — close the socket instead of leaking Node's default bare
+  // "400 Bad Request". This never fires for well-formed requests, so normal
+  // routing and error handling are unaffected.
+  const originalListen = app.listen.bind(app);
+  (app as express.Application).listen = ((...args: Parameters<express.Application['listen']>) => {
+    const server = (originalListen as (...a: unknown[]) => import('http').Server)(...args);
+    server.on('clientError', (_err: Error, socket: import('net').Socket) => {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    });
+    return server;
+  }) as express.Application['listen'];
 
   return app;
 }

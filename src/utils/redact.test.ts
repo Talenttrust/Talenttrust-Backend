@@ -3,7 +3,7 @@
  * @module redact.test
  */
 
-import { redactSecret, redactObject, redactPayload } from './redact';
+import { redactSecret, redactObject, redactPayload, redactHeaders } from './redact';
 
 describe('redactSecret', () => {
   it('returns [REDACTED] for any value', () => {
@@ -211,6 +211,70 @@ describe('redactObject', () => {
     expect(result).not.toBe(input);
     expect(input.secret).toBe('secret-value'); // Original unchanged
     expect(result.secret).toBe('[REDACTED]');
+  });
+});
+
+describe('redactHeaders', () => {
+  it('redacts sensitive headers case-insensitively', () => {
+    const result = redactHeaders({
+      Authorization: 'Bearer secret-token',
+      cookie: 'session=abc123',
+      'X-API-KEY': 'my-secret-key',
+      'Proxy-Authorization': 'Basic dXNlcjpwYXNz',
+      'x-forwarded-for': '1.2.3.4',
+      'x-real-ip': '10.0.0.1',
+    });
+
+    expect(result['Authorization']).toBe('[REDACTED]');
+    expect(result['cookie']).toBe('[REDACTED]');
+    expect(result['X-API-KEY']).toBe('[REDACTED]');
+    expect(result['Proxy-Authorization']).toBe('[REDACTED]');
+    expect(result['x-forwarded-for']).toBe('[REDACTED]');
+    expect(result['x-real-ip']).toBe('[REDACTED]');
+  });
+
+  it('preserves non-sensitive headers and array values', () => {
+    const result = redactHeaders({
+      Accept: 'application/json',
+      vary: ['Origin', 'Accept-Encoding'],
+      'x-request-id': 'req-123',
+    });
+
+    expect(result).toEqual({
+      Accept: 'application/json',
+      vary: ['Origin', 'Accept-Encoding'],
+      'x-request-id': 'req-123',
+    });
+  });
+
+  it('truncates long non-sensitive string header values', () => {
+    const result = redactHeaders({
+      'x-long-header': 'a'.repeat(205),
+    });
+
+    expect(result['x-long-header']).toBe('a'.repeat(200) + '...');
+  });
+
+  it('does not mutate the original headers object', () => {
+    const input = {
+      Authorization: 'Bearer secret-token',
+      Accept: 'application/json',
+    };
+
+    const result = redactHeaders(input);
+
+    expect(result).not.toBe(input);
+    expect(input.Authorization).toBe('Bearer secret-token');
+  });
+
+  it('does not over-redact benign header names containing generic fragments', () => {
+    const result = redactHeaders({
+      'x-public-key-hint': 'stellar-account',
+      'x-session-tokenized': 'derived-value',
+    });
+
+    expect(result['x-public-key-hint']).toBe('stellar-account');
+    expect(result['x-session-tokenized']).toBe('derived-value');
   });
 });
 

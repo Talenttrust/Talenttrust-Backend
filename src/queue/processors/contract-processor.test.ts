@@ -86,7 +86,16 @@ describe('processContractProcessing', () => {
     it('throws on invalid action', async () => {
       await expect(
         processContractProcessing({ ...BASE_PAYLOAD, action: 'invalid-action' } as unknown as ContractProcessingPayload),
-      ).rejects.toThrow('Invalid action');
+      ).rejects.toThrow('Unsupported action');
+    });
+
+    it('throws from switch default on unrecognised action bypassing TypeScript', async () => {
+      // The switch default is the single validation point for unknown actions.
+      // This test reaches it via a runtime cast to confirm the defensive branch
+      // emits a structured warn and throws with the action name embedded.
+      await expect(
+        processContractProcessing({ ...BASE_PAYLOAD, action: 'delete' } as unknown as ContractProcessingPayload),
+      ).rejects.toThrow('Unsupported action: delete');
     });
   });
 
@@ -183,6 +192,25 @@ describe('processContractProcessing', () => {
         );
         expect(completion).toBeDefined();
       }
+    });
+
+    it('switch default emits a structured warn record on unknown action', async () => {
+      const { records, restore } = captureRecords();
+      try {
+        await processContractProcessing({
+          ...BASE_PAYLOAD,
+          action: 'delete',
+        } as unknown as ContractProcessingPayload).catch(() => {/*expected*/});
+      } finally {
+        restore();
+      }
+
+      const warnRecords = records.filter((r) => r.level === 'warn');
+      expect(warnRecords.length).toBeGreaterThan(0);
+      const defaultWarn = warnRecords.find(
+        (r) => typeof r.message === 'string' && r.message.includes('unsupported action'),
+      );
+      expect(defaultWarn).toBeDefined();
     });
   });
 });

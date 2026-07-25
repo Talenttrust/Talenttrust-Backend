@@ -28,12 +28,15 @@ jest.mock('../logger', () => ({
   })
 }));
 
+const { createRequestLogger } = require('../logger');
+
 describe('requestLoggerMiddleware', () => {
   let mockRequest: Partial<Request>;
   let mockResponse: Partial<Response>;
   let mockNext: NextFunction;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     mockRequest = {
       method: 'GET',
       url: '/test',
@@ -139,8 +142,6 @@ describe('requestLoggerMiddleware', () => {
   });
 
   it('attaches logger to request object', () => {
-    const { createRequestLogger } = require('../logger');
-    
     requestLoggerMiddleware(
       mockRequest as Request,
       mockResponse as Response,
@@ -160,6 +161,78 @@ describe('requestLoggerMiddleware', () => {
 
     expect(mockNext).toHaveBeenCalled();
   });
+
+  it('redacts sensitive request and response headers in emitted log records', () => {
+    const mockLogger = { info: jest.fn() };
+    createRequestLogger.mockReturnValue(mockLogger);
+
+    const authorizationValue = 'Bearer request-secret';
+    const cookieValue = 'session=abc; refresh=def';
+    const apiKeyValue = 'request-api-key';
+    const setCookieValue = ['sid=one; HttpOnly', 'refresh=two; Secure'];
+
+    mockRequest.headers = {
+      Authorization: authorizationValue,
+      cookie: cookieValue,
+      'x-api-key': apiKeyValue,
+      accept: 'application/json',
+    } as any;
+    mockRequest.header = jest.fn().mockImplementation((header: string) => {
+      const lookup = header.toLowerCase();
+      if (lookup === 'authorization') return authorizationValue;
+      if (lookup === 'cookie') return cookieValue;
+      if (lookup === 'x-api-key') return apiKeyValue;
+      if (lookup === 'user-agent') return 'TalentTrustTest/1.0';
+      return undefined;
+    });
+    mockResponse.getHeaders = jest.fn().mockReturnValue({
+      'set-cookie': setCookieValue,
+      'x-auth-token': 'response-secret-token',
+      'content-type': 'application/json',
+    });
+
+    requestLoggerMiddleware(
+      mockRequest as Request,
+      mockResponse as Response,
+      mockNext
+    );
+
+    if (mockResponse.end) {
+      (mockResponse.end as jest.Mock)();
+    }
+
+    expect(mockLogger.info).toHaveBeenNthCalledWith(
+      1,
+      'Request started',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: '[REDACTED]',
+          cookie: '[REDACTED]',
+          'x-api-key': '[REDACTED]',
+          accept: 'application/json',
+        }),
+      })
+    );
+
+    expect(mockLogger.info).toHaveBeenNthCalledWith(
+      2,
+      'Request completed',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'set-cookie': '[REDACTED]',
+          'x-auth-token': '[REDACTED]',
+          'content-type': 'application/json',
+        }),
+      })
+    );
+
+    const serializedCalls = JSON.stringify(mockLogger.info.mock.calls);
+    expect(serializedCalls).not.toContain(authorizationValue);
+    expect(serializedCalls).not.toContain(cookieValue);
+    expect(serializedCalls).not.toContain(apiKeyValue);
+    expect(serializedCalls).not.toContain(setCookieValue[0]);
+    expect(serializedCalls).not.toContain(setCookieValue[1]);
+  });
 });
 
 describe('createRequestLoggerMiddleware', () => {
@@ -168,6 +241,7 @@ describe('createRequestLoggerMiddleware', () => {
   let mockNext: NextFunction;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     mockRequest = {
       method: 'POST',
       url: '/api/test',

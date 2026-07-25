@@ -21,6 +21,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { Logger, logger as rootLogger } from '../logger';
+import { redactHeaders } from '../utils/redact';
 
 const MAX_UA_LENGTH = 256;
 
@@ -65,6 +66,10 @@ export function httpLoggerMiddleware(
       durationMs: parseFloat(durationMs.toFixed(3)),
       userAgent,
       ip: resolveClientIp(req),
+      requestHeaders: redactHeaders(req.headers),
+      responseHeaders: redactHeaders(
+        typeof res.getHeaders === 'function' ? (res.getHeaders() as Record<string, unknown>) : undefined,
+      ),
     });
   });
 

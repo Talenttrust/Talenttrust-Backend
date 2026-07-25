@@ -342,8 +342,9 @@ describe('Request Limits Integration Tests', () => {
       if (resp) {
         expect(resp.startsWith('HTTP/1.1 413') || resp.includes('413')).toBe(true);
       } else {
-        // Null indicates the socket closed without a response which is acceptable
-        expect(resp).toBeNull();
+        // A falsy response (null or empty string) means the socket was closed
+        // without a parseable HTTP response, which is the acceptable rejection.
+        expect(resp).toBeFalsy();
       }
 
       appServer.close();
@@ -390,7 +391,9 @@ describe('Request Limits Integration Tests', () => {
       if (resp) {
         expect(resp.startsWith('HTTP/1.1 413') || resp.includes('413')).toBe(true);
       } else {
-        expect(resp).toBeNull();
+        // A falsy response (null or empty string) means the socket was closed
+        // without a parseable HTTP response, which is the acceptable rejection.
+        expect(resp).toBeFalsy();
       }
 
       appServer.close();

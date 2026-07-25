@@ -46,6 +46,8 @@ export interface AuditExportFilters {
   resource?: string;
   /** Restrict to a specific resource ID. */
   resourceId?: string;
+  /** Cap the number of exported records. Omitting it exports every match. */
+  limit?: number;
 }
 
 /** Ordered CSV column headers for the audit export. */
@@ -64,15 +66,54 @@ const CSV_HEADERS = [
 
 type CsvColumn = (typeof CSV_HEADERS)[number];
 
-/** Escapes a value for safe inclusion in a CSV cell (RFC 4180). */
-function csvCell(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
-  // Wrap in quotes if the value contains a comma, double-quote, or newline.
-  if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`;
+/**
+ * Neutralises CSV-injection ("formula injection") by prefixing dangerous
+ * leading characters with a single-quote so spreadsheet applications
+ * (Excel, LibreOffice Calc, Google Sheets) treat the cell as plain text
+ * rather than executing it as a formula.
+ *
+ * Characters that trigger formula execution when they appear as the very
+ * first character of an unquoted cell value:
+ *   `=`  standard formula prefix
+ *   `+`  alternative formula prefix (Lotus 1-2-3 compatibility)
+ *   `-`  negation that spreadsheets evaluate as a formula
+ *   `@`  legacy Lotus and some modern Excel formula prefix
+ *   `\t` tab — used in tab-separated injections (safe to neutralise)
+ *   `\r` carriage-return — can break row parsing
+ *
+ * The prefix `'` is the de-facto standard mitigation recommended by OWASP
+ * (https://owasp.org/www-community/attacks/CSV_Injection).
+ *
+ * @param str - The already-stringified cell value.
+ * @returns The value with any dangerous leading character escaped.
+ */
+export function neutraliseCsvInjection(str: string): string {
+  if (str.length === 0) return str;
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
   }
   return str;
+}
+
+/**
+ * Escapes a value for safe inclusion in a CSV cell (RFC 4180) and
+ * neutralises CSV-injection characters at the start of the value.
+ *
+ * Processing order:
+ * 1. Stringify the value.
+ * 2. Apply {@link neutraliseCsvInjection} to defuse formula prefixes.
+ * 3. Wrap in double-quotes and escape internal quotes per RFC 4180 if the
+ *    value contains a comma, double-quote, newline, or carriage-return.
+ */
+function csvCell(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const safe = neutraliseCsvInjection(raw);
+  // Wrap in quotes if the value contains a comma, double-quote, or newline.
+  if (safe.includes('"') || safe.includes(',') || safe.includes('\n') || safe.includes('\r')) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
 }
 
 /** Serialises a redacted AuditEntry to one CSV row (no trailing newline). */

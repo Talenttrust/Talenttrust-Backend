@@ -24,7 +24,7 @@ export type WebhookRetryPolicy = typeof WEBHOOK_RETRY_POLICY;
  */
 export function calculateWebhookRetryDelay(attemptNumber: number): number {
   const { initialDelayMs, multiplier, jitter, maxDelayMs } = WEBHOOK_RETRY_POLICY;
-  
+
   let delay = initialDelayMs * Math.pow(multiplier, attemptNumber);
   delay = Math.min(delay, maxDelayMs);
   

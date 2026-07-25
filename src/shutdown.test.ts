@@ -79,6 +79,20 @@ function makeFakeConnection(
   };
 }
 
+function makeFakeDrainableHandler(name: string, drainMs = 0) {
+  return {
+    name,
+    stopAccepting: jest.fn(),
+    drain: jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, drainMs);
+        }),
+    ),
+    checkpoint: jest.fn(() => Promise.resolve()),
+  };
+}
+
 /**
  * Creates a fake DrainableWebhookService.
  *
@@ -275,6 +289,49 @@ describe('registerShutdownHandlers', () => {
     expect(pg.close).toHaveBeenCalledTimes(1);
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generic drainable shutdown handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('generic drainable shutdown handlers', () => {
+  it('stops accepting new work and waits for in-flight work before exiting', async () => {
+    const handler = makeFakeDrainableHandler('transaction-poller', 100);
+
+    registerShutdownHandlers(makeFakeServer(), [], [], {
+      shutdownDrainHandlers: [handler],
+      shutdownDrainTimeoutMs: 2_000,
+    });
+
+    process.emit('SIGTERM');
+
+    await new Promise((r) => setTimeout(r, 40));
+    expect(handler.stopAccepting).toHaveBeenCalledTimes(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(handler.drain).toHaveBeenCalledTimes(1);
+    expect(handler.checkpoint).not.toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  }, 3_000);
+
+  it('checkpoint remaining state when the drain grace period expires', async () => {
+    const handler = makeFakeDrainableHandler('queue-worker', 200);
+
+    registerShutdownHandlers(makeFakeServer(), [], [], {
+      shutdownDrainHandlers: [handler],
+      shutdownDrainTimeoutMs: 50,
+    });
+
+    process.emit('SIGTERM');
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(handler.stopAccepting).toHaveBeenCalledTimes(1);
+    expect(handler.drain).toHaveBeenCalledTimes(1);
+    expect(handler.checkpoint).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  }, 3_000);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -505,7 +562,7 @@ describe('webhook delivery drain phase', () => {
   // ── flushToDLQ error is swallowed — shutdown must still complete ────────────
 
   it('continues to exit even if flushToDLQ rejects', async () => {
-    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => logger);
+    jest.spyOn(logger, 'warn').mockImplementation(() => logger);
 
     // drain takes 500 ms, grace is 50 ms, flushToDLQ rejects
     const svc = makeFakeWebhookService(3, 500, /* flushRejects */ true);

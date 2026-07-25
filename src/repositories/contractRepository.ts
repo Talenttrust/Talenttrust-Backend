@@ -1,17 +1,3 @@
-/**
- * ContractRepository — CRUD operations for the `contracts` table.
- *
- * All queries use prepared statements (parameter binding) to prevent SQL
- * injection.  The repository layer is intentionally ignorant of HTTP/Express
- * concerns; it operates purely on domain types defined in ../db/types.ts.
- *
- * Threat model:
- *  - IDs are caller-supplied UUIDs; validated upstream in route handlers.
- *  - Amount is stored as an integer (stroops) to avoid floating-point drift.
- *  - Status transitions are constrained by a DB CHECK constraint as a second
- *    line of defence beyond application-level validation.
- */
-
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { Contract, ContractStatus } from "../db/types";
@@ -21,7 +7,58 @@ import {
   parseLimit,
 } from "../contracts/cursor.repository";
 import type { CursorPage, CursorPaginationInput } from "../contracts/cursor.types";
-import { VersionConflictError } from "../errors/appError";
+import { VersionConflictError, NotFoundError } from "../errors/appError";
+
+/** Input shape for creating a new contract. */
+export interface CreateContractInput {
+  title: string;
+  clientId: string;
+  freelancerId?: string;
+  amount: number;
+  status?: ContractStatus;
+}
+
+/** Canonical set of valid contract statuses (mirrors the DB CHECK constraint). */
+const VALID_CONTRACT_STATUSES: readonly ContractStatus[] = [
+  "draft",
+  "active",
+  "completed",
+  "disputed",
+  "cancelled",
+];
+
+/**
+ * Reject any status outside the allowed set before it reaches the database.
+ * The `contracts.status` column carries a matching CHECK constraint, but some
+ * SQLite builds (notably the one bundled on CI) do not enforce CHECK on every
+ * write path, so we validate in code to keep the behavior deterministic across
+ * platforms.
+ */
+function assertValidContractStatus(status: ContractStatus): void {
+  if (!VALID_CONTRACT_STATUSES.includes(status)) {
+    throw new Error(`Invalid contract status: ${String(status)}`);
+  }
+}
+
+/**
+ * Repository interface for contracts data access layer.
+ *
+ * All methods are async to allow swapping between synchronous SQLite and
+ * asynchronous backends without changing callers.
+ */
+export interface IContractRepository {
+  create(data: CreateContractInput): Promise<Contract>;
+  findById(id: string): Promise<Contract | undefined>;
+  findAll(): Promise<Contract[]>;
+  findByClientId(clientId: string): Promise<Contract[]>;
+  findPage(input: CursorPaginationInput): Promise<CursorPage<Contract>>;
+  updateWithVersion(
+    id: string,
+    fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
+    expectedVersion: number,
+  ): Promise<Contract>;
+  delete(id: string): Promise<boolean>;
+}
 
 /** Row shape as returned from SQLite (snake_case columns). */
 interface ContractRow {
@@ -50,77 +87,44 @@ function toContract(row: ContractRow): Contract {
 }
 
 /**
- * Repository providing typed CRUD access to the `contracts` table.
+ * SQLite-backed repository providing typed CRUD access to the `contracts` table.
  *
- * Instantiate with an open `Database` instance.  Each method prepares its
+ * Instantiate with an open `Database` instance. Each method prepares its
  * statement lazily on first call and caches it for subsequent calls.
  */
-export class ContractRepository {
+export class ContractRepository implements IContractRepository {
   private db: Database.Database;
 
   constructor(db: Database.Database) {
     this.db = db;
   }
 
-  /**
-   * Returns every contract ordered by creation date descending.
-   *
-   * @returns Array of Contract objects (empty array when none exist).
-   */
-  findAll(): Contract[] {
+  async findAll(): Promise<Contract[]> {
     const rows = this.db
-      .prepare<
-        [],
-        ContractRow
-      >("SELECT * FROM contracts ORDER BY created_at DESC")
+      .prepare<[], ContractRow>("SELECT * FROM contracts ORDER BY created_at DESC")
       .all();
     return rows.map(toContract);
   }
 
-  /**
-   * Finds a single contract by its UUID primary key.
-   *
-   * @param id - The contract UUID.
-   * @returns The matching Contract or `undefined` if not found.
-   */
-  findById(id: string): Contract | undefined {
+  async findById(id: string): Promise<Contract | undefined> {
     const row = this.db
       .prepare<[string], ContractRow>("SELECT * FROM contracts WHERE id = ?")
       .get(id);
     return row ? toContract(row) : undefined;
   }
 
-  /**
-   * Retrieves all contracts associated with a given client user.
-   *
-   * @param clientId - UUID of the client user.
-   */
-  findByClientId(clientId: string): Contract[] {
+  async findByClientId(clientId: string): Promise<Contract[]> {
     const rows = this.db
-      .prepare<
-        [string],
-        ContractRow
-      >("SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC")
+      .prepare<[string], ContractRow>("SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC")
       .all(clientId);
     return rows.map(toContract);
   }
 
-  /**
-   * Creates a new contract record.
-   *
-   * Generates a UUID and records the current timestamp automatically.
-   *
-   * @param data - Required contract fields (id and createdAt are generated).
-   * @returns The newly created Contract.
-   */
-  create(
-    data: Omit<Contract, "id" | "createdAt" | "status" | "version"> & {
-      status?: ContractStatus;
-    },
-  ): Contract {
+  async create(data: CreateContractInput): Promise<Contract> {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const status: ContractStatus = data.status ?? "draft";
+    assertValidContractStatus(status);
 
     this.db
       .prepare<[string, string, string, string, number, string, number, string]>(
@@ -132,48 +136,35 @@ export class ContractRepository {
         id,
         data.title,
         data.clientId,
-        data.freelancerId,
+        data.freelancerId ?? "",
         data.amount,
         status,
         0,
         createdAt,
       );
 
-    return { id, ...data, status, version: 0, createdAt };
+    return {
+      id,
+      title: data.title,
+      clientId: data.clientId,
+      freelancerId: data.freelancerId ?? "",
+      amount: data.amount,
+      status,
+      createdAt,
+      version: 0,
+    };
   }
 
-  /**
-   * Updates the status of an existing contract.
-   *
-   * @param id     - UUID of the contract to update.
-   * @param status - New status value (must satisfy the ContractStatus union).
-   * @returns The updated Contract, or `undefined` if the ID was not found.
-   */
-  updateStatus(id: string, status: ContractStatus): Contract | undefined {
-    this.db
-      .prepare<[string, string]>("UPDATE contracts SET status = ? WHERE id = ?")
-      .run(status, id);
-    return this.findById(id);
-  }
-
-  /**
-   * Atomically updates contract fields only when the stored version matches
-   * `expectedVersion`, then increments the version by 1.
-   *
-   * Supports: title, status, amount, freelancerId.
-   *
-   * @param id              - UUID of the contract to update.
-   * @param fields          - Partial set of mutable fields to apply.
-   * @param expectedVersion - The version the caller last read; must match the
-   *                          stored version or the update is rejected.
-   * @returns The updated Contract (with incremented version).
-   * @throws {VersionConflictError} When `result.changes === 0`.
-   */
-  updateWithVersion(
+  async updateWithVersion(
     id: string,
     fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
     expectedVersion: number,
-  ): Contract {
+  ): Promise<Contract> {
+    const existing = await this.findById(id);
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+
     const result = this.db
       .prepare<[string | null, string | null, number | null, string | null, string, number]>(
         `UPDATE contracts
@@ -197,62 +188,24 @@ export class ContractRepository {
       throw new VersionConflictError();
     }
 
-    return this.findById(id)!;
+    return (await this.findById(id))!;
   }
 
-  /**
-   * Deletes a contract by ID.
-   *
-   * @param id - UUID of the contract to remove.
-   * @returns `true` if a row was deleted, `false` if the ID did not exist.
-   */
-  delete(id: string): boolean {
+  async delete(id: string): Promise<boolean> {
     const result = this.db
       .prepare<[string]>("DELETE FROM contracts WHERE id = ?")
       .run(id);
     return result.changes > 0;
   }
 
-  /**
-   * Returns a stable, cursor-paginated page of contracts.
-   *
-   * Ordering is `(created_at DESC, id DESC)` — using both columns ensures
-   * deterministic ordering even when multiple rows share the same timestamp.
-   *
-   * The cursor encodes the `(createdAt, id)` of the **last item** returned in
-   * the previous page.  To retrieve the first page, omit `cursor`.
-   *
-   * Limit is clamped to [1, 100].  Requesting more than 100 rows throws so
-   * callers cannot load the entire table via the paginated endpoint.
-   *
-   * @param input - {@link CursorPaginationInput} with optional `limit` and `cursor`.
-   * @returns A {@link CursorPage} containing items and navigation metadata.
-   * @throws When `cursor` is malformed or `limit` exceeds the maximum.
-   *
-   * @example
-   * // First page
-   * const page1 = repo.findPage({ limit: 10 });
-   *
-   * // Subsequent page
-   * const page2 = repo.findPage({ limit: 10, cursor: page1.nextCursor! });
-   */
-  findPage(input: CursorPaginationInput = {}): CursorPage<Contract> {
+  async findPage(input: CursorPaginationInput = {}): Promise<CursorPage<Contract>> {
     const limit = parseLimit(input.limit);
 
     let rows: ContractRow[];
 
     if (input.cursor) {
-      // Decode and validate the cursor before touching the DB
       const pos = decodeCursor(input.cursor);
 
-      /**
-       * Keyset pagination predicate:
-       *   (created_at < anchor)
-       *   OR (created_at = anchor AND id < anchor_id)
-       *
-       * This correctly handles timestamp collisions while preserving the
-       * DESC order without an OFFSET scan.
-       */
       rows = this.db
         .prepare<[string, string, string, number], ContractRow>(
           `SELECT * FROM contracts
@@ -262,7 +215,6 @@ export class ContractRepository {
         )
         .all(pos.createdAt, pos.createdAt, pos.id, limit + 1);
     } else {
-      // First page — no anchor needed
       rows = this.db
         .prepare<[number], ContractRow>(
           `SELECT * FROM contracts
@@ -272,13 +224,10 @@ export class ContractRepository {
         .all(limit + 1);
     }
 
-    // Fetching limit+1 lets us detect whether a next page exists without a
-    // separate COUNT query.
     const hasNextPage = rows.length > limit;
     const pageRows = hasNextPage ? rows.slice(0, limit) : rows;
     const data = pageRows.map(toContract);
 
-    // Build the cursor pointing at the last item in this page
     const lastRow = pageRows[pageRows.length - 1];
     const nextCursor =
       hasNextPage && lastRow
@@ -286,5 +235,110 @@ export class ContractRepository {
         : null;
 
     return { data, nextCursor, hasNextPage, limit };
+  }
+}
+
+/**
+ * In-memory implementation of IContractRepository for deterministic tests and local development.
+ */
+export class InMemoryContractRepository implements IContractRepository {
+  private contracts: Map<string, Contract> = new Map();
+  /** Monotonic insertion counter used as a deterministic tie-breaker when two
+   * contracts share an identical `createdAt` timestamp. */
+  private insertionSeq = 0;
+  private readonly insertionOrder: Map<string, number> = new Map();
+
+  async create(data: CreateContractInput): Promise<Contract> {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    const status: ContractStatus = data.status ?? "draft";
+    assertValidContractStatus(status);
+
+    const contract: Contract = {
+      id,
+      title: data.title,
+      clientId: data.clientId,
+      freelancerId: data.freelancerId ?? "",
+      amount: data.amount,
+      status,
+      createdAt,
+      version: 0,
+    };
+
+    this.contracts.set(id, contract);
+    this.insertionOrder.set(id, this.insertionSeq++);
+    return contract;
+  }
+
+  async findById(id: string): Promise<Contract | undefined> {
+    return this.contracts.get(id);
+  }
+
+  async findAll(): Promise<Contract[]> {
+    return Array.from(this.contracts.values()).sort((a, b) => {
+      const cmp = b.createdAt.localeCompare(a.createdAt);
+      if (cmp !== 0) return cmp;
+      // Deterministic, insertion-order tie-break (most recently inserted first)
+      // so equal-timestamp contracts sort stably instead of by random UUID.
+      return (this.insertionOrder.get(b.id) ?? 0) - (this.insertionOrder.get(a.id) ?? 0);
+    });
+  }
+
+  async findByClientId(clientId: string): Promise<Contract[]> {
+    return Array.from(this.contracts.values()).filter((c) => c.clientId === clientId);
+  }
+
+  async findPage(input: CursorPaginationInput = {}): Promise<CursorPage<Contract>> {
+    const limit = parseLimit(input.limit);
+    let sorted = await this.findAll();
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      sorted = sorted.filter(
+        (c) => c.createdAt < pos.createdAt || (c.createdAt === pos.createdAt && c.id < pos.id),
+      );
+    }
+
+    const data = sorted.slice(0, limit);
+    const hasNextPage = sorted.length > limit;
+    const lastRow = data[data.length - 1];
+    const nextCursor =
+      hasNextPage && lastRow
+        ? encodeCursor({ createdAt: lastRow.createdAt, id: lastRow.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
+  }
+
+  async updateWithVersion(
+    id: string,
+    fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
+    expectedVersion: number,
+  ): Promise<Contract> {
+    const existing = this.contracts.get(id);
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+
+    if (existing.version !== expectedVersion) {
+      throw new VersionConflictError();
+    }
+
+    const updated: Contract = {
+      ...existing,
+      ...fields,
+      version: existing.version + 1,
+    };
+
+    this.contracts.set(id, updated);
+    return updated;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return this.contracts.delete(id);
+  }
+
+  clear(): void {
+    this.contracts.clear();
   }
 }

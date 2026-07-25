@@ -3,9 +3,20 @@
  * @description Unit tests for the /metrics bearer token middleware.
  */
 
+const mockTimingSafeEqual = jest.fn(
+  (a: Buffer, b: Buffer) => a.length === b.length && a.equals(b),
+);
+
+jest.mock("crypto", () => {
+  const actual = jest.requireActual<typeof import("crypto")>("crypto");
+  return { ...actual, timingSafeEqual: mockTimingSafeEqual };
+});
+
 import express, { Request, Response } from "express";
 import request from "supertest";
 import { metricsAuthMiddleware } from "./metricsAuth";
+
+
 
 function buildApp() {
   const app = express();
@@ -94,6 +105,29 @@ describe("metricsAuthMiddleware", () => {
         .set("Authorization", "bearer super-secret-token");
       // Express lowercases header values but not scheme — 'bearer' != 'Bearer'
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe("constant-time comparison security", () => {
+    it("calls timingSafeEqual only when buffer lengths match", async () => {
+      mockTimingSafeEqual.mockClear();
+      process.env.METRICS_AUTH_TOKEN = "token12";
+
+      // Length mismatch (7 vs 5) — should NOT call timingSafeEqual
+      await request(buildApp())
+        .get("/metrics")
+        .set("Authorization", "Bearer short");
+
+      expect(mockTimingSafeEqual).not.toHaveBeenCalled();
+
+      mockTimingSafeEqual.mockClear();
+
+      // Length match (7 vs 7) — should call timingSafeEqual
+      await request(buildApp())
+        .get("/metrics")
+        .set("Authorization", "Bearer token99");
+
+      expect(mockTimingSafeEqual).toHaveBeenCalledTimes(1);
     });
   });
 });

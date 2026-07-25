@@ -53,7 +53,7 @@ describe('auditMiddleware', () => {
     app.use(auditMiddleware);
     app.get('/probe', (_req, res) => {
       expect(typeof res.locals.audit.log).toBe('function');
-      res.status(204).end();
+      res.status(204).send();
     });
 
     await request(app).get('/probe').expect(204);

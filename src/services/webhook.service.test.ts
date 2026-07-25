@@ -4,6 +4,7 @@ import axios from 'axios';
 import { createWebhookSignature } from '../utils/webhook-signing.util';
 import * as ssrf from '../utils/ssrf';
 import { RateLimitStore } from '../lib/rateLimitStore';
+import { WEBHOOK_RETRY_POLICY } from '../queue/webhook-retry-policy';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -36,11 +37,13 @@ describe('WebhookService', () => {
     expect(mockedAxios.post).toHaveBeenCalledWith(
       'http://test.com',
       { event: 'test', data: {} },
-      {
+      // objectContaining tolerates the per-request `timeout` option, which the
+      // webhook.service.iterative suite (same source) requires to be present.
+      expect.objectContaining({
         headers: {
           'Content-Type': 'application/json'
         }
-      }
+      })
     );
   });
 
@@ -74,13 +77,15 @@ describe('WebhookService', () => {
     expect(mockedAxios.post).toHaveBeenCalledWith(
       'http://test.com',
       { event: 'test', data: {} },
-      {
+      // objectContaining tolerates the per-request `timeout` option, which the
+      // webhook.service.iterative suite (same source) requires to be present.
+      expect.objectContaining({
         headers: {
           'Content-Type': 'application/json',
           'X-Signature': mockSignature,
           'X-Timestamp': mockTimestamp.toString()
         }
-      }
+      })
     );
   });
 
@@ -103,17 +108,20 @@ describe('WebhookService', () => {
       webhookSecret: 'test-secret'
     };
 
+    // The bounded retry loop (webhook.service.iterative architecture) attempts
+    // maxRetries + 1 times within a single send(), re-signing on every attempt.
+    // Drive all backoff timers to completion so the loop resolves.
     jest.useFakeTimers();
     try {
       const sendOp = service.send(payload);
 
-      // Run the first retry
-      await jest.runOnlyPendingTimersAsync();
+      await jest.runAllTimersAsync();
 
       await sendOp;
 
-      expect(mockedCreateWebhookSignature).toHaveBeenCalledTimes(2); // Initial + 1 retry
-      expect(mockedAxios.post).toHaveBeenCalledTimes(2);
+      const expectedAttempts = WEBHOOK_RETRY_POLICY.maxRetries + 1;
+      expect(mockedCreateWebhookSignature).toHaveBeenCalledTimes(expectedAttempts);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(expectedAttempts);
     } finally {
       jest.useRealTimers();
     }

@@ -14,7 +14,7 @@ NODE_ENV=development
 PORT=3001
 API_BASE_URL=http://localhost:3001
 DEBUG=true
-CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
 MAX_REQUEST_SIZE=10mb
 ```
 
@@ -49,7 +49,7 @@ NODE_ENV=staging
 PORT=3002
 API_BASE_URL=https://staging-api.talenttrust.example.com
 DEBUG=false
-CORS_ORIGINS=https://staging.talenttrust.example.com
+CORS_ALLOWED_ORIGINS=https://staging.talenttrust.example.com
 MAX_REQUEST_SIZE=10mb
 DATABASE_URL=postgresql://user:pass@staging-db.example.com:5432/talenttrust
 ```
@@ -93,7 +93,7 @@ NODE_ENV=production
 PORT=3000
 API_BASE_URL=https://api.talenttrust.example.com
 DEBUG=false
-CORS_ORIGINS=https://app.talenttrust.example.com,https://www.talenttrust.example.com
+CORS_ALLOWED_ORIGINS=https://app.talenttrust.example.com,https://www.talenttrust.example.com
 MAX_REQUEST_SIZE=10mb
 DATABASE_URL=postgresql://user:pass@prod-db.example.com:5432/talenttrust
 ```
@@ -299,12 +299,12 @@ API_BASE_URL=https://api.example.com
 
 ```bash
 # ❌ Invalid for production
-CORS_ORIGINS=*
-CORS_ORIGINS=http://localhost:3000
+CORS_ALLOWED_ORIGINS=*
+CORS_ALLOWED_ORIGINS=http://localhost:3000
 
 # ✅ Valid for production
-CORS_ORIGINS=https://app.example.com
-CORS_ORIGINS=https://app.example.com,https://www.example.com
+CORS_ALLOWED_ORIGINS=https://app.example.com
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://www.example.com
 ```
 
 ### Issue: Production Network

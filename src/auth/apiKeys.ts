@@ -3,14 +3,14 @@
  * @description API key authentication utilities for TalentTrust.
  *
  * Provides secure API key generation, validation, and management.
- * API keys are hashed at rest using SHA-256 with a salt.
+ * API keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a salt.
  *
  * API keys are expected in the `X-API-Key` header:
  *   X-API-Key: <api-key>
  *
  * Security notes:
  *   - API keys are cryptographically generated using random bytes
- *   - Keys are hashed at rest using SHA-256 with a unique salt
+ *   - Keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a unique salt
  *   - Each key has optional expiration and scoping
  *   - Keys can be rotated and deactivated
  *   - Last usage is tracked for audit purposes
@@ -66,9 +66,17 @@ export function hashApiKey(apiKey: string): { salt: string; hash: string } {
  * @param hash - The stored hash to verify against.
  * @returns True if the key is valid, false otherwise.
  */
+
 export function verifyApiKey(apiKey: string, salt: string, hash: string): boolean {
-  const verifyHash = crypto.pbkdf2Sync(apiKey, salt, 10000, 64, 'sha256').toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(verifyHash));
+  try {
+    const verifyHash = crypto.pbkdf2Sync(apiKey, salt, 10000, 64, 'sha256').toString('hex');
+    const hashBuffer = Buffer.from(hash, 'hex');
+    const verifyBuffer = Buffer.from(verifyHash, 'hex');
+    if (hashBuffer.length !== verifyBuffer.length) return false;
+    return crypto.timingSafeEqual(hashBuffer, verifyBuffer);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -128,6 +136,45 @@ export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: st
 }
 
 /**
+ * Validates that a stored credential is a well-formed salt:hash string.
+ *
+ * The stored format must be: `<salt>:<hash>`
+ * - Salt must be 32 hex characters (16 bytes)
+ * - Hash must be 128 hex characters (64 bytes)
+ *
+ * This validation runs BEFORE calling PBKDF2 to fail closed on malformed
+ * stored values (e.g., from botched migrations) rather than risk exceptions
+ * on the authentication hot path.
+ *
+ * @param storedCredential - The stored credential to validate.
+ * @returns True if the format is valid, false otherwise.
+ */
+
+function isValidSaltHashFormat(storedCredential: string): boolean {
+  if (typeof storedCredential !== 'string') return false;
+
+  const trimmed = storedCredential.trim();
+  if (!trimmed || trimmed.indexOf(':') === -1) return false;
+
+  const parts = trimmed.split(':');
+
+  // Must have exactly 2 parts (salt and hash, no extra colons)
+  if (parts.length !== 2) return false;
+
+  const [salt, hash] = parts;
+
+  // Both parts must be present and non-empty
+  if (!salt || !hash) return false;
+
+  // Salt: 16 bytes = 32 hex characters
+  // Hash: 64 bytes = 128 hex characters (PBKDF2 with sha256, 10000 iterations, 64 output)
+  const isValidSalt = /^[a-f0-9]{32}$/i.test(salt);
+  const isValidHash = /^[a-f0-9]{128}$/i.test(hash);
+
+  return isValidSalt && isValidHash;
+}
+
+/**
  * Validates an API key and returns the associated key info if valid.
  *
  * @param apiKey - The plain API key to validate.
@@ -136,25 +183,54 @@ export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: st
 export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null> {
   // Compute the deterministic selector for O(1) indexed lookup
   const selector = computeKeySelector(apiKey);
-  
+
   // Try indexed lookup first (fast path, O(1) via key_selector)
   let dbKey = await database.getApiKeyBySelector(selector);
-  
-  // Fallback: scan legacy keys that predate the key_selector index
+  let pbkdf2Verified = false; // tracks whether the salted hash has already been verified
+
+  // Fallback: scan legacy keys that predate the key_selector index.
+  // Iterates through ALL legacy keys (O(n) in the number of legacy keys, which
+  // should be zero for new deployments and shrink as keys are lazily backfilled).
   if (!dbKey) {
     const db = await (database as any).loadDatabase();
-    dbKey = db.api_keys.find(
+    const legacyKeys: ApiKey[] = db.api_keys.filter(
       (k: ApiKey) => !k.key_selector && k.is_active
     );
+
+    for (const legacyKey of legacyKeys) {
+      // Validate the stored credential format before splitting and calling PBKDF2
+      if (!isValidSaltHashFormat(legacyKey.key_hash)) {
+        continue; // malformed entry — skip and try the next legacy key
+      }
+
+      const [legacySalt, legacyHash] = legacyKey.key_hash.split(':');
+
+      if (verifyApiKey(apiKey, legacySalt, legacyHash)) {
+        dbKey = legacyKey;
+        pbkdf2Verified = true;
+        break;
+      }
+    }
   }
-  
+
   if (!dbKey) {
     return null;
   }
-  
-  // Verify with the slow salted hash (source of truth)
+
+  // Validate the stored credential format BEFORE splitting and calling PBKDF2
+  // This fails closed on malformed input (empty, missing separator, wrong hex length)
+  // rather than risking exceptions on the authentication hot path
+  if (!isValidSaltHashFormat(dbKey.key_hash)) {
+    return null;
+  }
+
+  // Split the validated format
   const [salt, hash] = dbKey.key_hash.split(':');
-  if (!verifyApiKey(apiKey, salt, hash)) {
+
+  // Verify with the slow salted hash (source of truth).
+  // Skip re-verification for keys found via the legacy fallback — they already
+  // passed the PBKDF2 check inside the loop.
+  if (!pbkdf2Verified && !verifyApiKey(apiKey, salt, hash)) {
     return null;
   }
   
