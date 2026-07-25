@@ -92,7 +92,13 @@ describe('EnvSecret — basic behaviour', () => {
 describe('EnvSecret — transform error redaction', () => {
   /**
    * Core invariant: the thrown message must name the key but MUST NOT
-   * contain the raw secret value (or any contiguous substring ≥ 4 chars).
+   * contain the raw secret value (or any contiguous substring ≥ 4 chars that
+   * is not already present in the key name itself).
+   *
+   * We exclude substrings that also appear in KEY from the check because the
+   * key name is intentionally included in the error message for debuggability,
+   * and a chunk like "secr" (from "TEST_TRANSFORM_SECRET") should not be
+   * flagged as a leak of the raw secret value.
    */
   function assertRedacted(error: unknown, secretValue: string): void {
     expect(error).toBeInstanceOf(Error);
@@ -101,13 +107,17 @@ describe('EnvSecret — transform error redaction', () => {
     // Must name the key for debuggability
     expect(msg).toContain(KEY);
 
-    // Must NOT contain the secret value itself
+    // Must NOT contain the full secret value
     expect(msg).not.toContain(secretValue);
 
-    // Stricter: no substring of the secret longer than 3 chars should leak.
-    // This catches partial leaks (e.g. only first N chars of the secret).
+    // Stricter: no 4-char substring of the secret that is NOT also part of the
+    // key name should appear in the error message.
     for (let i = 0; i <= secretValue.length - 4; i++) {
       const chunk = secretValue.slice(i, i + 4);
+      // Skip this chunk if it already appears in the key name — its presence
+      // in the message is explained by the key being named, not by the secret
+      // value leaking.
+      if (KEY.includes(chunk)) continue;
       expect(msg).not.toContain(chunk);
     }
   }
