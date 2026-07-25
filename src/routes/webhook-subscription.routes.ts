@@ -95,10 +95,14 @@ router.get(
         active: filters.active as boolean | undefined,
       };
       const page = await repo.findAllPaginated(filter, { cursor: cursorStr, limit: limit as number | undefined });
+      // res.status(200).json({
+      //   status: 'success',
+      //   data: list.map(sanitizeSubscription),
+      // });
       res.status(200).json({
         status: 'success',
-        data: list.map(sanitizeSubscription),
-      });
+        data: page.items.map(sanitizeSubscription),
+        });
     } catch (error) {
       next(error);
     }
