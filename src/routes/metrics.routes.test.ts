@@ -11,12 +11,21 @@
  *  - Out-of-range numeric values (NaN, Infinity, negative, over-max).
  *  - Non-JSON / empty body → 400.
  *  - Service-level error propagation → 500.
+ *  - Auth & tenant scoping (Issue #769):
+ *    - Missing auth → 401.
+ *    - Wrong/invalid token → 401.
+ *    - Correct token → 204.
+ *    - Cross-tenant (different token configured vs provided) → 401.
+ *    - Empty bearer token → 401.
+ *    - Basic auth scheme → 401.
+ *    - No token configured → allows access.
  */
 
 import express from 'express';
 import request from 'supertest';
 import { createMetricsRouter } from './metrics.routes';
 import { MetricsServiceLike } from '../observability/metrics-service';
+import { metricsAuthMiddleware } from '../middleware/metricsAuth';
 import { WebhookOutcome } from '../observability/metrics-validation';
 import { ServiceStatus } from '../observability/types';
 
@@ -39,6 +48,21 @@ function buildApp(service: MetricsServiceLike) {
   const app = express();
   app.use(express.json());
   app.use('/api/v1/metrics', createMetricsRouter(service));
+  return app;
+}
+
+/**
+ * Build an app instance with the metrics auth middleware applied before
+ * the metrics router — mirroring the production wiring in `app.ts`.
+ *
+ * The caller MUST set `process.env.METRICS_AUTH_TOKEN` before making
+ * requests — the middleware reads it at request time, not at app creation
+ * time. The `afterEach` block in the auth test suite handles cleanup.
+ */
+function buildAppWithAuth(service: MetricsServiceLike): express.Application {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/v1/metrics', metricsAuthMiddleware, createMetricsRouter(service));
   return app;
 }
 
@@ -497,5 +521,324 @@ describe('Error response envelope', () => {
     const detail = res.body.error.details[0];
     expect(detail).toHaveProperty('field');
     expect(detail).toHaveProperty('message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth & tenant-scoping tests (Issue #769)
+// ---------------------------------------------------------------------------
+
+/**
+ * All 5 metrics write endpoints exercised by the auth test matrix.
+ * Each entry: [label, path, validPayload].
+ */
+const ENDPOINTS: Array<[string, string, Record<string, unknown>]> = [
+  ['webhook/delivery', '/api/v1/metrics/webhook/delivery', { outcome: 'success' }],
+  ['webhook/dlq-depth', '/api/v1/metrics/webhook/dlq-depth', { depth: 42 }],
+  ['health-status',     '/api/v1/metrics/health-status',     { status: 'up' }],
+  ['dlq/operation',     '/api/v1/metrics/dlq/operation',     { operation: 'enqueue' }],
+  ['dlq/replay',        '/api/v1/metrics/dlq/replay',        { outcome: 'success' }],
+];
+
+describe('Auth & tenant scoping', () => {
+  beforeEach(() => {
+    delete process.env.METRICS_AUTH_TOKEN;
+  });
+
+  afterEach(() => {
+    delete process.env.METRICS_AUTH_TOKEN;
+  });
+
+  // ── No token configured (development / permissive mode) ─────────────────
+  describe('when METRICS_AUTH_TOKEN is not set', () => {
+    it.each(ENDPOINTS)(
+      '%s: allows requests without any Authorization header → 204',
+      async (_label, path, payload) => {
+        delete process.env.METRICS_AUTH_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app).post(path).send(payload);
+
+        expect(res.status).toBe(204);
+      },
+    );
+
+    it.each(ENDPOINTS)(
+      '%s: ignores arbitrary Authorization headers and allows access → 204',
+      async (_label, path, payload) => {
+        delete process.env.METRICS_AUTH_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', 'Bearer anything')
+          .send(payload);
+
+        expect(res.status).toBe(204);
+      },
+    );
+  });
+
+  // ── Token configured — unauthorized / forbidden paths ───────────────────
+  describe('when METRICS_AUTH_TOKEN is configured', () => {
+    const VALID_TOKEN = 'tenant-alpha-secret';
+    const CROSS_TENANT_TOKEN = 'tenant-bravo-secret';
+
+    // Happy path — correct token
+    it.each(ENDPOINTS)(
+      '%s: allows requests with the correct bearer token → 204',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', `Bearer ${VALID_TOKEN}`)
+          .send(payload);
+
+        expect(res.status).toBe(204);
+      },
+    );
+
+    // Missing Authorization header
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with no Authorization header → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app).post(path).send(payload);
+
+        expect(res.status).toBe(401);
+        expect(res.body).toEqual({ error: 'Unauthorized' });
+      },
+    );
+
+    // Wrong token
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with incorrect bearer token → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', 'Bearer wrong-token')
+          .send(payload);
+
+        expect(res.status).toBe(401);
+        expect(res.body).toEqual({ error: 'Unauthorized' });
+      },
+    );
+
+    // Cross-tenant access — different token from what is configured
+    it.each(ENDPOINTS)(
+      '%s: rejects cross-tenant access (different configured token) → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', `Bearer ${CROSS_TENANT_TOKEN}`)
+          .send(payload);
+
+        expect(res.status).toBe(401);
+        expect(res.body).toEqual({ error: 'Unauthorized' });
+      },
+    );
+
+    // Empty bearer token
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with empty bearer token → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', 'Bearer ')
+          .send(payload);
+
+        expect(res.status).toBe(401);
+      },
+    );
+
+    // Basic auth scheme instead of Bearer
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with Basic auth scheme → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', 'Basic dXNlcjpwYXNz')
+          .send(payload);
+
+        expect(res.status).toBe(401);
+      },
+    );
+
+    // Case variation in Bearer scheme
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with lowercase "bearer" scheme → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', `bearer ${VALID_TOKEN}`)
+          .send(payload);
+
+        expect(res.status).toBe(401);
+      },
+    );
+
+    // Malformed Authorization header (no scheme)
+    it.each(ENDPOINTS)(
+      '%s: rejects requests with malformed Authorization header (no scheme) → 401',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', VALID_TOKEN)
+          .send(payload);
+
+        expect(res.status).toBe(401);
+      },
+    );
+  });
+
+  // ── Token not leaked in responses ──────────────────────────────────────
+  describe('token secrecy', () => {
+    const VALID_TOKEN = 'super-secret-do-not-leak';
+
+    it.each(ENDPOINTS)(
+      '%s: does not leak the configured token in 401 response body',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', 'Bearer wrong-token')
+          .send(payload);
+
+        expect(res.status).toBe(401);
+        expect(JSON.stringify(res.body)).not.toContain(VALID_TOKEN);
+      },
+    );
+
+    it.each(ENDPOINTS)(
+      '%s: does not leak the provided token in 401 response body',
+      async (_label, path, payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const providedToken = 'attacker-token-abc123';
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', `Bearer ${providedToken}`)
+          .send(payload);
+
+        expect(res.status).toBe(401);
+        expect(JSON.stringify(res.body)).not.toContain(providedToken);
+      },
+    );
+  });
+
+  // ── Token configured — metrics service is NOT called on auth failure ────
+  describe('metrics service isolation on auth failure', () => {
+    const VALID_TOKEN = 'secure-token';
+
+    it('does not call recordWebhookDelivery when auth fails', async () => {
+      process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+      const svc = buildMockService();
+      const app = buildAppWithAuth(svc);
+
+      await request(app)
+        .post('/api/v1/metrics/webhook/delivery')
+        .send({ outcome: 'success' });
+
+      expect(svc.recordWebhookDelivery).not.toHaveBeenCalled();
+    });
+
+    it('does not call setWebhookDlqDepth when auth fails', async () => {
+      process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+      const svc = buildMockService();
+      const app = buildAppWithAuth(svc);
+
+      await request(app)
+        .post('/api/v1/metrics/webhook/dlq-depth')
+        .send({ depth: 5 });
+
+      expect(svc.setWebhookDlqDepth).not.toHaveBeenCalled();
+    });
+
+    it('does not call recordHealthStatus when auth fails', async () => {
+      process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+      const svc = buildMockService();
+      const app = buildAppWithAuth(svc);
+
+      await request(app)
+        .post('/api/v1/metrics/health-status')
+        .send({ status: 'up' });
+
+      expect(svc.recordHealthStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Auth middleware runs BEFORE validation ──────────────────────────────
+  describe('auth check precedes request validation', () => {
+    const VALID_TOKEN = 'secure-token';
+
+    it.each(ENDPOINTS)(
+      '%s: returns 401 (not 400) when both auth is missing and body is invalid',
+      async (_label, path, _payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .send({ invalid_field: 'x' });
+
+        // Auth runs first — should be 401, not 400
+        expect(res.status).toBe(401);
+      },
+    );
+
+    it.each(ENDPOINTS)(
+      '%s: returns 400 when auth passes but body is invalid',
+      async (_label, path, _payload) => {
+        process.env.METRICS_AUTH_TOKEN = VALID_TOKEN;
+        const svc = buildMockService();
+        const app = buildAppWithAuth(svc);
+
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', `Bearer ${VALID_TOKEN}`)
+          .send({ invalid_field: 'x' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('validation_error');
+      },
+    );
   });
 });
