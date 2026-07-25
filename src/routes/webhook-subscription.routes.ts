@@ -101,7 +101,7 @@ router.get(
       // });
       res.status(200).json({
         status: 'success',
-        data: page.items.map(sanitizeSubscription),
+        data: page.data.map(sanitizeSubscription),
         });
     } catch (error) {
       next(error);
