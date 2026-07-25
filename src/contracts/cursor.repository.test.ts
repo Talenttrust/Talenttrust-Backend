@@ -6,6 +6,7 @@ import {
   encodeCursor,
   decodeCursor,
   parseLimit,
+  resolveCursorQueryParam,
 } from './cursor.repository';
 import { InMemoryCursorRepository } from './cursor.repository';
 import { CURSOR_MAX_LIMIT, CURSOR_DEFAULT_LIMIT, CURSOR_MAX_LENGTH } from './cursor.types';
@@ -242,5 +243,54 @@ describe('InMemoryCursorRepository', () => {
 
     expect(cursorA!.lastSequence).toBe(150);
     expect(cursorB!.lastSequence).toBe(200);
+  });
+});
+
+describe('resolveCursorQueryParam', () => {
+  const position = { createdAt: '2024-06-01T12:00:00.000Z', id: 'abc-123' };
+
+  it('returns ok with cursor undefined when no cursor is supplied', () => {
+    const result = resolveCursorQueryParam(undefined);
+    expect(result).toEqual({ ok: true, cursor: undefined });
+  });
+
+  it('returns ok with cursor undefined for an empty string', () => {
+    const result = resolveCursorQueryParam('');
+    expect(result).toEqual({ ok: true, cursor: undefined });
+  });
+
+  it('returns ok with the cursor echoed back when it decodes successfully', () => {
+    const cursor = encodeCursor(position);
+    const result = resolveCursorQueryParam(cursor);
+    expect(result).toEqual({ ok: true, cursor });
+  });
+
+  it('returns ok:false with decodeCursor\'s message for a malformed cursor', () => {
+    const result = resolveCursorQueryParam('not-a-valid-cursor');
+    expect(result.ok).toBe(false);
+    expect((result as { ok: false; message: string }).message).toMatch(/invalid pagination cursor/i);
+  });
+
+  it('returns ok:false for a cursor missing a required field, matching decodeCursor directly', () => {
+    const bad = Buffer.from(
+      JSON.stringify({ createdAt: '2024-01-01T00:00:00.000Z' }),
+      'utf8',
+    ).toString('base64url');
+
+    const result = resolveCursorQueryParam(bad);
+    expect(result.ok).toBe(false);
+
+    let expectedMessage = '';
+    try {
+      decodeCursor(bad);
+    } catch (err) {
+      expectedMessage = (err as Error).message;
+    }
+    expect((result as { ok: false; message: string }).message).toBe(expectedMessage);
+  });
+
+  it('treats a non-string raw value (e.g. an array from a duplicated query param) as absent', () => {
+    const result = resolveCursorQueryParam(['a', 'b']);
+    expect(result).toEqual({ ok: true, cursor: undefined });
   });
 });

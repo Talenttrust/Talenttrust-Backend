@@ -99,6 +99,46 @@ export function parseLimit(raw: unknown): number {
   return n;
 }
 
+/** Result of {@link resolveCursorQueryParam} when the raw value is well-formed (or absent). */
+export interface CursorQueryOk {
+  ok: true;
+  /** The validated cursor, or `undefined` when none was supplied. */
+  cursor: string | undefined;
+}
+
+/** Result of {@link resolveCursorQueryParam} when the raw value fails validation. */
+export interface CursorQueryError {
+  ok: false;
+  message: string;
+}
+
+/**
+ * Validates a raw `cursor` query-string value without throwing.
+ *
+ * Both contracts-listing handlers need to eagerly reject a garbage cursor
+ * with a 400 before calling the service layer. This centralizes that check
+ * so callers get a discriminated result instead of duplicating a
+ * decode-then-catch block.
+ *
+ * @param rawCursor - The raw `req.query['cursor']` value (usually `string | undefined`).
+ * @returns `{ ok: true, cursor }` when the value is absent or decodes successfully,
+ *   otherwise `{ ok: false, message }` with the same message `decodeCursor` throws.
+ */
+export function resolveCursorQueryParam(rawCursor: unknown): CursorQueryOk | CursorQueryError {
+  if (rawCursor !== undefined && typeof rawCursor === 'string') {
+    try {
+      decodeCursor(rawCursor);
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
+  }
+
+  const cursor =
+    typeof rawCursor === 'string' && rawCursor.length > 0 ? rawCursor : undefined;
+
+  return { ok: true, cursor };
+}
+
 
 
 /**

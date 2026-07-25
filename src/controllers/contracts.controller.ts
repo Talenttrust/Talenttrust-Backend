@@ -5,7 +5,7 @@ import type { CreateContractDto, UpdateContractDto } from '../modules/contracts/
 import { CONTRACT_BOUNDS, ContractBoundsError } from '../contracts/bounds';
 import { NotFoundError } from '../errors/appError';
 import { parsePaginationQuery, applyPagination } from '../utils/pagination';
-import { decodeCursor, parseLimit } from '../contracts/cursor.repository';
+import { parseLimit, resolveCursorQueryParam } from '../contracts/cursor.repository';
 import { CURSOR_DEFAULT_LIMIT } from '../contracts/cursor.types';
 import { ok, fail } from '../utils/apiResponse';
 
@@ -46,26 +46,17 @@ export class ContractsController {
   public async getContractsCursor(req: Request, res: Response, next: NextFunction) {
     try {
       const limit = parseLimit(req.query['limit']);
-      const rawCursor = req.query['cursor'];
-      if (rawCursor !== undefined && typeof rawCursor === 'string') {
-        // Validate cursor shape eagerly so we return 400 for garbage values
-        try {
-          decodeCursor(rawCursor);
-        } catch (err) {
-          res.status(400).json({
-            status: 'error',
-            message: (err as Error).message,
-          });
-          return;
-        }
+
+      const cursorResult = resolveCursorQueryParam(req.query['cursor']);
+      if (!cursorResult.ok) {
+        res.status(400).json({
+          status: 'error',
+          message: cursorResult.message,
+        });
+        return;
       }
 
-      const cursor =
-        typeof rawCursor === 'string' && rawCursor.length > 0
-          ? rawCursor
-          : undefined;
-
-      const page = await this.service.getContractsPage({ limit, cursor });
+      const page = await this.service.getContractsPage({ limit, cursor: cursorResult.cursor });
       res.status(200).json({ status: 'success', data: page });
     } catch (error) {
       next(error);
@@ -84,24 +75,14 @@ export class ContractsController {
   public async getContracts(req: Request, res: Response, next: NextFunction) {
     try {
       if (req.query.cursor !== undefined || (req.query.limit !== undefined && req.query.page === undefined)) {
-        const rawCursor = req.query['cursor'];
-        if (rawCursor !== undefined && typeof rawCursor === 'string') {
-          // Validate cursor shape eagerly so we return 400 for garbage values
-          try {
-            decodeCursor(rawCursor);
-          } catch (err) {
-            res.status(400).json({
-              status: 'error',
-              message: (err as Error).message,
-            });
-            return;
-          }
+        const cursorResult = resolveCursorQueryParam(req.query['cursor']);
+        if (!cursorResult.ok) {
+          res.status(400).json({
+            status: 'error',
+            message: cursorResult.message,
+          });
+          return;
         }
-
-        const cursor =
-          typeof rawCursor === 'string' && rawCursor.length > 0
-            ? rawCursor
-            : undefined;
 
         let limit;
         try {
@@ -114,7 +95,7 @@ export class ContractsController {
           return;
         }
 
-        const page = await this.service.getContractsPage({ limit, cursor });
+        const page = await this.service.getContractsPage({ limit, cursor: cursorResult.cursor });
         res.status(200).json({ status: 'success', data: page });
         return;
       }
