@@ -56,3 +56,39 @@ export interface User {
   role: UserRole;
   createdAt: string;
 }
+
+/** Lifecycle status of a payment record. */
+export type PaymentStatus =
+  | "pending"    // persisted, queued for processing
+  | "processing" // worker has picked it up
+  | "completed"  // funds released on-chain
+  | "failed"     // terminal failure after retries
+  | "cancelled"; // cancelled before processing began
+
+/**
+ * A platform payment record that tracks the transfer of funds
+ * from a client wallet to a freelancer for a specific contract.
+ *
+ * @field id            - UUID primary key
+ * @field contractId    - FK → contracts.id
+ * @field senderId      - FK → users.id (the payer — always a client)
+ * @field recipientId   - FK → users.id (the payee — always a freelancer)
+ * @field amount        - Value in stroops (1 XLM = 10_000_000 stroops)
+ * @field status        - Current lifecycle status
+ * @field jobId         - BullMQ job ID assigned at enqueue time; null until queued
+ * @field failureReason - Human-readable failure description; null unless failed
+ * @field createdAt     - ISO-8601 creation timestamp
+ * @field updatedAt     - ISO-8601 last-updated timestamp
+ */
+export interface Payment {
+  id: string;
+  contractId: string;
+  senderId: string;
+  recipientId: string;
+  amount: number;
+  status: PaymentStatus;
+  jobId: string | null;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

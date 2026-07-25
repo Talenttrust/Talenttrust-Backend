@@ -94,6 +94,21 @@ export const DEFAULT_RETRY_POLICIES: Record<JobType, RetryPolicy> = {
     removeOnComplete: 100,
     removeOnFail: 100,
   },
+
+  // Payment processing: 5 attempts with aggressive exponential back-off.
+  // Payments are financial operations — we retry more than most jobs but keep
+  // failed rows for the full 1 000-job window for operator review.
+  [JobType.PAYMENT_PROCESSING]: {
+    attempts: 5,
+    backoff: {
+      type: 'exponential',
+      delay: 3000,
+      multiplier: 2,
+      jitter: 0.2,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 1000,
+  },
 };
 
 /**

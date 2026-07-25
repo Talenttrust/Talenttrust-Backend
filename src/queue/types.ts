@@ -14,6 +14,7 @@ export enum JobType {
   REPUTATION_UPDATE = 'reputation-update',
   REPUTATION_RECOMPUTE = 'reputation-recompute',
   BLOCKCHAIN_SYNC = 'blockchain-sync',
+  PAYMENT_PROCESSING = 'payment-processing',
 }
 
 /**
@@ -74,6 +75,28 @@ export interface BlockchainSyncPayload {
 }
 
 /**
+ * Payment processing job payload.
+ *
+ * Carries every field the worker needs to execute and record the transfer
+ * without an extra DB read. The `paymentId` is the primary FK used to
+ * update the payments row once processing completes or fails.
+ */
+export interface PaymentProcessingPayload {
+  /** UUID of the payments row being processed. */
+  paymentId: string;
+  /** FK → contracts.id — the engagement this payment belongs to. */
+  contractId: string;
+  /** FK → users.id — the client initiating the transfer. */
+  senderId: string;
+  /** FK → users.id — the freelancer receiving the funds. */
+  recipientId: string;
+  /** Transfer amount in stroops. */
+  amount: number;
+  correlationId?: string;
+  requestId?: string;
+}
+
+/**
  * Union type for all job payloads
  */
 export type JobPayload =
@@ -81,7 +104,8 @@ export type JobPayload =
   | ContractProcessingPayload
   | ReputationUpdatePayload
   | ReputationRecomputePayload
-  | BlockchainSyncPayload;
+  | BlockchainSyncPayload
+  | PaymentProcessingPayload;
 
 export interface JobEnqueueOptions {
   priority?: number;

@@ -23,6 +23,7 @@ import { createRequestLimitsMiddleware } from './middleware/requestLimits';
 
 import contractsModuleRouter from './routes/contracts.routes';
 import eventsRouter from './routes/events.routes';
+import paymentsRouter from './routes/payments.routes';
 
 import reputationRouter from './routes/reputation.routes';
 import configRouter from './routes/config.routes';
@@ -87,6 +88,7 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/api/config', configRouter);
   app.use('/api/v1', eventsRouter);
   app.use('/api/v1/contracts', contractsModuleRouter);
+  app.use('/api/v1/payments', paymentsRouter);
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
   app.use('/api/v1/admin', adminRouter);

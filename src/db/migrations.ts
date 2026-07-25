@@ -328,6 +328,53 @@ MIGRATIONS.push({
   },
 });
 
+// Version 13: payments table
+// Tracks every payment initiated on the platform. A payment is the unit of
+// work that moves funds from a client (sender) to a freelancer (recipient)
+// against a specific contract. The `job_id` column is populated once the
+// record is enqueued for async processing; `failure_reason` is set on
+// terminal failures so operators can diagnose problems without reading logs.
+MIGRATIONS.push({
+  version: 13,
+  name: "create_payments_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS payments (",
+    "UNIQUE(contract_id, sender_id)",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id             TEXT    PRIMARY KEY,
+        contract_id    TEXT    NOT NULL REFERENCES contracts(id),
+        sender_id      TEXT    NOT NULL REFERENCES users(id),
+        recipient_id   TEXT    NOT NULL REFERENCES users(id),
+        amount         INTEGER NOT NULL CHECK (amount > 0),
+        status         TEXT    NOT NULL DEFAULT 'pending'
+                               CHECK (status IN (
+                                 'pending', 'processing', 'completed', 'failed', 'cancelled'
+                               )),
+        job_id         TEXT,
+        failure_reason TEXT,
+        created_at     TEXT    NOT NULL,
+        updated_at     TEXT    NOT NULL,
+        UNIQUE(contract_id, sender_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payments_contract_id
+        ON payments(contract_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payments_sender_id
+        ON payments(sender_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payments_recipient_id
+        ON payments(recipient_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payments_status
+        ON payments(status);
+    `);
+  },
+});
+
 function ensureMigrationTable(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
