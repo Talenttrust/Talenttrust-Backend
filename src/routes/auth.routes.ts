@@ -1,3 +1,16 @@
+/**
+ * @module routes/auth
+ * @description Authentication routes (login, register, refresh, logout).
+ *
+ * Each route is fronted by the auth rate limiter (issue #756) which:
+ *   - Uses the dedicated `auth` tier in `rateLimitConfig` so its cap is
+ *     lower and tunable independently of the generic `strict` tier.
+ *   - Keys by `X-API-Key` when provided, otherwise by client IP so
+ *     internal services and browser clients each get their own bucket.
+ *   - Returns 429 with a `Retry-After` header when the per-client cap
+ *     is exceeded, and escalates to a hard block after repeated abuse.
+ */
+
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { createRateLimiter } from '../middleware/rateLimiter';
@@ -6,10 +19,18 @@ import { validateSchema } from '../middleware/validate.middleware';
 import { AuthService } from '../services/auth.service';
 import { getDb } from '../db/database';
 import { requireAuth } from '../middleware/authorization';
+import { authRateLimitKeyFn } from '../auth/rateLimitKey';
 import type { AuthenticatedRequest } from '../lib/types';
 
 const router = Router();
-const strictLimiter = createRateLimiter(rateLimitConfig.strict);
+
+// Issue #756 — dedicated auth tier so the auth cap stays independent of
+// any other route that uses the generic `strict` tier. The `keyFn`
+// ensures distinct API keys get isolated buckets even when sharing an IP.
+const authLimiter = createRateLimiter({
+  ...rateLimitConfig.auth,
+  keyFn: authRateLimitKeyFn,
+});
 
 // ─── Zod schemas ─────────────────────────────────────────────────────────────
 
@@ -49,7 +70,7 @@ function authError(res: Response, status: number, code: string, message: string)
 
 router.post(
   '/login',
-  strictLimiter,
+  authLimiter,
   validateSchema(loginSchema),
   async (req: Request, res: Response) => {
     try {
@@ -68,7 +89,7 @@ router.post(
 
 router.post(
   '/register',
-  strictLimiter,
+  authLimiter,
   validateSchema(registerSchema),
   async (req: Request, res: Response) => {
     try {
@@ -93,7 +114,7 @@ router.post(
 
 router.post(
   '/refresh',
-  strictLimiter,
+  authLimiter,
   validateSchema(refreshSchema),
   async (req: Request, res: Response) => {
     try {
@@ -108,7 +129,7 @@ router.post(
 
 router.post(
   '/logout',
-  strictLimiter,
+  authLimiter,
   requireAuth,
   (req: Request, res: Response) => {
     const userId = (req as AuthenticatedRequest).user?.id;
