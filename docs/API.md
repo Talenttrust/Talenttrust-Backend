@@ -173,6 +173,36 @@ Common status/code mappings:
 
 Use the returned `requestId` when contacting support; it ties the response to redacted server-side logs without exposing sensitive internals.
 
+### Request Validation Middleware
+
+All request validation is consolidated in `src/middleware/validate.middleware.ts`.
+
+| Middleware | Purpose | Import Path |
+|---|---|---|
+| `validateSchema(schema)` | Validates `body`, `query`, and `params` together | `./validate.middleware` |
+| `validateRequest(schema)` | Validates `req.body` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateParams(schema)` | Validates `req.params` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateQuery(schema)` | Validates `req.query` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+
+The deprecated paths `./validation` and `./requestValidation` are thin re-exports and will be removed in a future version. Update new imports to use `./validate.middleware` directly.
+
+**Validation error shape (400):**
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Request validation failed",
+    "requestId": "unknown",
+    "details": [
+      { "path": ["fieldName"], "message": "Expected string, received number", "code": "invalid_type" }
+    ]
+  }
+}
+```
+
+The `details` array uses the `ValidationIssue` shape from `src/errors/appError.ts` (`path: string[]`, `message: string`, `code: string`).
+
 ## Configuration API
 ### Get Application Configuration
 **GET** `/api/config`

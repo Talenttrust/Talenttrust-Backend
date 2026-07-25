@@ -22,7 +22,6 @@ module.exports = {
     'contractMetadata.integration.test.ts',
     'requestLogger.test.ts',
     // 'reputation.controller.test.ts', — re-enabled: rating range validation tests
-    'validate.middleware.test.ts',
     'src/auth/__tests__/roles.test.ts',
     'src/config/config.test.ts',
     'src/httpClient.test.ts',

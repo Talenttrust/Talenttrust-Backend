@@ -14,6 +14,7 @@
 import { Router, Request, Response } from "express";
 import { runHealthCheck } from "./checker";
 import { Probe, HealthResponse } from "./types";
+import { logger as rootLogger } from "../logger";
 import { validateQuery } from "../middleware/validation";
 import { HealthQuerySchema } from "./validation";
 
