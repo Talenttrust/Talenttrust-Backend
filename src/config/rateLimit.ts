@@ -132,6 +132,21 @@ export const rateLimitConfig = {
   } satisfies RateLimiterConfig,
 
   /**
+   * Disputes tier: dispute creation, resolution, and management.
+   * Write-heavy endpoints with moderate limits (~5 req/s).
+   */
+  disputes: {
+    maxRequests: toCount(process.env.RL_DISPUTES_MAX, 300),
+    windowMs: toMs(process.env.RL_DISPUTES_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_DISPUTES_ABUSE_THRESHOLD, 5),
+    blockWindowMs: toMs(process.env.RL_DISPUTES_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_DISPUTES_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_DISPUTES_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
    * Webhook token bucket configuration for rate limiting outbound webhook deliveries.
    */
   webhook: {

@@ -23,6 +23,7 @@ import { createRequestLimitsMiddleware } from './middleware/requestLimits';
 
 import contractsModuleRouter from './routes/contracts.routes';
 import eventsRouter from './routes/events.routes';
+import disputesRouter from './routes/disputes.routes';
 import { createMetricsRouter } from './routes/metrics.routes';
 import { metricsAuthMiddleware } from './middleware/metricsAuth';
 
@@ -91,6 +92,7 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/api/v1', eventsRouter);
   app.use('/api/v1', apiKeysRouter);
   app.use('/api/v1/contracts', contractsModuleRouter);
+  app.use('/api/v1/disputes', disputesRouter);
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
   app.use('/api/v1/admin', adminRouter);
