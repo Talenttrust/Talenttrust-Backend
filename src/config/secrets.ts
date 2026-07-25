@@ -41,6 +41,30 @@ export class EnvSecret<T = string> implements Secret<T> {
     this.load();
   }
 
+  /**
+   * Loads the secret value from the environment variable.
+   *
+   * @remarks
+   * **Security — transform error redaction guarantee**:
+   * If the `transform` callback throws for any reason, the thrown error
+   * message contains **only the environment-variable key name** — never the
+   * raw secret value, any substring of it, nor any message derived from the
+   * original thrown value.
+   *
+   * This guarantee is unconditional:
+   * - If transform throws an `Error` whose `.message` echoes its input
+   *   (e.g. a JSON/YAML parser), that message is discarded.
+   * - If transform throws a plain `string` (e.g. `throw rawValue`), that
+   *   string is discarded.
+   * - If transform throws any other non-Error value, it is discarded.
+   *
+   * The catch block intentionally uses the catch-all `catch {` form
+   * (no binding) to make it impossible to accidentally reference the
+   * original error or the raw secret value.
+   *
+   * The resulting error message is safe to write to any log sink, including
+   * `src/logger.ts`, without further redaction.
+   */
   private load(): void {
     const rawValue = process.env[this.key];
     if (rawValue === undefined) {
@@ -53,8 +77,13 @@ export class EnvSecret<T = string> implements Secret<T> {
 
     try {
       this.value = this.transform ? this.transform(rawValue) : (rawValue as unknown as T);
-    } catch (error) {
-      throw new Error(`Configuration Error: Failed to transform secret "${this.key}": ${error instanceof Error ? error.message : String(error)}`);
+    } catch {
+      // Never include the original error message or any derivative of the raw
+      // secret value in the thrown error — a thrown parser error can echo its
+      // input.  Only the key name is safe to surface here.
+      throw new Error(
+        `Configuration Error: Failed to transform secret "${this.key}" — transform threw an error (details omitted to protect secret value)`
+      );
     }
   }
 
