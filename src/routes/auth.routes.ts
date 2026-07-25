@@ -59,7 +59,7 @@ router.post(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'invalid_credentials') {
-        return authError(res, 401, 'invalid_credentials', 'Invalid email or password.');
+        return authError(res, 401, 'invalid_credentials', 'Request validation failed');
       }
       return authError(res, 500, 'internal_error', 'An unexpected error occurred.');
     }
