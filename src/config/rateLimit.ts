@@ -19,6 +19,11 @@
  * | RL_BLOCK_WINDOW_MS         | 300000     | Violation observation window             |
  * | RL_BLOCK_DURATION_MS       | 600000     | Initial block duration                   |
  * | RL_MAX_BLOCK_MS            | 86400000   | Maximum block duration (24h)             |
+ * | RL_AUDIT_MAX               | 300        | Max requests per window (audit tier)     |
+ * | RL_AUDIT_WINDOW_MS         | 60000      | Window duration in ms (audit)            |
+ * | RL_AUDIT_ABUSE_THRESHOLD   | 5          | Violations before hard block (audit)     |
+ * | RL_AUDIT_INTEGRITY_MAX     | 10         | Max requests per window (audit integrity)|
+ * | RL_AUDIT_INTEGRITY_WINDOW_MS | 60000    | Window duration in ms (audit integrity)  |
  *
  * ## Tier Descriptions
  *
@@ -171,6 +176,47 @@ export const rateLimitConfig = {
     blockWindowMs: toMs(process.env.RL_AUDIT_EXPORT_BLOCK_WINDOW_MS, 21_600_000),
     blockDurationMs: toMs(process.env.RL_AUDIT_EXPORT_BLOCK_DURATION_MS, 3_600_000),
     maxBlockDurationMs: toMs(process.env.RL_AUDIT_EXPORT_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
+   * Audit tier: general query/read endpoints on the audit log
+   * (`GET /api/v1/audit`, `GET /api/v1/audit/:id`), issue #746.
+   *
+   * These are authenticated admin/auditor-only endpoints, so the pool of
+   * legitimate callers is small and well-known; the default is deliberately
+   * looser than `auditExport` (no file generation per request) but its own
+   * tunable tier rather than reusing `standard`, so ops can dial it in
+   * independently of the general authenticated-endpoint limit.
+   */
+  audit: {
+    maxRequests: toCount(process.env.RL_AUDIT_MAX, 300),
+    windowMs: toMs(process.env.RL_AUDIT_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_AUDIT_ABUSE_THRESHOLD, 5),
+    blockWindowMs: toMs(process.env.RL_AUDIT_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_AUDIT_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_AUDIT_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
+   * Audit integrity tier: `GET /api/v1/audit/integrity`, issue #746.
+   *
+   * Verifying the tamper-evident hash chain walks the entire audit log, so
+   * this is the most expensive read the audit router exposes — router.ts's
+   * own doc comment flags it as needing rate limiting to prevent DoS on
+   * large logs. Kept much tighter than the general `audit` tier for that
+   * reason, closer in spirit to `auditExport`.
+   */
+  auditIntegrity: {
+    maxRequests: toCount(process.env.RL_AUDIT_INTEGRITY_MAX, 10),
+    windowMs: toMs(process.env.RL_AUDIT_INTEGRITY_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_AUDIT_INTEGRITY_ABUSE_THRESHOLD, 3),
+    blockWindowMs: toMs(process.env.RL_AUDIT_INTEGRITY_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_AUDIT_INTEGRITY_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_AUDIT_INTEGRITY_MAX_BLOCK_MS, 86_400_000),
     sendHeaders: true,
     ...sharedStore,
   } satisfies RateLimiterConfig,

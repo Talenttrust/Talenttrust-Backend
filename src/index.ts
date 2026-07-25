@@ -23,20 +23,35 @@ const queueManager = QueueManager.getInstance();
 
 const app = createApp({ includeTerminalHandlers: false });
 
-const auditExportLimiter = createRateLimiter({
-  ...rateLimitConfig.auditExport,
-  keyFn: (req) => {
+function auditActorKeyFn(prefix: string) {
+  return (req: Request) => {
     const authReq = req as typeof req & { user?: { id?: string } };
     const actor = authReq.user?.id ?? 'anonymous';
-    return `audit-export:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
-  },
+    return `${prefix}:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
+  };
+}
+
+const auditExportLimiter = createRateLimiter({
+  ...rateLimitConfig.auditExport,
+  keyFn: auditActorKeyFn('audit-export'),
+});
+
+const auditQueryLimiter = createRateLimiter({
+  ...rateLimitConfig.audit,
+  keyFn: auditActorKeyFn('audit'),
+});
+
+const auditIntegrityLimiter = createRateLimiter({
+  ...rateLimitConfig.auditIntegrity,
+  keyFn: auditActorKeyFn('audit-integrity'),
 });
 
 app.use(
   '/api/v1/audit',
   createAuditRouter({
-    accessMiddleware: [requireAuth, requireRole('admin', 'auditor')],
+    accessMiddleware: [requireAuth, requireRole('admin', 'auditor'), auditQueryLimiter],
     exportMiddleware: [auditExportLimiter],
+    integrityMiddleware: [auditIntegrityLimiter],
   }),
 );
 

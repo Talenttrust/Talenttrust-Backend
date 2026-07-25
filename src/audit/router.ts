@@ -11,7 +11,11 @@
  * - In production these routes MUST be protected by authentication and
  *   role-based authorisation (admin/auditor roles only).
  * - Query parameters are validated and clamped to prevent abuse.
- * - The integrity endpoint should be rate-limited to prevent DoS on large logs.
+ * - All routes are rate-limited per client (issue #746): `accessMiddleware`
+ *   carries the general `audit` tier, `/export` additionally gets the
+ *   `auditExport` tier via `exportMiddleware`, and `/integrity` additionally
+ *   gets the stricter `auditIntegrity` tier via `integrityMiddleware` — see
+ *   `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
 import { Router, Request, Response, type RequestHandler } from 'express';
@@ -26,6 +30,13 @@ export interface AuditRouterOptions {
   exportService?: AuditExportService;
   accessMiddleware?: RequestHandler[];
   exportMiddleware?: RequestHandler[];
+  /**
+   * Middleware applied only to `GET /integrity`, in addition to
+   * `accessMiddleware`. Verifying the hash chain walks the entire audit
+   * log, so this endpoint gets its own (tighter) rate limiter — see
+   * `rateLimitConfig.auditIntegrity` in `src/config/rateLimit.ts`.
+   */
+  integrityMiddleware?: RequestHandler[];
 }
 
 const VALID_ACTIONS = new Set<AuditAction>([
@@ -156,6 +167,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const exportService = options.exportService ?? auditExportService;
   const accessMiddleware = options.accessMiddleware ?? [];
   const exportMiddleware = options.exportMiddleware ?? [];
+  const integrityMiddleware = options.integrityMiddleware ?? [];
 
   router.get('/', ...accessMiddleware, (req: Request, res: Response): void => {
     const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });
@@ -266,7 +278,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
  * Verify the tamper-evident hash chain.
  * Returns 200 if valid, 409 if corruption is detected.
  */
-  router.get('/integrity', ...accessMiddleware, (_req: Request, res: Response): void => {
+  router.get('/integrity', ...accessMiddleware, ...integrityMiddleware, (_req: Request, res: Response): void => {
     const report = service.verifyIntegrity();
     const status = report.valid ? 200 : 409;
     res.status(status).json(report);
