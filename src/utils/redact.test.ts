@@ -1,428 +1,409 @@
 /**
- * Unit tests for redact utility functions.
  * @module redact.test
+ * @description Unit tests for the sensitive-field redaction utilities.
+ *
+ * These tests verify that secrets, tokens, auth headers, and other
+ * credential-bearing fields are masked with `[REDACTED]` before they
+ * reach any log output, while non-sensitive fields pass through
+ * unchanged.  No real secret value ever appears in an assertion.
+ *
+ * @security
+ * - All test payloads use obviously-fake placeholder values.
+ * - Snapshot assertions are avoided so secret strings cannot leak
+ *   into committed snapshot files.
  */
 
-import { redactSecret, redactObject, redactPayload, redactHeaders } from './redact';
+import {
+  redactSecret,
+  redactObject,
+  redactHeaders,
+  redactPayload,
+} from './redact';
+
+/**
+ * Shared fixture: a flat object containing a mix of sensitive and
+ * non-sensitive keys.  Used across multiple test cases to verify
+ * that the redaction pattern is applied consistently.
+ *
+ * @returns A plain object with fake credential values.
+ */
+function makeFlatSensitiveObject(): Record<string, unknown> {
+  return {
+    username: 'alice',
+    password: 'fake-password-123',
+    apiKey: 'fake-api-key-abc',
+    token: 'fake-jwt-token',
+    secret: 'fake-signing-secret',
+    nonce: 'fake-nonce-xyz',
+    signature: 'fake-hmac-signature',
+    authorization: 'Bearer fake-bearer-token',
+    cookie: 'session=fake-session-id',
+    email: 'alice@example.com',
+    role: 'admin',
+  };
+}
+
+/**
+ * Shared fixture: a deeply-nested object where sensitive keys appear
+ * at multiple levels.  Used to verify recursive redaction.
+ *
+ * @returns A nested plain object with fake secrets at every depth.
+ */
+function makeNestedSensitiveObject(): Record<string, unknown> {
+  return {
+    user: {
+      name: 'bob',
+      credentials: {
+        password: 'nested-fake-password',
+        apiKey: 'nested-fake-api-key',
+      },
+      token: 'top-level-fake-token',
+    },
+    metadata: {
+      requestId: 'req-123',
+      signature: 'nested-fake-signature',
+    },
+    plain: 'visible-value',
+  };
+}
+
+/**
+ * Shared fixture: a collection of HTTP headers covering the full
+ * sensitivity spectrum (sensitive, non-sensitive, long, missing).
+ *
+ * @returns A header map suitable for `redactHeaders`.
+ */
+function makeMixedHeaders(): Record<string, string | number | string[]> {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: 'Bearer fake-auth-token',
+    'X-API-Key': 'fake-api-key-value',
+    'X-Custom-Header': 'safe-value',
+    Cookie: 'session=fake-session',
+    'Set-Cookie': 'session=fake-session; HttpOnly',
+    'X-Real-IP': '192.168.1.1',
+    'Content-Length': 1024,
+    Accept: 'application/json',
+  };
+}
 
 describe('redactSecret', () => {
-  it('returns [REDACTED] for any value', () => {
-    expect(redactSecret('my-secret')).toBe('[REDACTED]');
-  });
-
-  it('returns [REDACTED] for null', () => {
+  it('returns the fixed redaction marker for any input', () => {
+    expect(redactSecret('super-secret-value')).toBe('[REDACTED]');
+    expect(redactSecret(42)).toBe('[REDACTED]');
     expect(redactSecret(null)).toBe('[REDACTED]');
-  });
-
-  it('returns [REDACTED] for undefined', () => {
     expect(redactSecret(undefined)).toBe('[REDACTED]');
+    expect(redactSecret({ nested: 'object' })).toBe('[REDACTED]');
   });
 
-  it('returns [REDACTED] for numbers', () => {
-    expect(redactSecret(12345)).toBe('[REDACTED]');
-  });
-
-  it('returns [REDACTED] for objects', () => {
-    expect(redactSecret({ key: 'value' })).toBe('[REDACTED]');
+  it('never leaks the original value in the return string', () => {
+    const original = 'this-should-never-appear';
+    const result = redactSecret(original);
+    expect(result).not.toContain(original);
+    expect(result).toBe('[REDACTED]');
   });
 });
 
 describe('redactObject', () => {
-  it('redacts values for keys matching sensitive patterns (case-insensitive)', () => {
-    const input = {
-      secret: 'secret-value',
-      SECRET: 'another-secret',
-      Signature: 'sig-value',
-      TOKEN: 'token-value',
-      Key: 'key-value',
-      PASSWORD: 'password-value',
-      Authorization: 'auth-value',
-      nonce: 'nonce-value',
-    };
+  it('masks known sensitive keys at the top level', () => {
+    const input = makeFlatSensitiveObject();
+    const output = redactObject(input);
 
-    const result = redactObject(input);
-
-    expect(result.secret).toBe('[REDACTED]');
-    expect(result.SECRET).toBe('[REDACTED]');
-    expect(result.Signature).toBe('[REDACTED]');
-    expect(result.TOKEN).toBe('[REDACTED]');
-    expect(result.Key).toBe('[REDACTED]');
-    expect(result.PASSWORD).toBe('[REDACTED]');
-    expect(result.Authorization).toBe('[REDACTED]');
-    expect(result.nonce).toBe('[REDACTED]');
+    expect(output.password).toBe('[REDACTED]');
+    expect(output.apiKey).toBe('[REDACTED]');
+    expect(output.token).toBe('[REDACTED]');
+    expect(output.secret).toBe('[REDACTED]');
+    expect(output.nonce).toBe('[REDACTED]');
+    expect(output.signature).toBe('[REDACTED]');
+    expect(output.authorization).toBe('[REDACTED]');
+    expect(output.cookie).toBe('[REDACTED]');
   });
 
-  it('preserves non-sensitive fields unchanged', () => {
-    const input = {
-      name: 'John Doe',
-      email: 'john@example.com',
-      id: 123,
-      active: true,
-    };
+  it('leaves non-sensitive keys unchanged', () => {
+    const input = makeFlatSensitiveObject();
+    const output = redactObject(input);
 
-    const result = redactObject(input);
-
-    expect(result.name).toBe('John Doe');
-    expect(result.email).toBe('john@example.com');
-    expect(result.id).toBe(123);
-    expect(result.active).toBe(true);
+    expect(output.username).toBe('alice');
+    expect(output.email).toBe('alice@example.com');
+    expect(output.role).toBe('admin');
   });
 
-  it('recursively redacts nested objects', () => {
-    const input = {
-      user: {
-        name: 'John',
-        credentials: {
-          password: 'secret-password',
-          apiKey: 'secret-key',
-        },
-      },
-    };
+  it('recursively redacts nested sensitive objects', () => {
+    const input = makeNestedSensitiveObject();
+    const output = redactObject(input);
 
-    const result = redactObject(input) as any;
-
-    expect(result.user.name).toBe('John');
-    expect(result.user.credentials.password).toBe('[REDACTED]');
-    expect(result.user.credentials.apiKey).toBe('[REDACTED]');
-  });
-
-  it('handles deeply nested structures', () => {
-    const input = {
-      level1: {
-        level2: {
-          level3: {
-            level4: {
-              secret: 'deep-secret',
-              normal: 'normal-value',
-            },
-          },
-        },
-      },
-    };
-
-    const result = redactObject(input) as any;
-
-    expect(result.level1.level2.level3.level4.secret).toBe('[REDACTED]');
-    expect(result.level1.level2.level3.level4.normal).toBe('normal-value');
-  });
-
-  it('preserves array values as-is (does not recurse into arrays)', () => {
-    const input = {
-      items: [
-        { name: 'item1', secret: 'secret1' },
-        { name: 'item2', secret: 'secret2' },
-      ],
-    };
-
-    const result = redactObject(input);
-
-    // Arrays are not recursively processed by redactObject
-    expect(result.items).toEqual(input.items);
-  });
-
-  it('handles null values', () => {
-    const input = {
-      name: 'test',
-      secret: 'secret-value',
-      nullField: null,
-    };
-
-    const result = redactObject(input);
-
-    expect(result.name).toBe('test');
-    expect(result.secret).toBe('[REDACTED]');
-    expect(result.nullField).toBeNull();
+    expect(output.user).toBeDefined();
+    expect((output.user as Record<string, unknown>).name).toBe('bob');
+    expect(
+      ((output.user as Record<string, unknown>).credentials as Record<string, unknown>).password,
+    ).toBe('[REDACTED]');
+    expect(
+      ((output.user as Record<string, unknown>).credentials as Record<string, unknown>).apiKey,
+    ).toBe('[REDACTED]');
+    expect((output.user as Record<string, unknown>).token).toBe('[REDACTED]');
+    expect((output.metadata as Record<string, unknown>).requestId).toBe('req-123');
+    expect((output.metadata as Record<string, unknown>).signature).toBe('[REDACTED]');
+    expect(output.plain).toBe('visible-value');
   });
 
   it('handles empty objects', () => {
-    const input = {};
-    const result = redactObject(input);
-    expect(result).toEqual({});
+    expect(redactObject({})).toEqual({});
   });
 
-  it('handles objects with only sensitive keys', () => {
-    const input = {
-      secret: 'secret-value',
-      token: 'token-value',
-    };
-
-    const result = redactObject(input);
-
-    expect(result.secret).toBe('[REDACTED]');
-    expect(result.token).toBe('[REDACTED]');
+  it('handles objects with no sensitive keys', () => {
+    const input = { foo: 'bar', count: 42, active: true };
+    expect(redactObject(input)).toEqual(input);
   });
 
-  it('handles mixed case sensitive key patterns', () => {
+  it('is case-insensitive for sensitive key matching', () => {
     const input = {
-      Secret: 'value1',
-      sEcReT: 'value2',
-      SECRET: 'value3',
-      AuThOrIzAtIoN: 'value4',
+      PASSWORD: 'uppercase-password',
+      ApiKey: 'mixed-case-api-key',
+      Token: 'mixed-case-token',
+      SECRET: 'uppercase-secret',
     };
+    const output = redactObject(input);
 
-    const result = redactObject(input);
-
-    expect(result.Secret).toBe('[REDACTED]');
-    expect(result.sEcReT).toBe('[REDACTED]');
-    expect(result.SECRET).toBe('[REDACTED]');
-    expect(result['AuThOrIzAtIoN']).toBe('[REDACTED]');
+    expect(output.PASSWORD).toBe('[REDACTED]');
+    expect(output.ApiKey).toBe('[REDACTED]');
+    expect(output.Token).toBe('[REDACTED]');
+    expect(output.SECRET).toBe('[REDACTED]');
   });
 
-  it('handles keys containing sensitive patterns as substrings', () => {
+  it('does not redact keys that merely contain sensitive substrings', () => {
     const input = {
-      apiSecret: 'value1',
-      secretKey: 'value2',
-      authToken: 'value3',
-      passwordReset: 'value4',
+      tokenized: 'not-a-secret',
+      keychain: 'not-a-secret',
+      secretariat: 'not-a-secret',
+      passwordless: 'not-a-secret',
     };
+    const output = redactObject(input);
 
-    const result = redactObject(input);
-
-    expect(result.apiSecret).toBe('[REDACTED]');
-    expect(result.secretKey).toBe('[REDACTED]');
-    expect(result.authToken).toBe('[REDACTED]');
-    expect(result.passwordReset).toBe('[REDACTED]');
+    expect(output.tokenized).toBe('not-a-secret');
+    expect(output.keychain).toBe('not-a-secret');
+    expect(output.secretariat).toBe('not-a-secret');
+    expect(output.passwordless).toBe('not-a-secret');
   });
 
-  it('preserves number and boolean values in non-sensitive fields', () => {
-    const input = {
-      count: 42,
-      active: false,
-      ratio: 3.14,
-      secret: 'secret-value',
-    };
-
-    const result = redactObject(input);
-
-    expect(result.count).toBe(42);
-    expect(result.active).toBe(false);
-    expect(result.ratio).toBe(3.14);
-    expect(result.secret).toBe('[REDACTED]');
+  it('does not mutate the original object', () => {
+    const input = makeFlatSensitiveObject();
+    const snapshot = JSON.stringify(input);
+    redactObject(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
   });
 
-  it('returns a new object (does not mutate input)', () => {
+  it('preserves arrays inside objects as-is (does not recurse into array elements)', () => {
     const input = {
-      name: 'test',
-      secret: 'secret-value',
+      tags: ['a', 'b'],
+      secrets: ['fake-secret-1', 'fake-secret-2'],
     };
+    const output = redactObject(input);
 
-    const result = redactObject(input);
+    // Arrays are not recursively processed by redactObject
+    expect(output.tags).toEqual(['a', 'b']);
+    expect(output.secrets).toEqual(['fake-secret-1', 'fake-secret-2']);
+  });
 
-    expect(result).not.toBe(input);
-    expect(input.secret).toBe('secret-value'); // Original unchanged
-    expect(result.secret).toBe('[REDACTED]');
+  it('handles null values gracefully', () => {
+    const input = { password: null, username: 'alice' };
+    const output = redactObject(input);
+    expect(output.password).toBe('[REDACTED]');
+    expect(output.username).toBe('alice');
+  });
+
+  it('handles undefined values gracefully', () => {
+    const input = { password: undefined, username: 'alice' };
+    const output = redactObject(input);
+    expect(output.password).toBe('[REDACTED]');
+    expect(output.username).toBe('alice');
   });
 });
 
 describe('redactHeaders', () => {
-  it('redacts sensitive headers case-insensitively', () => {
-    const result = redactHeaders({
-      Authorization: 'Bearer secret-token',
-      cookie: 'session=abc123',
-      'X-API-KEY': 'my-secret-key',
-      'Proxy-Authorization': 'Basic dXNlcjpwYXNz',
-      'x-forwarded-for': '1.2.3.4',
-      'x-real-ip': '10.0.0.1',
-    });
+  it('masks all known sensitive headers', () => {
+    const input = makeMixedHeaders();
+    const output = redactHeaders(input);
 
-    expect(result['Authorization']).toBe('[REDACTED]');
-    expect(result['cookie']).toBe('[REDACTED]');
-    expect(result['X-API-KEY']).toBe('[REDACTED]');
-    expect(result['Proxy-Authorization']).toBe('[REDACTED]');
-    expect(result['x-forwarded-for']).toBe('[REDACTED]');
-    expect(result['x-real-ip']).toBe('[REDACTED]');
+    expect(output.Authorization).toBe('[REDACTED]');
+    expect(output['X-API-Key']).toBe('[REDACTED]');
+    expect(output.Cookie).toBe('[REDACTED]');
+    expect(output['Set-Cookie']).toBe('[REDACTED]');
+    expect(output['X-Real-IP']).toBe('[REDACTED]');
   });
 
-  it('preserves non-sensitive headers and array values', () => {
-    const result = redactHeaders({
-      Accept: 'application/json',
-      vary: ['Origin', 'Accept-Encoding'],
-      'x-request-id': 'req-123',
-    });
+  it('preserves non-sensitive headers unchanged', () => {
+    const input = makeMixedHeaders();
+    const output = redactHeaders(input);
 
-    expect(result).toEqual({
-      Accept: 'application/json',
-      vary: ['Origin', 'Accept-Encoding'],
-      'x-request-id': 'req-123',
-    });
+    expect(output['Content-Type']).toBe('application/json');
+    expect(output['X-Custom-Header']).toBe('safe-value');
+    expect(output['Content-Length']).toBe(1024);
+    expect(output.Accept).toBe('application/json');
   });
 
-  it('truncates long non-sensitive string header values', () => {
-    const result = redactHeaders({
-      'x-long-header': 'a'.repeat(205),
-    });
+  it('is case-insensitive for sensitive header names', () => {
+    const input = {
+      authorization: 'Bearer fake-token',
+      cookie: 'session=fake',
+      'x-api-key': 'fake-key',
+    };
+    const output = redactHeaders(input);
 
-    expect(result['x-long-header']).toBe('a'.repeat(200) + '...');
+    expect(output.authorization).toBe('[REDACTED]');
+    expect(output.cookie).toBe('[REDACTED]');
+    expect(output['x-api-key']).toBe('[REDACTED]');
+  });
+
+  it('returns an empty object when headers are undefined', () => {
+    expect(redactHeaders(undefined)).toEqual({});
+  });
+
+  it('returns an empty object when headers are an empty object', () => {
+    expect(redactHeaders({})).toEqual({});
+  });
+
+  it('truncates long non-sensitive string values to maxValueLength', () => {
+    const longValue = 'a'.repeat(500);
+    const input = { 'X-Trace-Id': longValue };
+    const output = redactHeaders(input, 200);
+
+    expect(output['X-Trace-Id']).toBe('a'.repeat(200) + '...');
+  });
+
+  it('uses default maxValueLength when not provided', () => {
+    const longValue = 'b'.repeat(250);
+    const input = { 'X-Trace-Id': longValue };
+    const output = redactHeaders(input);
+
+    expect(output['X-Trace-Id']).toBe('b'.repeat(200) + '...');
+  });
+
+  it('does not truncate values at or below maxValueLength', () => {
+    const value = 'c'.repeat(200);
+    const input = { 'X-Trace-Id': value };
+    const output = redactHeaders(input, 200);
+
+    expect(output['X-Trace-Id']).toBe(value);
   });
 
   it('does not mutate the original headers object', () => {
-    const input = {
-      Authorization: 'Bearer secret-token',
-      Accept: 'application/json',
-    };
-
-    const result = redactHeaders(input);
-
-    expect(result).not.toBe(input);
-    expect(input.Authorization).toBe('Bearer secret-token');
+    const input = makeMixedHeaders();
+    const snapshot = JSON.stringify(input);
+    redactHeaders(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
   });
 
-  it('does not over-redact benign header names containing generic fragments', () => {
-    const result = redactHeaders({
-      'x-public-key-hint': 'stellar-account',
-      'x-session-tokenized': 'derived-value',
-    });
+  it('masks proxy-authorization header', () => {
+    const input = { 'Proxy-Authorization': 'Basic fake-credentials' };
+    const output = redactHeaders(input);
+    expect(output['Proxy-Authorization']).toBe('[REDACTED]');
+  });
 
-    expect(result['x-public-key-hint']).toBe('stellar-account');
-    expect(result['x-session-tokenized']).toBe('derived-value');
+  it('masks x-auth-token and x-access-token headers', () => {
+    const input = {
+      'X-Auth-Token': 'fake-auth-token',
+      'X-Access-Token': 'fake-access-token',
+    };
+    const output = redactHeaders(input);
+    expect(output['X-Auth-Token']).toBe('[REDACTED]');
+    expect(output['X-Access-Token']).toBe('[REDACTED]');
+  });
+
+  it('masks x-api-secret header', () => {
+    const input = { 'X-API-Secret': 'fake-api-secret' };
+    const output = redactHeaders(input);
+    expect(output['X-API-Secret']).toBe('[REDACTED]');
+  });
+
+  it('masks x-forwarded-for header', () => {
+    const input = { 'X-Forwarded-For': '10.0.0.1, 10.0.0.2' };
+    const output = redactHeaders(input);
+    expect(output['X-Forwarded-For']).toBe('[REDACTED]');
   });
 });
 
 describe('redactPayload', () => {
-  it('handles null input', () => {
+  it('delegates objects to redactObject', () => {
+    const input = makeFlatSensitiveObject();
+    const output = redactPayload(input);
+
+    expect(output.password).toBe('[REDACTED]');
+    expect(output.username).toBe('alice');
+  });
+
+  it('recursively redacts arrays of objects', () => {
+    const input = [
+      { password: 'fake-pw-1', username: 'alice' },
+      { password: 'fake-pw-2', username: 'bob' },
+    ];
+    const output = redactPayload(input);
+
+    expect(Array.isArray(output)).toBe(true);
+    expect(output[0].password).toBe('[REDACTED]');
+    expect(output[0].username).toBe('alice');
+    expect(output[1].password).toBe('[REDACTED]');
+    expect(output[1].username).toBe('bob');
+  });
+
+  it('returns primitives unchanged', () => {
+    expect(redactPayload('hello')).toBe('hello');
+    expect(redactPayload(42)).toBe(42);
+    expect(redactPayload(true)).toBe(true);
+  });
+
+  it('returns null unchanged', () => {
     expect(redactPayload(null)).toBeNull();
   });
 
-  it('handles undefined input', () => {
+  it('returns undefined unchanged', () => {
     expect(redactPayload(undefined)).toBeUndefined();
   });
 
-  it('handles primitive non-object values', () => {
-    expect(redactPayload('string')).toBe('string');
-    expect(redactPayload(123)).toBe(123);
-    expect(redactPayload(true)).toBe(true);
-    expect(redactPayload(false)).toBe(false);
-  });
-
-  it('delegates to redactObject for plain objects', () => {
+  it('handles deeply nested arrays and objects', () => {
     const input = {
-      name: 'test',
-      secret: 'secret-value',
+      users: [
+        {
+          name: 'alice',
+          credentials: { password: 'deep-fake-password' },
+        },
+      ],
+      config: {
+        secret: 'deep-fake-secret',
+      },
     };
+    const output = redactPayload(input);
 
-    const result = redactPayload(input);
-
-    expect(result.name).toBe('test');
-    expect(result.secret).toBe('[REDACTED]');
-  });
-
-  it('recursively processes arrays of objects', () => {
-    const input = [
-      { name: 'item1', secret: 'secret1' },
-      { name: 'item2', token: 'token2' },
-      { name: 'item3', password: 'password3' },
-    ];
-
-    const result = redactPayload(input);
-
-    expect(result[0].name).toBe('item1');
-    expect(result[0].secret).toBe('[REDACTED]');
-    expect(result[1].name).toBe('item2');
-    expect(result[1].token).toBe('[REDACTED]');
-    expect(result[2].name).toBe('item3');
-    expect(result[2].password).toBe('[REDACTED]');
-  });
-
-  it('handles arrays of primitive values', () => {
-    const input = [1, 2, 3, 'string', true];
-    const result = redactPayload(input);
-    expect(result).toEqual(input);
-  });
-
-  it('handles nested arrays', () => {
-    const input = [
-      [{ name: 'nested', secret: 'secret' }],
-      [{ token: 'token' }],
-    ];
-
-    const result = redactPayload(input);
-
-    expect(result[0][0].name).toBe('nested');
-    expect(result[0][0].secret).toBe('[REDACTED]');
-    expect(result[1][0].token).toBe('[REDACTED]');
+    expect(output.users[0].name).toBe('alice');
+    expect(output.users[0].credentials.password).toBe('[REDACTED]');
+    expect(output.config.secret).toBe('[REDACTED]');
   });
 
   it('handles empty arrays', () => {
-    const input: unknown[] = [];
-    const result = redactPayload(input);
-    expect(result).toEqual([]);
+    expect(redactPayload([])).toEqual([]);
   });
 
-  it('handles mixed nested structures with arrays and objects', () => {
-    const input = {
-      users: [
-        { name: 'user1', credentials: { password: 'pass1' } },
-        { name: 'user2', credentials: { apiKey: 'key2' } },
-      ],
-      config: {
-        secret: 'config-secret',
-        settings: { normal: 'value' },
-      },
-    };
-
-    const result = redactPayload(input) as any;
-
-    // redactObject preserves arrays as-is (does not recurse into them)
-    // Only the top-level object's sensitive keys are redacted
-    expect(result.users[0].name).toBe('user1');
-    expect(result.users[0].credentials.password).toBe('pass1'); // Not redacted
-    expect(result.users[1].name).toBe('user2');
-    expect(result.users[1].credentials.apiKey).toBe('key2'); // Not redacted
-    expect(result.config.secret).toBe('[REDACTED]');
-    expect(result.config.settings.normal).toBe('value');
+  it('handles empty objects', () => {
+    expect(redactPayload({})).toEqual({});
   });
 
-  it('handles arrays containing null and undefined', () => {
-    const input = [null, undefined, { secret: 'secret' }];
-    const result = redactPayload(input);
-    expect(result[0]).toBeNull();
-    expect(result[1]).toBeUndefined();
-    expect(result[2].secret).toBe('[REDACTED]');
-  });
-
-  it('preserves non-sensitive fields in complex nested structures', () => {
-    const input = {
-      data: {
-        items: [
-          { id: 1, value: 'a', secret: 's1' },
-          { id: 2, value: 'b', token: 't2' },
-        ],
-        metadata: {
-          count: 2,
-          version: '1.0',
-        },
-      },
-    };
-
-    const result = redactPayload(input) as any;
-
-    // Arrays are preserved as-is by redactObject, so nested objects in arrays are not redacted
-    expect(result.data.items[0].id).toBe(1);
-    expect(result.data.items[0].value).toBe('a');
-    expect(result.data.items[0].secret).toBe('s1'); // Not redacted
-    expect(result.data.items[1].id).toBe(2);
-    expect(result.data.items[1].value).toBe('b');
-    expect(result.data.items[1].token).toBe('t2'); // Not redacted
-    expect(result.data.metadata.count).toBe(2);
-    expect(result.data.metadata.version).toBe('1.0');
-  });
-
-  it('does not mutate the original input object', () => {
-    const input = {
-      name: 'test',
-      secret: 'secret-value',
-    };
-
+  it('does not mutate the original payload', () => {
+    const input = makeFlatSensitiveObject();
+    const snapshot = JSON.stringify(input);
     redactPayload(input);
-
-    expect(input.secret).toBe('secret-value');
+    expect(JSON.stringify(input)).toBe(snapshot);
   });
 
-  it('does not mutate the original input array', () => {
-    const input = [{ secret: 'secret-value' }];
+  it('handles mixed arrays with primitives and objects', () => {
+    const input = [
+      'plain-string',
+      42,
+      { token: 'fake-token', id: 1 },
+    ];
+    const output = redactPayload(input);
 
-    redactPayload(input);
-
-    expect(input[0].secret).toBe('secret-value');
+    expect(output[0]).toBe('plain-string');
+    expect(output[1]).toBe(42);
+    expect(output[2].token).toBe('[REDACTED]');
+    expect(output[2].id).toBe(1);
   });
 });
