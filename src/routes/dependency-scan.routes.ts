@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { DependencyScanController } from '../controllers/dependency-scan.controller';
+import { extractBearerToken } from '../lib/authHelpers';
 
 const router = Router();
 
@@ -36,13 +37,11 @@ function resolveUser(
  *    authorization is enforced separately by {@link requireAdmin}.
  */
 function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const token = extractBearerToken(req);
+  if (!token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
-
-  const token = authHeader.slice('Bearer '.length).trim();
   const user = resolveUser(token);
   if (!user) {
     res.status(401).json({ error: 'Invalid token' });

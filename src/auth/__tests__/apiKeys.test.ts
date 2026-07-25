@@ -294,6 +294,63 @@ describe('API Key Utilities', () => {
       const storedKey = db2.api_keys.find((k: any) => k.name === 'Legacy Key');
       expect(storedKey.key_selector).toBe(computeKeySelector(apiKeyPlain));
     });
+
+    it('should find the correct key among multiple legacy keys', async () => {
+      // Simulate THREE legacy keys without key_selector (only the last one matches the API key)
+      const matchingKeyPlain = generateApiKey();
+      const { salt: matchSalt, hash: matchHash } = hashApiKey(matchingKeyPlain);
+
+      const db = await (database as any).loadDatabase();
+
+      // Push two non-matching legacy keys first
+      for (let i = 0; i < 2; i++) {
+        const otherKey = generateApiKey();
+        const { salt, hash } = hashApiKey(otherKey);
+        db.api_keys.push({
+          id: require('crypto').randomUUID(),
+          name: `Other Legacy Key ${i}`,
+          key_hash: `${salt}:${hash}`,
+          scope: ['legacy:read'],
+          created_by: 'user123',
+          created_at: new Date(),
+          updated_at: new Date(),
+          is_active: true
+          // No key_selector field
+        });
+      }
+
+      // Push the matching legacy key last
+      db.api_keys.push({
+        id: require('crypto').randomUUID(),
+        name: 'Target Legacy Key',
+        key_hash: `${matchSalt}:${matchHash}`,
+        scope: ['legacy:write'],
+        created_by: 'user456',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+        // No key_selector field
+      });
+      await (database as any).saveDatabase();
+
+      // Validate should find the correct key even though it's not the first legacy key
+      const result = await validateApiKey(matchingKeyPlain);
+      expect(result).not.toBeNull();
+      expect(result!.name).toBe('Target Legacy Key');
+      expect(result!.scope).toEqual(['legacy:write']);
+      expect(result!.createdBy).toBe('user456');
+
+      // After validation, the matched key should be backfilled
+      const db2 = await (database as any).loadDatabase();
+      const matchedKey = db2.api_keys.find((k: any) => k.name === 'Target Legacy Key');
+      expect(matchedKey.key_selector).toBe(computeKeySelector(matchingKeyPlain));
+
+      // Other legacy keys should remain without key_selector
+      const otherKeys = db2.api_keys.filter((k: any) => k.name !== 'Target Legacy Key');
+      for (const k of otherKeys) {
+        expect(k.key_selector).toBeUndefined();
+      }
+    });
   });
 
   describe('rotateApiKey', () => {

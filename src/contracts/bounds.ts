@@ -8,6 +8,9 @@ import { z } from 'zod';
 // Change via code review; no runtime toggle to avoid misconfiguration risk.
 export const MAX_MILESTONES_PER_CONTRACT = 20;
 export const MAX_CONTRACT_AMOUNT_STROOPS = 100_000_000_000_000; // 10 000 000 XLM
+// Bounds free-text contract terms to a reasonable size, preventing oversized
+// payloads (e.g. on dispute-triggering updates) from reaching the store.
+export const MAX_CONTRACT_TERMS_LENGTH = 5000;
 
 export interface ContractBounds {
   maxMilestonesPerContract: number;

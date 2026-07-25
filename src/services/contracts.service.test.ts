@@ -69,6 +69,12 @@ describe('ContractsService', () => {
       expect(mockRepository.findPage).toHaveBeenCalledWith({ limit: 10 });
     });
 
+    it('uses default empty input when called without arguments', async () => {
+      const page = await contractsService.getContractsPage();
+      expect(page.data).toEqual([]);
+      expect(page.limit).toBe(20);
+    });
+
     it('returns cursor-paginated results from the real repository', async () => {
       await contractsService.createContract({
         title: 'Contract A',
@@ -420,6 +426,131 @@ describe('ContractsService', () => {
       await expect(
         contractsService.updateContract(created.id, { version: 0, title: 'Stale update' }),
       ).rejects.toThrow(/Version conflict/);
+    });
+
+    it('throws MissingVersionError when version is undefined', async () => {
+      const created = await contractsService.createContract({
+        title: 'No version test',
+        description: 'Missing version',
+        clientId: '550e8400-e29b-41d4-a716-446655440000',
+        budget: 1000,
+      });
+
+      await expect(
+        contractsService.updateContract(created.id, { title: 'No version' } as unknown as UpdateContractDto),
+      ).rejects.toThrow(/version field is required/i);
+    });
+
+    it('throws InvalidVersionError when version is negative', async () => {
+      const created = await contractsService.createContract({
+        title: 'Negative version test',
+        description: 'Negative version',
+        clientId: '550e8400-e29b-41d4-a716-446655440000',
+        budget: 1000,
+      });
+
+      await expect(
+        contractsService.updateContract(created.id, { version: -1, title: 'Negative' }),
+      ).rejects.toThrow(/non-negative integer/i);
+    });
+
+    it('throws InvalidVersionError when version is non-integer', async () => {
+      const created = await contractsService.createContract({
+        title: 'Float version test',
+        description: 'Float version',
+        clientId: '550e8400-e29b-41d4-a716-446655440000',
+        budget: 1000,
+      });
+
+      await expect(
+        contractsService.updateContract(created.id, { version: 1.5, title: 'Float' }),
+      ).rejects.toThrow(/non-negative integer/i);
+    });
+  });
+
+  describe('getBounds', () => {
+    it('returns policy bounds', () => {
+      const bounds = contractsService.getBounds();
+      expect(bounds).toHaveProperty('maxMilestones');
+      expect(bounds).toHaveProperty('maxAmount');
+    });
+  });
+
+  describe('InMemoryContractRepository', () => {
+    it('findByClientId returns matching contracts', async () => {
+      const c1 = await contractsService.createContract({
+        title: 'C1',
+        description: 'First',
+        clientId: 'client-a',
+        budget: 100,
+      });
+      await contractsService.createContract({
+        title: 'C2',
+        description: 'Second',
+        clientId: 'client-b',
+        budget: 200,
+      });
+      const results = await repository.findByClientId('client-a');
+      expect(results).toHaveLength(1);
+      expect(results[0]!.id).toBe(c1.id);
+    });
+
+    it('create with only required fields uses defaults', async () => {
+      const contract = await repository.create({
+        title: 'Minimal',
+        clientId: 'client-x',
+        amount: 500,
+      });
+      expect(contract.status).toBe('draft');
+      expect(contract.freelancerId).toBe('');
+      expect(contract.version).toBe(0);
+    });
+
+    it('findAll with timestamp collisions uses insertion order tie-break', async () => {
+      jest.useFakeTimers({ advanceTimers: true });
+      const now = new Date('2024-06-01T12:00:00.000Z');
+      jest.setSystemTime(now);
+
+      const c1 = await repository.create({ title: 'SameTs-A', clientId: 'c', amount: 100 });
+      const c2 = await repository.create({ title: 'SameTs-B', clientId: 'c', amount: 200 });
+
+      jest.useRealTimers();
+
+      const all = await repository.findAll();
+      expect(all).toHaveLength(2);
+      // Most recently inserted first (c2 before c1)
+      expect(all[0]!.id).toBe(c2.id);
+      expect(all[1]!.id).toBe(c1.id);
+    });
+
+    it('findPage with cursor returns subsequent page', async () => {
+      jest.useFakeTimers({ advanceTimers: true });
+      jest.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
+      await repository.create({ title: 'A', clientId: 'c', amount: 100 });
+      jest.setSystemTime(new Date('2024-01-01T00:00:01.000Z'));
+      await repository.create({ title: 'B', clientId: 'c', amount: 200 });
+      jest.setSystemTime(new Date('2024-01-01T00:00:02.000Z'));
+      await repository.create({ title: 'C', clientId: 'c', amount: 300 });
+      jest.useRealTimers();
+
+      const page1 = await repository.findPage({ limit: 2 });
+      expect(page1.data).toHaveLength(2);
+      expect(page1.hasNextPage).toBe(true);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const page2 = await repository.findPage({ limit: 2, cursor: page1.nextCursor! });
+      expect(page2.data).toHaveLength(1);
+      expect(page2.hasNextPage).toBe(false);
+      expect(page2.nextCursor).toBeNull();
+    });
+
+    it('clear removes all contracts', async () => {
+      await contractsService.createContract({
+        title: 'Clear test', description: 'd', clientId: '550e8400-e29b-41d4-a716-446655440000', budget: 100,
+      });
+      expect(await repository.findAll()).toHaveLength(1);
+      repository.clear();
+      expect(await repository.findAll()).toHaveLength(0);
     });
   });
 

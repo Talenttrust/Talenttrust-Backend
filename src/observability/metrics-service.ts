@@ -8,8 +8,20 @@ import {
 } from 'prom-client';
 
 import { ServiceStatus } from './types';
+import {
+  assertDlqDepth,
+  assertServiceStatus,
+  assertWebhookOutcome,
+  WebhookOutcome as ValidatedWebhookOutcome,
+} from './metrics-validation';
+import { DEFAULT_HISTOGRAM_BUCKETS, validateHistogramBuckets } from './observability-config';
 
-export type WebhookOutcome = 'success' | 'failure' | 'dlq';
+/**
+ * Re-exported from metrics-validation to preserve existing import paths.
+ * The canonical definition lives in metrics-validation.ts where all metric
+ * input types are colocated.
+ */
+export type WebhookOutcome = ValidatedWebhookOutcome;
 
 /**
  * Canonical list of metric family names documented in docs/observability.md.
@@ -49,6 +61,13 @@ const UNMATCHED_ROUTE_LABEL = 'unmatched';
 
 export interface MetricsServiceOptions {
   httpRouteLabelLimit?: number;
+  /**
+   * Custom histogram bucket boundaries (in seconds) for
+   * `http_request_duration_seconds`. Must be a non-empty array of strictly
+   * increasing positive numbers. Falls back to {@link DEFAULT_HISTOGRAM_BUCKETS}
+   * when absent or invalid.
+   */
+  histogramBuckets?: number[];
 }
 
 /**
@@ -86,6 +105,11 @@ export class MetricsService implements MetricsServiceLike {
   ) {
     this.register = register ?? new Registry();
     this.httpRouteLabelLimit = options.httpRouteLabelLimit ?? DEFAULT_HTTP_ROUTE_LABEL_LIMIT;
+
+    // Resolve histogram buckets: validate caller-supplied values and fall back
+    // to defaults when absent or invalid, so misconfiguration is non-fatal.
+    const resolvedBuckets = resolveHistogramBuckets(options.histogramBuckets);
+
     collectDefaultMetrics({
       register: this.register,
       prefix: `${sanitizeMetricPrefix(serviceName)}_`,
@@ -102,7 +126,7 @@ export class MetricsService implements MetricsServiceLike {
       name: 'http_request_duration_seconds',
       help: 'Duration of HTTP requests in seconds.',
       labelNames: ['method', 'route', 'status_code'],
-      buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+      buckets: resolvedBuckets,
       registers: [this.register],
     });
 
@@ -164,18 +188,26 @@ export class MetricsService implements MetricsServiceLike {
   }
 
   recordHealthStatus(status: ServiceStatus): void {
+    // Runtime guard: reject unknown status strings that bypass TypeScript types
+    // (e.g. from JSON-deserialized or cross-process call sites).
+    const validated = assertServiceStatus(status);
     this.serviceHealthStatus.set(
       { service: this.serviceName },
-      HEALTH_STATUS_VALUE[status],
+      HEALTH_STATUS_VALUE[validated],
     );
   }
 
   recordWebhookDelivery(outcome: WebhookOutcome): void {
-    this.webhookDeliveriesTotal.inc({ outcome });
+    // Runtime guard: reject unknown outcome strings.
+    const validated = assertWebhookOutcome(outcome);
+    this.webhookDeliveriesTotal.inc({ outcome: validated });
   }
 
   setWebhookDlqDepth(depth: number): void {
-    this.webhookDlqDepth.set(depth);
+    // Runtime guard: reject NaN, ±Infinity, negative values, and unreasonably
+    // large values that would indicate a bug or injection attempt.
+    const validated = assertDlqDepth(depth);
+    this.webhookDlqDepth.set(validated);
   }
 
   startRateLimitMetricsSampling(limiter: any, intervalMs: number = 10000): void {
@@ -203,6 +235,12 @@ export class MetricsService implements MetricsServiceLike {
   }
 
   private boundRouteLabel(route: string): string {
+    // Never collapse unmatched routes — they are not user-controlled and must
+    // always be tracked separately so operators can monitor 404 rates.
+    if (route === UNMATCHED_ROUTE_LABEL) {
+      return route;
+    }
+
     if (this.observedHttpRouteLabels.has(route)) {
       return route;
     }
@@ -214,6 +252,28 @@ export class MetricsService implements MetricsServiceLike {
 
     return OTHER_ROUTE_LABEL;
   }
+}
+
+/**
+ * Validate the caller-supplied bucket array and return it if valid.
+ * Falls back to {@link DEFAULT_HISTOGRAM_BUCKETS} when the input is absent or
+ * fails validation, ensuring that misconfiguration is non-fatal and existing
+ * dashboards keep working.
+ */
+function resolveHistogramBuckets(buckets: number[] | undefined): number[] {
+  if (buckets === undefined) {
+    return [...DEFAULT_HISTOGRAM_BUCKETS];
+  }
+
+  const result = validateHistogramBuckets(buckets);
+  if (!result.valid) {
+    console.warn(
+      `[MetricsService] Invalid histogramBuckets option (${result.reason}); falling back to defaults.`,
+    );
+    return [...DEFAULT_HISTOGRAM_BUCKETS];
+  }
+
+  return result.buckets;
 }
 
 function sanitizeMetricPrefix(input: string): string {

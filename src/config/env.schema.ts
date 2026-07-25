@@ -95,6 +95,29 @@ export const envSchema = z.object({
     })
     .default('https://rpc-testnet.stellar.org'),
 
+  // Stellar RPC transport timeout and retry knobs.  Mirrored in
+  // src/rpc/stellarConfig.ts so the transport can be loaded in isolation
+  // (e.g. tests that exercise the rpc client without booting the full app).
+  STELLAR_RPC_TIMEOUT_MS: z.string()
+    .default('5000')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().positive('STELLAR_RPC_TIMEOUT_MS must be greater than 0').max(120_000)),
+
+  STELLAR_RPC_MAX_RETRIES: z.string()
+    .default('3')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().min(0, 'STELLAR_RPC_MAX_RETRIES must be >= 0').max(10, 'STELLAR_RPC_MAX_RETRIES must be <= 10')),
+
+  STELLAR_RPC_RETRY_BASE_DELAY_MS: z.string()
+    .default('200')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().nonnegative('STELLAR_RPC_RETRY_BASE_DELAY_MS must be >= 0').max(60_000)),
+
+  STELLAR_RPC_RETRY_MAX_DELAY_MS: z.string()
+    .default('2000')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().nonnegative('STELLAR_RPC_RETRY_MAX_DELAY_MS must be >= 0').max(60_000)),
+
 
   // Router / Blue-Green Deployment Configuration
   ACTIVE_COLOR: z.enum(['blue', 'green']).default('blue'),
@@ -131,6 +154,11 @@ export const envSchema = z.object({
     .optional()
     .transform((val) => val === undefined ? undefined : parseInt(val, 10))
     .pipe(z.number().int().positive().optional()),
+
+  RATE_LIMIT_STORE_TYPE: z.enum(['memory', 'redis'])
+    .default('memory'),
+  REDIS_URL: z.string().optional(),
+  REDIS_KEY_PREFIX: z.string().default('rate_limit:'),
 
   ROUTE_BODY_LIMITS: z.string()
     .optional()
@@ -208,6 +236,26 @@ export const envSchema = z.object({
 
   SENDGRID_API_KEY: z.string().optional(),
 }).superRefine((obj, ctx) => {
+  const requireForEmailProvider = (field: keyof typeof obj, message: string): void => {
+    if (!obj[field]) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message });
+    }
+  };
+
+  if (obj.EMAIL_PROVIDER === 'smtp') {
+    requireForEmailProvider('SMTP_HOST', 'SMTP_HOST is required when EMAIL_PROVIDER=smtp');
+    requireForEmailProvider('SMTP_PORT', 'SMTP_PORT is required when EMAIL_PROVIDER=smtp');
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=smtp');
+  } else if (obj.EMAIL_PROVIDER === 'ses') {
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_REGION', 'AWS_REGION is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID is required when EMAIL_PROVIDER=ses');
+    requireForEmailProvider('AWS_SECRET_ACCESS_KEY', 'AWS_SECRET_ACCESS_KEY is required when EMAIL_PROVIDER=ses');
+  } else if (obj.EMAIL_PROVIDER === 'sendgrid') {
+    requireForEmailProvider('SMTP_FROM', 'SMTP_FROM is required when EMAIL_PROVIDER=sendgrid');
+    requireForEmailProvider('SENDGRID_API_KEY', 'SENDGRID_API_KEY is required when EMAIL_PROVIDER=sendgrid');
+  }
+
   if (obj.NODE_ENV === 'production') {
     if (!obj.JWT_SECRET) {
       ctx.addIssue({

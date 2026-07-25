@@ -1,4 +1,10 @@
 import { Counter, Registry } from 'prom-client';
+import {
+  DlqOperationSchema,
+  DlqReplayOutcomeSchema,
+  DLQ_OPERATIONS,
+  DLQ_REPLAY_OUTCOMES,
+} from '../observability/metrics-validation';
 
 // ---------------------------------------------------------------------------
 // Isolated Registry for WebhookMetrics DLQ counters
@@ -29,9 +35,17 @@ export const webhookDlqOperationsTotal = new Counter({
 /**
  * Helper to increment standard DLQ storage lifecycle events.
  * @param operation - The storage operation type executed
+ * @throws {TypeError} when operation is not a recognised DLQ operation string
  */
 export function incrementDlqOperation(operation: 'enqueue' | 'drop_overflow' | 'drop_poison'): void {
-  webhookDlqOperationsTotal.labels(operation).inc();
+  const result = DlqOperationSchema.safeParse(operation);
+  if (!result.success) {
+    throw new TypeError(
+      `Invalid DLQ operation: ${JSON.stringify(operation)}. ` +
+        `Must be one of: ${DLQ_OPERATIONS.join(', ')}`,
+    );
+  }
+  webhookDlqOperationsTotal.labels(result.data).inc();
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +66,15 @@ export const webhookDlqReplaysTotal = new Counter({
 /**
  * Helper to increment metrics counters following a DLQ replay attempt.
  * @param outcome - The resulting resolution path of the replay action
+ * @throws {TypeError} when outcome is not a recognised DLQ replay outcome string
  */
 export function incrementDlqReplay(outcome: 'success' | 'failed' | 'idempotent_noop' | 'error'): void {
-  webhookDlqReplaysTotal.labels(outcome).inc();
+  const result = DlqReplayOutcomeSchema.safeParse(outcome);
+  if (!result.success) {
+    throw new TypeError(
+      `Invalid DLQ replay outcome: ${JSON.stringify(outcome)}. ` +
+        `Must be one of: ${DLQ_REPLAY_OUTCOMES.join(', ')}`,
+    );
+  }
+  webhookDlqReplaysTotal.labels(result.data).inc();
 }

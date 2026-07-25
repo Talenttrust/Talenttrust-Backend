@@ -1,7 +1,8 @@
 import { randomUUID } from 'crypto';
-import Database, { type Database as DatabaseInstance } from "../db/betterSqlite3";
+import Database from "../db/betterSqlite3";
 import { computeEntryHash, GENESIS_HASH } from './store';
-import type { AuditEntry, AuditQuery, CreateAuditEntryInput, IntegrityReport } from './types';
+import type { AuditEntry, AuditQuery, CreateAuditEntryInput, IntegrityReport, AuditQueryResult, CursorData } from './types';
+import { encodeCursor, decodeCursor } from './types';
 import type { AuditLogRepository } from './repository';
 
 interface AuditRow {
@@ -113,6 +114,85 @@ export class SqliteAuditRepository implements AuditLogRepository {
     const { sql, params } = this.buildQuerySql(query);
     const rows = this.db.prepare<typeof params, AuditRow>(sql).all(...params);
     return rows.map(toAuditEntry);
+  }
+
+  queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+    
+    let startIndex = 0;
+    
+    // Decode cursor if provided
+    if (query.cursor) {
+      try {
+        const cursorData: CursorData = decodeCursor(query.cursor);
+        
+        // Find the sequence number of the last entry from the previous page
+        const lastEntryRow = this.db
+          .prepare<[string], { seq: number }>(
+            'SELECT seq FROM audit_log_entries WHERE id = ?'
+          )
+          .get(cursorData.lastId);
+        
+        if (lastEntryRow) {
+          startIndex = lastEntryRow.seq;
+        }
+        
+        // Verify filters match cursor (prevent filter drift)
+        if (cursorData.filters.action !== query.action ||
+            cursorData.filters.severity !== query.severity ||
+            cursorData.filters.actor !== query.actor ||
+            cursorData.filters.resource !== query.resource ||
+            cursorData.filters.resourceId !== query.resourceId ||
+            cursorData.filters.from !== query.from ||
+            cursorData.filters.to !== query.to) {
+          throw new Error('Cursor filters do not match query filters');
+        }
+      } catch (error) {
+        // Re-throw filter mismatch errors, but handle invalid cursor format gracefully
+        if (error instanceof Error && error.message === 'Cursor filters do not match query filters') {
+          throw error;
+        }
+        // If cursor is invalid (format error), start from beginning
+        startIndex = 0;
+      }
+    }
+    
+    // Build query with cursor-based pagination
+    const { sql, params } = this.buildCursorQuerySql(query, startIndex, limit);
+    const rows = this.db.prepare<typeof params, AuditRow>(sql).all(...params);
+    const entries = rows.map(toAuditEntry);
+    
+    // Generate next cursor if there are more results
+    let nextCursor: string | undefined;
+    if (entries.length === limit && entries.length > 0) {
+      // Check if there are actually more results by querying with limit+1
+      const checkSql = this.buildCursorQuerySql(query, startIndex, limit + 1);
+      const checkRows = this.db.prepare<typeof checkSql.params, AuditRow>(checkSql.sql).all(...checkSql.params);
+      if (checkRows.length > limit) {
+        const lastEntry = entries[entries.length - 1];
+        const cursorData: CursorData = {
+          lastId: lastEntry.id,
+          lastTimestamp: lastEntry.timestamp,
+          filters: {
+            action: query.action,
+            severity: query.severity,
+            actor: query.actor,
+            resource: query.resource,
+            resourceId: query.resourceId,
+            from: query.from,
+            to: query.to,
+          },
+        };
+        nextCursor = encodeCursor(cursorData);
+      }
+    }
+    
+    return {
+      entries,
+      count: entries.length,
+      limit,
+      nextCursor,
+    };
   }
 
   *stream(query: AuditQuery = {}): IterableIterator<AuditEntry> {
@@ -254,6 +334,59 @@ export class SqliteAuditRepository implements AuditLogRepository {
       ORDER BY seq ASC
       ${paginationClause}
     `;
+    return { sql, params };
+  }
+
+  private buildCursorQuerySql(query: AuditQuery, startIndex: number, limit: number): { sql: string; params: unknown[] } {
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    if (query.action) {
+      where.push('action = ?');
+      params.push(query.action);
+    }
+    if (query.severity) {
+      where.push('severity = ?');
+      params.push(query.severity);
+    }
+    if (query.actor) {
+      where.push('actor = ?');
+      params.push(query.actor);
+    }
+    if (query.resource) {
+      where.push('resource = ?');
+      params.push(query.resource);
+    }
+    if (query.resourceId) {
+      where.push('resource_id = ?');
+      params.push(query.resourceId);
+    }
+    if (query.from) {
+      where.push('timestamp >= ?');
+      params.push(query.from);
+    }
+    if (query.to) {
+      where.push('timestamp <= ?');
+      params.push(query.to);
+    }
+    
+    // Add cursor-based pagination using seq
+    if (startIndex > 0) {
+      where.push('seq > ?');
+      params.push(startIndex);
+    }
+
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT id, timestamp, action, severity, actor, resource, resource_id, metadata_json, ip_address, correlation_id, hash, previous_hash
+      FROM audit_log_entries
+      ${whereClause}
+      ORDER BY seq ASC
+      LIMIT ?
+    `;
+    params.push(limit);
+    
     return { sql, params };
   }
 }

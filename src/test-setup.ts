@@ -5,6 +5,10 @@
  * This allows tests to run without requiring a running Redis instance.
  */
 
+import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
+import { z } from 'zod';
+extendZodWithOpenApi(z);
+
 // Mock BullMQ classes
 jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({

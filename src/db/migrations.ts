@@ -18,6 +18,13 @@ const MIGRATIONS: Migration[] = [
   {
     version: 1,
     name: "create_users_and_contracts_schema",
+    checksumSource: [
+      "CREATE TABLE IF NOT EXISTS users (",
+      "CREATE TABLE IF NOT EXISTS contracts (",
+      "CREATE INDEX IF NOT EXISTS idx_contracts_client_id",
+      "CREATE INDEX IF NOT EXISTS idx_contracts_freelancer_id",
+      "CREATE INDEX IF NOT EXISTS idx_contracts_status",
+    ].join("\n"),
     up: (db) => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS users (
@@ -56,6 +63,9 @@ const MIGRATIONS: Migration[] = [
   {
     version: 2,
     name: "add_contract_version_column",
+    checksumSource: [
+      "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)",
+    ].join("\n"),
     up: (db) => {
       const columns = db.pragma("table_info(contracts)") as Array<{ name: string }>;
       const hasVersion = columns.some((col) => col.name === "version");
@@ -140,6 +150,11 @@ const MIGRATIONS: Migration[] = [
 MIGRATIONS.push({
   version: 6,
   name: "create_deployment_history_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS deployment_history (",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_from",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_to",
+  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS deployment_history (
@@ -164,6 +179,11 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 7,
   name: "add_auth_columns_to_users",
+  checksumSource: [
+    "DROP TABLE IF EXISTS users",
+    "CREATE TABLE users (password_hash TEXT, refresh_token_hash TEXT)",
+    "INSERT INTO users (id, username, email, role, password_hash, refresh_token_hash, created_at)",
+  ].join("\n"),
   up: (db) => {
     const columns = db.pragma("table_info(users)") as Array<{ name: string }>;
     const hasPasswordHash = columns.some((col) => col.name === "password_hash");
@@ -217,6 +237,10 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 8,
   name: "create_retention_storage_tables",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS retention_local (",
+    "CREATE TABLE IF NOT EXISTS retention_archive (",
+  ].join("\n"),
   up: (db) => {
     // The retention module uses two independent provider instances (local + archive),
     // so we create two physically separate tables rather than a single table with a
@@ -257,6 +281,9 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 9,
   name: "add_started_at_to_transactions",
+  checksumSource: [
+    "ALTER TABLE transactions ADD COLUMN started_at TEXT",
+  ].join("\n"),
   up: (db) => {
     // Check if the column already exists to prevent errors during repeated migrations
     const columns = db.pragma("table_info(transactions)") as Array<{ name: string }>;
@@ -272,6 +299,11 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 10,
   name: "create_webhook_subscriptions_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS webhook_subscriptions (",
+    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_consumer",
+    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_event",
+  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS webhook_subscriptions (
@@ -294,6 +326,9 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 11,
   name: "add_normalized_email_unique_index",
+  checksumSource: [
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_normalized ON users (lower(trim(email)))",
+  ].join("\n"),
   up: (db) => {
     // Duplicate emails that differ only by surrounding whitespace or letter
     // case must be rejected. A plain UNIQUE(email) constraint compares the raw
@@ -311,6 +346,11 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 12,
   name: "create_notifications_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS notifications (",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_user_id",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_created_at",
+  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS notifications (

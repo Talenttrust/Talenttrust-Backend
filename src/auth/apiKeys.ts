@@ -3,14 +3,14 @@
  * @description API key authentication utilities for TalentTrust.
  *
  * Provides secure API key generation, validation, and management.
- * API keys are hashed at rest using SHA-256 with a salt.
+ * API keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a salt.
  *
  * API keys are expected in the `X-API-Key` header:
  *   X-API-Key: <api-key>
  *
  * Security notes:
  *   - API keys are cryptographically generated using random bytes
- *   - Keys are hashed at rest using SHA-256 with a unique salt
+ *   - Keys are hashed at rest using PBKDF2 (SHA-256, 10,000 iterations) with a unique salt
  *   - Each key has optional expiration and scoping
  *   - Keys can be rotated and deactivated
  *   - Last usage is tracked for audit purposes
@@ -186,13 +186,31 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
 
   // Try indexed lookup first (fast path, O(1) via key_selector)
   let dbKey = await database.getApiKeyBySelector(selector);
+  let pbkdf2Verified = false; // tracks whether the salted hash has already been verified
 
-  // Fallback: scan legacy keys that predate the key_selector index
+  // Fallback: scan legacy keys that predate the key_selector index.
+  // Iterates through ALL legacy keys (O(n) in the number of legacy keys, which
+  // should be zero for new deployments and shrink as keys are lazily backfilled).
   if (!dbKey) {
     const db = await (database as any).loadDatabase();
-    dbKey = db.api_keys.find(
+    const legacyKeys: ApiKey[] = db.api_keys.filter(
       (k: ApiKey) => !k.key_selector && k.is_active
     );
+
+    for (const legacyKey of legacyKeys) {
+      // Validate the stored credential format before splitting and calling PBKDF2
+      if (!isValidSaltHashFormat(legacyKey.key_hash)) {
+        continue; // malformed entry — skip and try the next legacy key
+      }
+
+      const [legacySalt, legacyHash] = legacyKey.key_hash.split(':');
+
+      if (verifyApiKey(apiKey, legacySalt, legacyHash)) {
+        dbKey = legacyKey;
+        pbkdf2Verified = true;
+        break;
+      }
+    }
   }
 
   if (!dbKey) {
@@ -209,8 +227,10 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
   // Split the validated format
   const [salt, hash] = dbKey.key_hash.split(':');
 
-  // Verify with the slow salted hash (source of truth)
-  if (!verifyApiKey(apiKey, salt, hash)) {
+  // Verify with the slow salted hash (source of truth).
+  // Skip re-verification for keys found via the legacy fallback — they already
+  // passed the PBKDF2 check inside the loop.
+  if (!pbkdf2Verified && !verifyApiKey(apiKey, salt, hash)) {
     return null;
   }
   

@@ -640,6 +640,117 @@ echo "✓ Deployment successful"
 
 ---
 
-**Last Updated:** 2024-06-01  
-**Version:** 1.0  
+## Promotion / Rollback Lifecycle
+
+The `promoter` module (`src/deployment/promoter.ts`) orchestrates environment
+promotions (dev → staging → production) with validation, blue-green switching,
+audit logging, and persisted history.
+
+### Promotion Flow
+
+```
+PromotionRequest
+   │
+   ▼
+┌─────────────────────────────┐
+│ validatePromotionPath       │  ← dev→staging or staging→production only
+│   └─ valid? ─── NO ──► 400  │
+└───────────┬─────────────────┘
+            │ YES
+            ▼
+┌─────────────────────────────┐
+│ loadEnvironmentConfig       │  ← transient NODE_ENV swap for target
+└───────────┬─────────────────┘
+            │
+            ▼
+┌─────────────────────────────┐
+│ validateDeploymentReadiness │  ← port/URL/CORS/Stellar validation
+│   └─ valid? ─── NO ──► 400  │
+└───────────┬─────────────────┘
+            │ YES
+            ▼
+┌─────────────────────────────┐
+│ performHealthCheck          │  ← GET /health/ready (non-fatal)
+└───────────┬─────────────────┘
+            │
+            ▼
+┌─────────────────────────────┐
+│ switchToGreen (deploy.ts)   │  ← blue-green state machine
+│   └─ throws? ─── YES ──►   │
+│       record FAILURE + audit│
+└───────────┬─────────────────┘
+            │ OK
+            ▼
+┌─────────────────────────────┐
+│ recordPromotion (SUCCESS)   │  ← INSERT into deployment_history
+│ auditService.log (INFO)     │
+└─────────────────────────────┘
+```
+
+### Rollback Flow
+
+```
+RollbackRequest
+   │
+   ▼
+┌─────────────────────────────┐
+│ targetVersion present?      │  ← required
+│ environment ≠ development?  │
+│   └─ NO ──► 400             │
+└───────────┬─────────────────┘
+            │ YES
+            ▼
+┌─────────────────────────────┐
+│ rollback (deploy.ts)        │  ← reverts to previous colour
+│   └─ throws? ─── YES ──►   │
+│       record FAILURE + audit│
+└───────────┬─────────────────┘
+            │ OK
+            ▼
+┌─────────────────────────────┐
+│ recordRollback (SUCCESS)    │  ← INSERT into deployment_history
+│ auditService.log (WARNING)  │
+└─────────────────────────────┘
+```
+
+### History
+
+`getPromotionHistory(environment)` queries `deployment_history` for all rows
+where the environment appears as source or target, ordered by timestamp
+descending. Each record includes:
+
+| Field        | Source                  |
+|--------------|-------------------------|
+| `from`       | `environment_from`      |
+| `to`         | `environment_to`        |
+| `version`    | `target_version`        |
+| `initiatedBy`| `initiated_by`          |
+| `timestamp`  | ISO-8601 in UTC         |
+
+### Audit Events
+
+| Event                    | Severity  | When                         |
+|--------------------------|-----------|------------------------------|
+| `DEPLOYMENT_PROMOTED`    | `INFO`    | Successful promotion         |
+| `DEPLOYMENT_PROMOTED`    | `CRITICAL`| Failed promotion             |
+| `DEPLOYMENT_ROLLED_BACK` | `WARNING` | Successful rollback          |
+| `DEPLOYMENT_ROLLED_BACK` | `CRITICAL`| Failed rollback              |
+
+### Valid Promotion Paths
+
+| From           | To             |
+|----------------|----------------|
+| `development`  | `staging`      |
+| `staging`      | `production`   |
+| `production`   | *(none)*       |
+| `test`         | *(none)*       |
+
+Any other path produces a `ValidationResult` with `valid: false` and a
+descriptive error message. Direct `development → production` promotions emit
+a warning but are currently rejected by the path validator.
+
+---
+
+**Last Updated:** 2026-07-25  
+**Version:** 2.0  
 **Audience:** Operators, DevOps, On-call Engineers

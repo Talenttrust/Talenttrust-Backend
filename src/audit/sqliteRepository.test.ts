@@ -47,6 +47,7 @@
 import Database, { Database as DbInstance } from '../db/betterSqlite3';
 import { SqliteAuditRepository } from './sqliteRepository';
 import type { CreateAuditEntryInput } from './types';
+import { encodeCursor, decodeCursor, type CursorData } from './types';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -520,5 +521,188 @@ describe('SqliteAuditRepository — verifyIntegrity()', () => {
 
     const report = repository.verifyIntegrity();
     expect(report.valid).toBe(false);
+  });
+});
+
+// ─── queryWithCursor() — cursor-based pagination ─────────────────────────────
+
+describe('SqliteAuditRepository — queryWithCursor()', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns paginated result with entries and limit', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput({ actor: `u${i}` }));
+    }
+    const result = repository.queryWithCursor({ limit: 3 });
+    expect(result.entries).toHaveLength(3);
+    expect(result.limit).toBe(3);
+    expect(result.count).toBe(3);
+  });
+
+  it('uses default limit of 50 when not specified', () => {
+    for (let i = 0; i < 60; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({});
+    expect(result.limit).toBe(50);
+    expect(result.entries).toHaveLength(50);
+  });
+
+  it('clamps limit to maximum of 100', () => {
+    for (let i = 0; i < 150; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({ limit: 150 });
+    expect(result.limit).toBe(100);
+    expect(result.entries).toHaveLength(100);
+  });
+
+  it('clamps limit to minimum of 1', () => {
+    repository.append(makeInput());
+    const result = repository.queryWithCursor({ limit: 0 });
+    expect(result.limit).toBe(1);
+    expect(result.entries).toHaveLength(1);
+  });
+
+  it('returns nextCursor when more results exist', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput({ actor: `u${i}` }));
+    }
+    const result = repository.queryWithCursor({ limit: 5 });
+    expect(result.nextCursor).toBeDefined();
+    
+    // Decode and verify cursor structure
+    const cursorData = decodeCursor(result.nextCursor!);
+    expect(cursorData.lastId).toBeDefined();
+    expect(cursorData.lastTimestamp).toBeDefined();
+    expect(cursorData.filters).toEqual({});
+  });
+
+  it('does not return nextCursor on last page', () => {
+    for (let i = 0; i < 5; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('does not return nextCursor for empty result', () => {
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.entries).toHaveLength(0);
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('respects filters with cursor pagination', () => {
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_CREATED' }));
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_UPDATED' }));
+    repository.append(makeInput({ actor: 'bob', action: 'CONTRACT_CREATED' }));
+
+    const result = repository.queryWithCursor({ 
+      actor: 'alice', 
+      action: 'CONTRACT_CREATED',
+      limit: 10 
+    });
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].actor).toBe('alice');
+    expect(result.entries[0].action).toBe('CONTRACT_CREATED');
+  });
+
+  it('includes filters in nextCursor', () => {
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_CREATED' }));
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_UPDATED' }));
+    repository.append(makeInput({ actor: 'bob', action: 'CONTRACT_CREATED' }));
+
+    const result = repository.queryWithCursor({ 
+      actor: 'alice',
+      limit: 1 
+    });
+    
+    const cursorData = decodeCursor(result.nextCursor!);
+    expect(cursorData.filters.actor).toBe('alice');
+  });
+
+  it('handles cursor with valid lastId', () => {
+    const entries = [];
+    for (let i = 0; i < 10; i++) {
+      entries.push(repository.append(makeInput({ actor: `u${i}` })));
+    }
+    
+    const firstPage = repository.queryWithCursor({ limit: 3 });
+    expect(firstPage.entries).toHaveLength(3);
+    expect(firstPage.nextCursor).toBeDefined();
+    
+    // Use the cursor to get next page
+    const secondPage = repository.queryWithCursor({ 
+      cursor: firstPage.nextCursor,
+      limit: 3 
+    });
+    expect(secondPage.entries).toHaveLength(3);
+    expect(secondPage.entries[0].id).not.toBe(firstPage.entries[0].id);
+  });
+
+  it('throws error when cursor filters do not match query filters', () => {
+    repository.append(makeInput({ actor: 'alice' }));
+    
+    const cursorData: CursorData = {
+      lastId: repository.query({ actor: 'alice' })[0].id,
+      lastTimestamp: new Date().toISOString(),
+      filters: { actor: 'alice' },
+    };
+    const cursor = encodeCursor(cursorData);
+    
+    // Try to use cursor with different filters
+    expect(() => {
+      repository.queryWithCursor({ 
+        cursor,
+        actor: 'bob', // Different actor than cursor
+        limit: 10 
+      });
+    }).toThrow('Cursor filters do not match query filters');
+  });
+
+  it('handles invalid cursor gracefully', () => {
+    repository.append(makeInput());
+    
+    const result = repository.queryWithCursor({ 
+      cursor: 'invalid-cursor',
+      limit: 10 
+    });
+    // Should fall back to beginning
+    expect(result.entries.length).toBeGreaterThan(0);
+  });
+
+  it('cursor pagination with time range filters', () => {
+    const now = new Date();
+    const past = new Date(now.getTime() - 60_000).toISOString();
+    const future = new Date(now.getTime() + 60_000).toISOString();
+    
+    repository.append(makeInput());
+    
+    const result = repository.queryWithCursor({ 
+      from: past,
+      to: future,
+      limit: 10 
+    });
+    expect(result.entries).toHaveLength(1);
+  });
+
+  it('cursor pagination at exact page boundary', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput());
+    }
+    
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.entries).toHaveLength(10);
+    expect(result.nextCursor).toBeUndefined();
   });
 });

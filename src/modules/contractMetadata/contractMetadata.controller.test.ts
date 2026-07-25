@@ -78,7 +78,7 @@ describe('ContractMetadataController ETag support', () => {
     await controller.list(req2, res2);
 
     expect(res2.status).toHaveBeenCalledWith(304);
-    expect(res2.end).toHaveBeenCalled();
+    expect(res2.send).toHaveBeenCalled();
     expect(res2.json).not.toHaveBeenCalled();
   });
 
@@ -121,7 +121,7 @@ describe('ContractMetadataController ETag support', () => {
     await controller.getById(req2, res2);
 
     expect(res2.status).toHaveBeenCalledWith(304);
-    expect(res2.end).toHaveBeenCalled();
+    expect(res2.send).toHaveBeenCalled();
     expect(res2.json).not.toHaveBeenCalled();
   });
 });

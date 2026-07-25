@@ -137,6 +137,17 @@ export function recordThrottled(_providerId: string): void {
 }
 
 /**
+ * Record a webhook delivery rejected because the per-provider waiter queue
+ * reached its configured maximum depth. No provider label is attached so
+ * cardinality stays at zero.
+ */
+export function recordQueueOverflow(): void {
+  // Placeholder implementation - no-op until connected to a real metrics
+  // backend. Kept as a stable hook so callers have a side-effect-free
+  // integration point.
+}
+
+/**
  * Record the outcome of a DLQ replay attempt.
  * @param _outcome - Replay outcome label (e.g. 'success', 'failed', 'error',
  *   'idempotent_noop').

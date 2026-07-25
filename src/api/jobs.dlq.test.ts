@@ -1,3 +1,4 @@
+import express from 'express';
 import request from 'supertest';
 import { app } from '../index';
 import { QueueManager, JobType } from '../queue';
@@ -174,8 +175,8 @@ describe('DLQ Capacity and Overflow', () => {
     // Verify oldest entry was evicted
     expect(storage.getEntry(id1)).toBeNull();
     expect(storage.getEntry(id2)).not.toBeNull();
-    expect(storage.getEntry(id3)).not.toBeNull();
-    expect(storage.getEntry(id4)).not.toBeNull();
+    expect(storage.getEntry(_id3)).not.toBeNull();
+    expect(storage.getEntry(_id4)).not.toBeNull();
 
     // Verify count is still 3
     const statsAfter = await storage.getStats();
@@ -380,8 +381,7 @@ describe('DLQ Metrics Integration', () => {
 });
 
 describe('Issue #256: Idempotent DLQ Replay REST Endpoints', () => {
-  let storage: any;
-  let testApp: express.Express;
+  let storage: any;    let testApp: ReturnType<typeof express>;
   const mockId = 'dlq_item_uuid_101';
   const mockEvtId = 'evt_sig_alpha_09';
 
@@ -412,7 +412,7 @@ describe('Issue #256: Idempotent DLQ Replay REST Endpoints', () => {
     });
     
     (IdempotencyLayer.isEventProcessed as jest.Mock).mockResolvedValue(false);
-    (WebhookDeliveryService.deliverRaw as jest.Mock).mockResolvedValue(true);
+    (WebhookDeliveryService as any).deliverRaw = jest.fn().mockResolvedValue(true);
 
     const res = await request(testApp)
       .post(`/jobs/dlq/${mockId}/replay`)
@@ -421,7 +421,7 @@ describe('Issue #256: Idempotent DLQ Replay REST Endpoints', () => {
       .expect(200);
 
     expect(res.body.status).toBe('success');
-    expect(WebhookDeliveryService.deliverRaw).toHaveBeenCalledWith(
+    expect((WebhookDeliveryService as any).deliverRaw).toHaveBeenCalledWith(
       'https://endpoint.talenttrust.io/webhook',
       mockEvtId,
       expect.objectContaining({ webhookSecret: '[REDACTED]' })
@@ -448,7 +448,7 @@ describe('Issue #256: Idempotent DLQ Replay REST Endpoints', () => {
 
     expect(res.body.status).toBe('ignored');
     expect(res.body.reason).toContain('Idempotent no-op');
-    expect(WebhookDeliveryService.deliverRaw).not.toHaveBeenCalled();
+    expect((WebhookDeliveryService as any).deliverRaw).not.toHaveBeenCalled();
     expect(storage.removeEntry).not.toHaveBeenCalled();
   });
 
@@ -475,7 +475,7 @@ describe('Issue #256: Idempotent DLQ Replay REST Endpoints', () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
 
-    (WebhookDeliveryService.deliverRaw as jest.Mock).mockResolvedValue(true);
+    (WebhookDeliveryService as any).deliverRaw = jest.fn().mockResolvedValue(true);
 
     const res = await request(testApp)
       .post('/jobs/dlq/replay')

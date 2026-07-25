@@ -74,8 +74,11 @@ export class RateLimitStore implements RateLimitStoreInterface {
   constructor(options: StoreOptions = {}) {
     const interval = options.sweepIntervalMs ?? 60_000;
     if (interval > 0) {
-      this.sweepTimer = setInterval(() => this.sweep(), interval);
-      if (this.sweepTimer.unref) this.sweepTimer.unref();
+      const timer: ReturnType<typeof setInterval> = setInterval(() => this.sweep(), interval);
+      if (typeof (timer as unknown as { unref?: () => void }).unref === 'function') {
+        (timer as unknown as { unref: () => void }).unref();
+      }
+      this.sweepTimer = timer;
     }
   }
 

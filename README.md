@@ -358,10 +358,32 @@ All queue processors (`src/queue/processors/`) use the structured logger from `s
 | Concern | Rule |
 |---|---|
 | Logger instantiation | Each processor calls `createLogger({ processor: '<name>', ...correlationCtx })` at the top of its handler, binding `correlationId` and `requestId` from the job payload. |
-| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. |
+| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. Processor-specific context (e.g. `processor`, `action`, `network`) is bound at logger creation time and appears on every record from that processor instance. |
 | PII at info/warn level | Recipient email addresses, `userId`, and `contractId` must **not** appear in `message` strings at `info` or `warn` level. They may be logged at `debug` level as structured fields. |
+| Sensitive payload fields | Any payload logged at debug level must pass through `redactObject` / `redactPayload` from `src/utils/redact.ts` before inclusion. Keys matching `secret`, `token`, `password`, `authorization`, `key`, `signature`, `cookie`, and `nonce` are automatically replaced with `[REDACTED]` by the logger's built-in sanitizer. |
 | Error path | Validation errors emit a `warn` record (via `log.warn(...)`) **before** throwing, so observers can correlate the rejection with the job's correlation context. |
-| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). Never use `Date.now() + Math.random()` for IDs. |
+| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). **Never** use `Date.now() + Math.random()` for IDs — this approach is collision-prone under load. |
+
+### ID generation
+
+`generateEmailId()` is exported from `email-processor.ts` and documented with TSDoc:
+
+```ts
+/**
+ * Generate a cryptographically-strong unique tracking ID for an outbound email.
+ *
+ * Uses `crypto.randomUUID()` (RFC 4122 v4) so that IDs are collision-resistant
+ * even under rapid successive calls, unlike the previous `Date.now() +
+ * Math.random()` approach which could produce duplicates under load.
+ *
+ * @returns A UUID v4 string prefixed with `email_` for readability in logs.
+ */
+export function generateEmailId(): string {
+  return `email_${crypto.randomUUID()}`;
+}
+```
+
+Uniqueness is validated in tests by generating 50 IDs in rapid succession and asserting the full set is deduplicated.
 
 ### Example — adding a new processor
 
@@ -376,16 +398,44 @@ export async function processMyJob(payload: MyPayload): Promise<JobResult> {
   });
 
   if (!isValid(payload)) {
-    log.warn('Validation failed: reason');   // structured, no PII
+    log.warn('Validation failed: reason');   // structured, no PII in message
     throw new Error('...');
   }
 
   log.info('Job started');
-  // ...
+  // log sensitive fields only at debug, never in message strings
+  log.debug('Processing with context', { internalId: payload.id });
   log.info('Job completed', { someMetric: 42 });
   return { success: true };
 }
 ```
+
+### Log record example
+
+```json
+{
+  "timestamp": "2026-07-24T22:52:00.001Z",
+  "level": "info",
+  "message": "Email notification delivered",
+  "service": "talenttrust-backend",
+  "processor": "email",
+  "emailId": "email_3f1a2b4c-...",
+  "subject": "Welcome",
+  "correlationId": "corr-abc",
+  "requestId": "req-123"
+}
+```
+
+### Testing convention
+
+Processor tests use `setWriteRecordImpl` from `src/logger.ts` to intercept log records as plain objects rather than parsing serialised output. This allows assertions on:
+
+- Required base field presence (`timestamp`, `level`, `message`, `service`)
+- Correlation context propagation (`correlationId`, `requestId`)
+- PII absence in `info`/`warn` message strings (email addresses, `userId`, `contractId`)
+- `warn` emission before throws on validation failure
+- Unique ID generation across rapid successive calls
+
 
 ## Graceful shutdown and drain order
 
