@@ -12,24 +12,24 @@ class NestedDto {
   @IsString()
   @IsNotEmpty()
   @IsSanitized()
-  role: string;
+  role!: string;
 
   @IsEmail({}, { message: 'Nested email must comply with standard format' })
-  email: string;
+  email!: string;
 }
 
 class TestUserDto {
   @IsString()
   @IsNotEmpty()
   @IsSanitized()
-  username: string;
+  username!: string;
 
   @IsEmail({}, { message: 'Email must be a valid RFC 5322 address' })
-  email: string;
+  email!: string;
 
   @IsInt()
   @Min(1)
-  id: number;
+  id!: number;
 
   @IsOptional()
   @ValidateNested()

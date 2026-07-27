@@ -13,10 +13,6 @@
  * authorization. A sliding-window rate limiter (sensitive-tier) is applied
  * to every route to prevent abuse and accidental overload.
  *
- * Responses above {@link DISPUTES_COMPRESSION_THRESHOLD} bytes are automatically
- * compressed using gzip or deflate, honouring the client's `Accept-Encoding`
- * header. Small responses are served uncompressed to avoid unnecessary CPU cost.
- *
  * @route GET    /api/v1/disputes       - List disputes
  * @route GET    /api/v1/disputes/:id   - Get a single dispute
  * @route POST   /api/v1/disputes       - Create a new dispute
@@ -46,12 +42,7 @@ import { features } from '../config/features';
 import { ok, fail } from '../utils/apiResponse';
 import { getRequestLogger, getRequestContext } from '../utils/correlationId';
 
-export interface DisputesRouterOptions {
-  /** Optional metrics service; when omitted, metrics are skipped. */
-  metricsService?: Pick<MetricsServiceLike, 'recordDisputesRequest'>;
-  /** Optional logger override (tests). Defaults to request-scoped or root logger. */
-  log?: Logger;
-}
+const router = Router();
 
 // ── Feature flag — gate all disputes routes ───────────────────────────────────
 router.use((_req: Request, res: Response, next: NextFunction) => {
@@ -59,28 +50,17 @@ router.use((_req: Request, res: Response, next: NextFunction) => {
     fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
     return;
   }
-  if (error instanceof SoftDeleteRetentionError) {
-    fail(res, error.code, error.message, error.statusCode);
-    return true;
-  }
-  return false;
-}
+  next();
+});
 
-/**
- * Build the disputes router.
- *
- * @param options - Optional metrics/logger injection for observability.
- */
-export function createDisputesRouter(options: DisputesRouterOptions = {}): Router {
-  const router = Router();
-  const controller = createDisputesController();
+// ── Rate limiter (disputes tier) ──────────────────────────────────────────────
+const disputesLimiter = createRateLimiter(rateLimitConfig.disputes);
 
-  // Observability first so duration/status capture includes auth + rate-limit outcomes.
-  router.use(createDisputesObservabilityMiddleware(options));
+// Apply rate limiting to all disputes routes
+router.use(disputesLimiter);
 
-  // ── Rate limiter (disputes tier) ──────────────────────────────────────────────
-  const disputesLimiter = createRateLimiter(rateLimitConfig.disputes);
-  router.use(disputesLimiter);
+// ── Authentication — all disputes routes require a valid JWT ──────────────────
+router.use(requireAuth);
 
 // ── GET / — list disputes ─────────────────────────────────────────────────────
 /** @permission disputes:list — admin, auditor, client (ownOnly), freelancer (ownOnly) */
@@ -205,41 +185,4 @@ router.delete(
   },
 );
 
-function formatExpressPath(path: unknown): string | null {
-  if (typeof path === 'string') {
-    return normalizeRoutePart(path);
-  }
-
-  if (path instanceof RegExp) {
-    return path.toString();
-  }
-
-  if (Array.isArray(path)) {
-    const parts = path
-      .map(formatExpressPath)
-      .filter((part): part is string => part !== null);
-    return parts.length > 0 ? parts.join('|') : null;
-  }
-
-  return null;
-}
-
-function normalizeRoutePart(part: string | undefined): string {
-  if (!part || part === '/') {
-    return '';
-  }
-
-  return part.startsWith('/') ? part : `/${part}`;
-}
-
-function joinRouteParts(baseUrl: string, routePath: string): string {
-  if (!baseUrl) {
-    return routePath;
-  }
-
-  if (!routePath) {
-    return baseUrl;
-  }
-
-  return `${baseUrl}${routePath}`;
-}
+export default router;

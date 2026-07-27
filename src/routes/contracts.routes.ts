@@ -1,11 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import compression from 'compression';
 
 import { createContractsController } from '../controllers/contracts.controller';
-import { createContractsBulkController } from '../controllers/contracts-bulk.controller';
-import { createMilestonesSoftDeleteController } from '../controllers/milestones.softdelete.controller';
 import { ContractsService } from '../services/contracts.service';
-import { ContractCacheService, DEFAULT_CACHE_TTL_MS, DEFAULT_CACHE_SWR_MS, DEFAULT_CACHE_MAX_ENTRIES } from '../services/contractCache.service';
 import { ContractRepository } from '../repositories/contractRepository';
 import { getDb } from '../db/database';
 import { validateSchema } from '../middleware/validate.middleware';
@@ -13,10 +9,9 @@ import {
   createContractSchema,
   contractIdParamSchema,
   contractQuerySchema,
-  bulkMilestonesSchema,
 } from '../modules/contracts/dto/contract.dto';
-import { bulkCreateContractsSchema } from '../modules/contracts/dto/bulk-operations.dto';
 import { validateUpdateContract } from '../modules/contracts/validation.middleware';
+import { eventIngestionService } from '../events/registry';
 import { contractCreateIdempotencyMiddleware } from '../middleware/contractIdempotency';
 import { requireAuth, requirePermission } from '../middleware/authorization';
 import type { MetricsServiceLike } from '../observability/metrics-service';
@@ -55,7 +50,7 @@ function validateContractId(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
-  // ─── Inline query-param validator ────────────────────────────────────────────
+// ─── Inline query-param validator ────────────────────────────────────────────
 
 /**
  * Validates query parameters on GET /api/v1/contracts against contractQuerySchema.
@@ -119,11 +114,6 @@ function validateContractQuery(req: Request, res: Response, next: NextFunction):
  */
 function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   const router = Router();
-
-  // Enable compression for large payloads (e.g. milestones arrays)
-  // The threshold is 1KB by default, but we set it explicitly here.
-  router.use(compression({ threshold: 1024 }));
-
   const db = getDb();
   const repo = new ContractRepository(db);
   const controller = createContractsController(new ContractsService(repo), metricsService);
@@ -137,27 +127,6 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     const contract = await repo.findById(req.params?.id ?? '');
     return contract ? contract.clientId : null;
   };
-
-  // ─── Rate limiter ───────────────────────────────────────────────────────────
-  // Per-client rate limiting using X-API-Key if available, otherwise client IP.
-  // Applied before auth to protect server resources from unauthenticated abuse.
-  const milestonesLimiter = createRateLimiter({
-    ...rateLimitConfig.milestones,
-    keyFn: (req) => {
-      const apiKey = req.headers['x-api-key'];
-      if (apiKey) {
-        const key = Array.isArray(apiKey) ? apiKey[0] : apiKey;
-        return `milestones:apikey:${key}`;
-      }
-      const xff = req.headers['x-forwarded-for'];
-      if (xff) {
-        const first = Array.isArray(xff) ? xff[0] : (xff as string).split(',')[0];
-        return `milestones:ip:${first.trim()}`;
-      }
-      return `milestones:ip:${req.ip ?? req.socket?.remoteAddress ?? 'unknown'}`;
-    },
-  });
-  router.use(milestonesLimiter);
 
   // GET /bounds — public-facing bounds, still requires auth
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
@@ -178,7 +147,14 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   );
 
   // GET /:id/history — fetch contract event history (param validation first)
-  router.get('/:id/history', validateContractId, controller.getContractHistory);
+  router.get('/:id/history', validateContractId, async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const history = await eventIngestionService.getContractHistory(req.params.id);
+      res.status(200).json(history);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   // GET /:id — fetch single contract (param validation before auth to reject clearly invalid IDs)
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
@@ -188,58 +164,6 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     requireAuth,
     requirePermission('contracts', 'read', getContractOwnerId),
     controller.getContractById,
-  );
-
-  // GET /:id/milestones — list milestones (soft-deleted excluded by default)
-  /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
-  router.get(
-    '/:id/milestones',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'read', getContractOwnerId),
-    milestonesSoftDelete.list.bind(milestonesSoftDelete),
-  );
-
-  // POST /:id/milestones — create a milestone record (active)
-  /** @permission contracts:update (ownOnly) — admin, client, freelancer */
-  router.post(
-    '/:id/milestones',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
-    milestonesSoftDelete.create.bind(milestonesSoftDelete),
-  );
-
-  // POST /:id/milestones/:milestoneId/restore — restore within retention window
-  /** @permission contracts:update (ownOnly) — admin, client, freelancer */
-  router.post(
-    '/:id/milestones/:milestoneId/restore',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
-    milestonesSoftDelete.restore.bind(milestonesSoftDelete),
-  );
-
-  // DELETE /:id/milestones/:milestoneId — soft-delete (mark deleted_at, do not purge)
-  /** @permission contracts:update (ownOnly) — admin, client, freelancer */
-  router.delete(
-    '/:id/milestones/:milestoneId',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
-    milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
-  );
-
-  // GET /:id/milestones/audit-log — bounded, cursor-paginated audit trail
-  // (actor, action, before/after summary, timestamp) for milestone writes on
-  // this contract. Same visibility as reading the contract itself.
-  /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
-  router.get(
-    '/:id/milestones/audit-log',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'read', getContractOwnerId),
-    controller.getMilestonesAuditLog,
   );
 
   /**
@@ -255,36 +179,14 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     controller.createContract,
   );
 
-  /**
-   * POST /api/v1/contracts/bulk
-   * Bulk create contracts endpoint.
-   * 
-   * Request: Array of contract creation payloads (each validated separately)
-   * Response: Per-item results with summary (always 200, check per-item status for failures)
-   * 
-   * - Each item is validated and processed independently
-   * - One item's failure does not affect other items
-   * - Batch size is capped at BULK_OPERATION_MAX_BATCH_SIZE (100)
-   * - Empty batch is rejected as a validation error
-   */
-  router.post(
-    '/bulk',
-    requireAuth,
-    requirePermission('contracts', 'create'),
-    validateSchema(bulkCreateContractsSchema),
-    bulkController.bulkCreateContracts,
-  );
-
   // PATCH /:id — update an existing contract (owner or admin only)
   // validateContractId runs before auth to reject clearly invalid :id params early.
-  // Idempotency-Key support added for milestones write safety.
   /** @permission contracts:update (ownOnly for client/freelancer) — admin, client, freelancer */
   router.patch(
     '/:id',
     validateContractId,
     requireAuth,
     requirePermission('contracts', 'update', getContractOwnerId),
-    contractCreateIdempotencyMiddleware(),
     validateUpdateContract,
     controller.updateContract,
   );
