@@ -18,13 +18,6 @@ const MIGRATIONS: Migration[] = [
   {
     version: 1,
     name: "create_users_and_contracts_schema",
-    checksumSource: [
-      "CREATE TABLE IF NOT EXISTS users (",
-      "CREATE TABLE IF NOT EXISTS contracts (",
-      "CREATE INDEX IF NOT EXISTS idx_contracts_client_id",
-      "CREATE INDEX IF NOT EXISTS idx_contracts_freelancer_id",
-      "CREATE INDEX IF NOT EXISTS idx_contracts_status",
-    ].join("\n"),
     up: (db) => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS users (
@@ -63,9 +56,6 @@ const MIGRATIONS: Migration[] = [
   {
     version: 2,
     name: "add_contract_version_column",
-    checksumSource: [
-      "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)",
-    ].join("\n"),
     up: (db) => {
       const columns = db.pragma("table_info(contracts)") as Array<{ name: string }>;
       const hasVersion = columns.some((col) => col.name === "version");
@@ -150,11 +140,6 @@ const MIGRATIONS: Migration[] = [
 MIGRATIONS.push({
   version: 6,
   name: "create_deployment_history_table",
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS deployment_history (",
-    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_from",
-    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_to",
-  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS deployment_history (
@@ -179,11 +164,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 7,
   name: "add_auth_columns_to_users",
-  checksumSource: [
-    "DROP TABLE IF EXISTS users",
-    "CREATE TABLE users (password_hash TEXT, refresh_token_hash TEXT)",
-    "INSERT INTO users (id, username, email, role, password_hash, refresh_token_hash, created_at)",
-  ].join("\n"),
   up: (db) => {
     const columns = db.pragma("table_info(users)") as Array<{ name: string }>;
     const hasPasswordHash = columns.some((col) => col.name === "password_hash");
@@ -237,10 +217,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 8,
   name: "create_retention_storage_tables",
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS retention_local (",
-    "CREATE TABLE IF NOT EXISTS retention_archive (",
-  ].join("\n"),
   up: (db) => {
     // The retention module uses two independent provider instances (local + archive),
     // so we create two physically separate tables rather than a single table with a
@@ -281,9 +257,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 9,
   name: "add_started_at_to_transactions",
-  checksumSource: [
-    "ALTER TABLE transactions ADD COLUMN started_at TEXT",
-  ].join("\n"),
   up: (db) => {
     // Check if the column already exists to prevent errors during repeated migrations
     const columns = db.pragma("table_info(transactions)") as Array<{ name: string }>;
@@ -299,11 +272,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 10,
   name: "create_webhook_subscriptions_table",
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_subscriptions (",
-    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_consumer",
-    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_event",
-  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS webhook_subscriptions (
@@ -326,9 +294,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 11,
   name: "add_normalized_email_unique_index",
-  checksumSource: [
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_normalized ON users (lower(trim(email)))",
-  ].join("\n"),
   up: (db) => {
     // Duplicate emails that differ only by surrounding whitespace or letter
     // case must be rejected. A plain UNIQUE(email) constraint compares the raw
@@ -346,11 +311,6 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 12,
   name: "create_notifications_table",
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS notifications (",
-    "CREATE INDEX IF NOT EXISTS idx_notifications_user_id",
-    "CREATE INDEX IF NOT EXISTS idx_notifications_created_at",
-  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS notifications (
@@ -554,551 +514,3 @@ export function runMigrations(
 export function getLatestSchemaVersion(): number {
   return MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 }
-
-// Version 13: DLQ storage tables
-MIGRATIONS.push({
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-    "id TEXT PRIMARY KEY,",
-    "webhook_id TEXT NOT NULL,",
-    "url TEXT NOT NULL,",
-    "body TEXT NOT NULL,",
-    "retry_count INTEGER NOT NULL DEFAULT 0,",
-    "webhook_secret TEXT,",
-    "failed_at TEXT NOT NULL,",
-    "last_error TEXT NOT NULL,",
-    "dedupe_key TEXT NOT NULL,",
-    "replayed_at TEXT,",
-    "replay_attempts INTEGER NOT NULL DEFAULT 0,",
-    "created_at TEXT NOT NULL,",
-    "updated_at TEXT NOT NULL",
-    "UNIQUE(dedupe_key)"
-  ].join('\n'),
-  up: (db) => {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS webhook_dlq (
-        id TEXT PRIMARY KEY,
-        webhook_id TEXT NOT NULL,
-        url TEXT NOT NULL,
-        body TEXT NOT NULL,
-        retry_count INTEGER NOT NULL DEFAULT 0,
-        webhook_secret TEXT,
-        failed_at TEXT NOT NULL,
-        last_error TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL,
-        replayed_at TEXT,
-        replay_attempts INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-    `);
-  },
-  checksumSource: undefined,
-  up: (db) => {
-    // Check if tables already exist to avoid conflicts
-    const tables = db.pragma('table_info(webhook_dlq)');
-    const hasTables = tables.length > 0;
-    
-    if (!hasTables) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS webhook_dlq (
-          id TEXT PRIMARY KEY,
-          webhook_id TEXT NOT NULL,
-          url TEXT NOT NULL,
-          body TEXT NOT NULL,
-          retry_count INTEGER NOT NULL DEFAULT 0,
-          webhook_secret TEXT,
-          failed_at TEXT NOT NULL,
-        last_error TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL,
-        replayed_at TEXT,
-        replay_attempts INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-    `);
-  }
-});
-MIGRATIONS.push({
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_dlq (,
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-    "id TEXT PRIMARY KEY, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    id TEXT PRIMARY KEY, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    webhook_secret TEXT, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-
-
-  {
-    version: 13,
-    name: 'create_webhook_dlq_tables',
-    checksumSource: [
-      "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-      "id TEXT PRIMARY KEY,",
-      "webhook_id TEXT NOT NULL,",
-      "url TEXT NOT NULL,",
-      "body TEXT NOT NULL,",
-      "retry_count INTEGER NOT NULL DEFAULT 0,",
-      "webhook_secret TEXT,",
-      "failed_at TEXT NOT NULL,",
-      "last_error TEXT NOT NULL,",
-      "dedupe_key TEXT NOT NULL,",
-      "replayed_at TEXT,",
-      "replay_attempts INTEGER NOT NULL DEFAULT 0,",
-      "created_at TEXT NOT NULL,",
-      "updated_at TEXT NOT NULL",
-      "UNIQUE(dedupe_key)",
-    ].join('\n'),
-    up: (db) => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS webhook_dlq (
-          id TEXT PRIMARY KEY,
-          webhook_id TEXT NOT NULL,
-          url TEXT NOT NULL,
-          body TEXT NOT NULL,
-          retry_count INTEGER NOT NULL DEFAULT 0,
-          webhook_secret TEXT,
-          failed_at TEXT NOT NULL,
-          last_error TEXT NOT NULL,
-          dedupe_key TEXT NOT NULL,
-          replayed_at TEXT,
-          replay_attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      `);
-      db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-        CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-      `);
-  },
-  checksumSource: undefined,
-  up: (db) => {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS webhook_dlq (
-        id TEXT PRIMARY KEY,
-        webhook_id TEXT NOT NULL,
-        url TEXT NOT NULL,
-        body TEXT NOT NULL,
-        retry_count INTEGER NOT NULL DEFAULT 0,
-        webhook_secret TEXT,
-        failed_at TEXT NOT NULL,
-        last_error TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL,
-        replayed_at TEXT,
-        replay_attempts INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-    `);
-  }
-);
-
-// Version 13: DLQ storage tables
-MIGRATIONS.push({
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-    "id TEXT PRIMARY KEY,",
-    "webhook_id TEXT NOT NULL,",
-    "url TEXT NOT NULL,",
-    "body TEXT NOT NULL,",
-    "retry_count INTEGER NOT NULL DEFAULT 0,",
-    "webhook_secret TEXT,",
-    "failed_at TEXT NOT NULL,",
-    "last_error TEXT NOT NULL,",
-    "dedupe_key TEXT NOT NULL,",
-    "replayed_at TEXT,",
-    "replay_attempts INTEGER NOT NULL DEFAULT 0,",
-    "created_at TEXT NOT NULL,",
-    "updated_at TEXT NOT NULL",
-    "UNIQUE(dedupe_key)"
-  ].join('\n'),
-  up: (db) => {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS webhook_dlq (
-        id TEXT PRIMARY KEY,
-        webhook_id TEXT NOT NULL,
-        url TEXT NOT NULL,
-        body TEXT NOT NULL,
-        retry_count INTEGER NOT NULL DEFAULT 0,
-        webhook_secret TEXT,
-        failed_at TEXT NOT NULL,
-        last_error TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL,
-        replayed_at TEXT,
-        replay_attempts INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-    `);
-  }
-});
-
-MIGRATIONS.push({
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-  {
-    version: 13,
-    name: 'create_webhook_dlq_tables',
-    checksumSource: [
-      "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-      "id TEXT PRIMARY KEY,",
-      "webhook_id TEXT NOT NULL,",
-      "url TEXT NOT NULL,",
-      "body TEXT NOT NULL,",
-      "retry_count INTEGER NOT NULL DEFAULT 0,",
-      "webhook_secret TEXT,",
-      "failed_at TEXT NOT NULL,",
-      "last_error TEXT NOT NULL,",
-      "dedupe_key TEXT NOT NULL,",
-      "replayed_at TEXT,",
-      "replay_attempts INTEGER NOT NULL DEFAULT 0,",
-      "created_at TEXT NOT NULL,",
-      "updated_at TEXT NOT NULL",
-      "UNIQUE(dedupe_key)",
-    ].join('\n'),
-    up: (db) => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS webhook_dlq (
-          id TEXT PRIMARY KEY,
-          webhook_id TEXT NOT NULL,
-          url TEXT NOT NULL,
-          body TEXT NOT NULL,
-          retry_count INTEGER NOT NULL DEFAULT 0,
-          webhook_secret TEXT,
-          failed_at TEXT NOT NULL,
-          last_error TEXT NOT NULL,
-          dedupe_key TEXT NOT NULL,
-          replayed_at TEXT,
-          replay_attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
-      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
-    `);
-  }
-});
-
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    "CREATE TABLE IF NOT EXISTS webhook_dlq (",
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    retry_count INTEGER NOT NULL DEFAULT 0, \n,
-    webhook_secret TEXT, \n,
-    failed_at TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    dedupe_key TEXT NOT NULL, \n,
-    replayed_at TEXT, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    created_at TEXT NOT NULL, \n,
-    updated_at TEXT NOT NULL \n,
-    UNIQUE(dedupe_key) \n
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-    url TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    webhook_secret TEXT, \n,
-MIGRATIONS.push({
-
-
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: [
-    id TEXT PRIMARY KEY, \n,
-    webhook_id TEXT NOT NULL, \n,
-    body TEXT NOT NULL, \n,
-    last_error TEXT NOT NULL, \n,
-    replay_attempts INTEGER NOT NULL DEFAULT 0, \n,
-    updated_at TEXT NOT NULL \n,
-  },
-  },
-  version: 13,
-  name: 'create_webhook_dlq_tables',
-  checksumSource: ["CREATE TABLE IF NOT EXISTS webhook_dlq (
-  },
-  },
-  },
-MIGRATIONS.push({
