@@ -15,17 +15,16 @@ import express from 'express';
 import { applySecurityMiddleware } from './middleware/security';
 import { MetricsService } from './observability/metrics-service';
 import { setMetricsService } from './observability/registry';
-import { rateLimitStore } from './config/rateLimit';
+import { rateLimitStore, apiKeysRateLimitStore } from './config/rateLimit';
 import { notFoundHandler, errorHandler } from './middleware/errorHandlers';
 import { healthRouter as legacyHealthRouter } from './routes/health';
 import { healthRouter as readinessHealthRouter } from './health';
 import { validateEnv } from './config/env.schema';
 import { createRequestLimitsMiddleware } from './middleware/requestLimits';
-import apiKeysRouter from './routes/apiKeys.routes';
 
 import contractsModuleRouter, { createContractsRouter } from './routes/contracts.routes';
 import eventsRouter from './routes/events.routes';
-import { createDisputesRouter } from './routes/disputes.routes';
+import disputesRouter, { createDisputesRouter } from './routes/disputes.routes';
 import { createMetricsRouter } from './routes/metrics.routes';
 import { metricsAuthMiddleware } from './middleware/metricsAuth';
 
@@ -111,7 +110,6 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/api/v1/disputes', disputesRouter);
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
-  app.use('/api/v1', apiKeysRouter);
   app.use('/api/v1/admin', adminRouter);
   app.use('/api/v1/admin/deploy', deployRouter);
   if (features.webhooksEnabled) {

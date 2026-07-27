@@ -47,6 +47,7 @@ export interface AuditRouterOptions {
    * `rateLimitConfig.auditIntegrity` in `src/config/rateLimit.ts`.
    */
   integrityMiddleware?: RequestHandler[];
+  bulkMiddleware?: RequestHandler[];
 }
 
 function buildValidationErrorResponse(requestId: string, error: ZodError): ValidationErrorResponse {
@@ -151,19 +152,29 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     ...accessMiddleware,
     compression({ threshold: 1024 }),
     (req: Request, res: Response): void => {
-    try {
-      const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
-      res.json(result);
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-    }
-  });
+      const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });
+      if (!parsed) {
+        return;
+      }
+      try {
+        const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
+        res.json(result);
+      } catch (error) {
+        res.status(400).json({ error: (error as Error).message });
+      }
+    },
+  );
 
   /**
    * GET /api/v1/audit/export
    * Streams a file-backed NDJSON export for compliance downloads.
    */
   router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response): Promise<void> => {
+    const parsed = parseAuditQueryOrRespond(req, res, { maxLimit: 50000 });
+    if (!parsed) {
+      return;
+    }
+
     let exportResult: AuditExportResult | undefined;
 
     try {

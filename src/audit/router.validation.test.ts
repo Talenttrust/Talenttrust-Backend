@@ -260,6 +260,7 @@ describe('GET /export error classification (non-validation failures)', () => {
     } as unknown as AuditExportService;
 
     const app = express();
+    app.use(express.json());
     app.use('/api/v1/audit', createAuditRouter({ service, exportService: brokenExportService }));
     return app;
   }
