@@ -3,10 +3,10 @@ import {
   MilestoneConflictError,
   MilestoneNotFoundError,
   milestonesService,
-  type CreateMilestoneInput,
 } from '../services/milestones.service';
 import { SoftDeleteRetentionError } from '../utils/softDelete';
 import { fail, ok } from '../utils/apiResponse';
+import { createMilestoneSchema, type CreateMilestoneInput } from '../modules/contracts/dto/milestones.dto';
 
 function serializeMilestone(m: {
   id: string;
@@ -73,11 +73,7 @@ export class MilestonesSoftDeleteController {
   public create(req: Request, res: Response, next: NextFunction): void {
     try {
       const contractId = req.params.id!;
-      const body = (req.body ?? {}) as CreateMilestoneInput;
-      if (!body.title || typeof body.amount !== 'number') {
-        fail(res, 'validation_error', 'title and amount are required', 400);
-        return;
-      }
+      const body = req.body as CreateMilestoneInput;
       const created = milestonesService.create(contractId, body);
       ok(res, { milestone: serializeMilestone(created) }, undefined, 201);
     } catch (error) {

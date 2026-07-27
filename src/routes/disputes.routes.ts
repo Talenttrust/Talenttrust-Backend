@@ -45,25 +45,15 @@ import {
 import { features } from '../config/features';
 import { ok, fail } from '../utils/apiResponse';
 import { getRequestLogger, getRequestContext } from '../utils/correlationId';
+import { createDisputesController } from '../controllers/disputes.controller';
+import type { Logger } from '../logger';
+import type { MetricsServiceLike } from '../observability/metrics-service';
 
 export interface DisputesRouterOptions {
   /** Optional metrics service; when omitted, metrics are skipped. */
   metricsService?: Pick<MetricsServiceLike, 'recordDisputesRequest'>;
   /** Optional logger override (tests). Defaults to request-scoped or root logger. */
   log?: Logger;
-}
-
-// ── Feature flag — gate all disputes routes ───────────────────────────────────
-router.use((_req: Request, res: Response, next: NextFunction) => {
-  if (!features.disputesEnabled) {
-    fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
-    return;
-  }
-  if (error instanceof SoftDeleteRetentionError) {
-    fail(res, error.code, error.message, error.statusCode);
-    return true;
-  }
-  return false;
 }
 
 /**
@@ -75,6 +65,15 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   const router = Router();
   const controller = createDisputesController();
 
+  // ── Feature flag — gate all disputes routes ───────────────────────────────────
+  router.use((_req: Request, res: Response, next: NextFunction) => {
+    if (!features.disputesEnabled) {
+      fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
+      return;
+    }
+    next();
+  });
+
   // Observability first so duration/status capture includes auth + rate-limit outcomes.
   router.use(createDisputesObservabilityMiddleware(options));
 
@@ -82,128 +81,162 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   const disputesLimiter = createRateLimiter(rateLimitConfig.disputes);
   router.use(disputesLimiter);
 
-// ── GET / — list disputes ─────────────────────────────────────────────────────
-/** @permission disputes:list — admin, auditor, client (ownOnly), freelancer (ownOnly) */
-router.get(
-  '/',
-  requirePermission('disputes', 'list'),
-  validateQuery(listDisputesQuerySchema),
-  (req: Request, res: Response) => {
-    const log = getRequestLogger(res);
-    const { correlationId } = getRequestContext(res);
-    log.info('Listing disputes', { query: req.query });
+  // ── GET / — list disputes ─────────────────────────────────────────────────────
+  /** @permission disputes:list — admin, auditor, client (ownOnly), freelancer (ownOnly) */
+  router.get(
+    '/',
+    requirePermission('disputes', 'list'),
+    validateQuery(listDisputesQuerySchema),
+    (req: Request, res: Response) => {
+      const log = getRequestLogger(res);
+      const { correlationId } = getRequestContext(res);
+      log.info('Listing disputes', { query: req.query });
 
-    ok(
-      res,
-      { disputes: [], total: 0 },
-      correlationId ? { correlationId } : undefined,
-    );
-  },
-);
+      ok(
+        res,
+        { disputes: [], total: 0 },
+        correlationId ? { correlationId } : undefined,
+      );
+    },
+  );
 
-// ── GET /:id — get a single dispute ───────────────────────────────────────────
-/** @permission disputes:read — admin, auditor, client (ownOnly), freelancer (ownOnly) */
-router.get(
-  '/:id',
-  requirePermission('disputes', 'read'),
-  validateParams(disputeParamsSchema),
-  (req: Request, res: Response) => {
-    const log = getRequestLogger(res);
-    const { correlationId } = getRequestContext(res);
-    const disputeId = req.params.id;
-    log.info('Getting dispute', { disputeId });
+  // ── GET /:id — get a single dispute ───────────────────────────────────────────
+  /** @permission disputes:read — admin, auditor, client (ownOnly), freelancer (ownOnly) */
+  router.get(
+    '/:id',
+    requirePermission('disputes', 'read'),
+    validateParams(disputeParamsSchema),
+    (req: Request, res: Response) => {
+      const log = getRequestLogger(res);
+      const { correlationId } = getRequestContext(res);
+      const disputeId = req.params.id;
+      log.info('Getting dispute', { disputeId });
 
-    ok(
-      res,
-      {
-        dispute: {
-          id: disputeId,
-          status: 'open',
-          createdAt: new Date().toISOString(),
+      ok(
+        res,
+        {
+          dispute: {
+            id: disputeId,
+            status: 'open',
+            createdAt: new Date().toISOString(),
+          },
         },
-      },
-      correlationId ? { correlationId } : undefined,
-    );
-  },
-);
+        correlationId ? { correlationId } : undefined,
+      );
+    },
+  );
 
-// ── POST / — create a new dispute ─────────────────────────────────────────────
-/** @permission disputes:create — admin, client, freelancer */
-router.post(
-  '/',
-  requirePermission('disputes', 'create'),
-  validateRequest(createDisputeSchema),
-  (req: Request, res: Response) => {
-    const log = getRequestLogger(res);
-    const { correlationId } = getRequestContext(res);
-    const body = req.body ?? {};
-    const disputeId = `dispute-${Date.now()}`;
-    log.info('Creating dispute', { disputeId });
+  // ── POST / — create a new dispute ─────────────────────────────────────────────
+  /** @permission disputes:create — admin, client, freelancer */
+  router.post(
+    '/',
+    requirePermission('disputes', 'create'),
+    validateRequest(createDisputeSchema),
+    (req: Request, res: Response) => {
+      const log = getRequestLogger(res);
+      const { correlationId } = getRequestContext(res);
+      const body = req.body ?? {};
+      const disputeId = `dispute-${Date.now()}`;
+      log.info('Creating dispute', { disputeId });
 
-    ok(
-      res,
-      {
-        dispute: {
-          id: disputeId,
-          ...body,
-          status: 'open',
-          createdAt: new Date().toISOString(),
+      ok(
+        res,
+        {
+          dispute: {
+            id: disputeId,
+            ...body,
+            status: 'open',
+            createdAt: new Date().toISOString(),
+          },
         },
-      },
-      correlationId ? { correlationId } : undefined,
-      201,
-    );
-  },
-);
+        correlationId ? { correlationId } : undefined,
+        201,
+      );
+    },
+  );
 
-// ── PATCH /:id — update a dispute ────────────────────────────────────────────
-/** @permission disputes:update — admin, client (ownOnly) */
-router.patch(
-  '/:id',
-  requirePermission('disputes', 'update'),
-  validateSchema(z.object({
-    body: updateDisputeSchema,
-    params: disputeParamsSchema,
-  })),
-  (req: Request, res: Response) => {
-    const log = getRequestLogger(res);
-    const { correlationId } = getRequestContext(res);
-    const disputeId = req.params.id;
-    const body = req.body ?? {};
-    log.info('Updating dispute', { disputeId, updateFields: Object.keys(body) });
+  // ── PATCH /:id — update a dispute ────────────────────────────────────────────
+  /** @permission disputes:update — admin, client (ownOnly) */
+  router.patch(
+    '/:id',
+    requirePermission('disputes', 'update'),
+    validateSchema(z.object({
+      body: updateDisputeSchema,
+      params: disputeParamsSchema,
+    })),
+    (req: Request, res: Response) => {
+      const log = getRequestLogger(res);
+      const { correlationId } = getRequestContext(res);
+      const disputeId = req.params.id;
+      const body = req.body ?? {};
+      log.info('Updating dispute', { disputeId, updateFields: Object.keys(body) });
 
-    ok(
-      res,
-      {
-        dispute: {
-          id: disputeId,
-          ...body,
-          updatedAt: new Date().toISOString(),
+      ok(
+        res,
+        {
+          dispute: {
+            id: disputeId,
+            ...body,
+            updatedAt: new Date().toISOString(),
+          },
         },
-      },
-      correlationId ? { correlationId } : undefined,
-    );
-  },
-);
+        correlationId ? { correlationId } : undefined,
+      );
+    },
+  );
 
-// ── DELETE /:id — delete a dispute ────────────────────────────────────────────
-/** @permission disputes:delete — admin only */
-router.delete(
-  '/:id',
-  requirePermission('disputes', 'delete'),
-  (req: Request, res: Response) => {
-    const log = getRequestLogger(res);
-    const { correlationId } = getRequestContext(res);
-    const disputeId = req.params.id;
-    log.info('Deleting dispute', { disputeId });
+  // ── DELETE /:id — delete a dispute ────────────────────────────────────────────
+  /** @permission disputes:delete — admin only */
+  router.delete(
+    '/:id',
+    requirePermission('disputes', 'delete'),
+    (req: Request, res: Response) => {
+      const log = getRequestLogger(res);
+      const { correlationId } = getRequestContext(res);
+      const disputeId = req.params.id;
+      log.info('Deleting dispute', { disputeId });
 
-    ok(
-      res,
-      { message: `Dispute ${disputeId} deleted successfully` },
-      correlationId ? { correlationId } : undefined,
-    );
-  },
-);
+      ok(
+        res,
+        { message: `Dispute ${disputeId} deleted successfully` },
+        correlationId ? { correlationId } : undefined,
+      );
+    },
+  );
+
+  return router;
+}
+
+/**
+ * Create observability middleware for disputes routes.
+ * Records metrics and structured logs for each request.
+ */
+export function createDisputesObservabilityMiddleware(options: DisputesRouterOptions = {}) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const startTime = Date.now();
+    const log = options.log || getRequestLogger(res);
+
+    res.on('finish', () => {
+      const duration = Date.now() - startTime;
+      const statusCode = res.statusCode;
+      
+      // Record metrics if service is available
+      if (options.metricsService && options.metricsService.recordDisputesRequest) {
+        options.metricsService.recordDisputesRequest(duration);
+      }
+
+      // Log request completion
+      log.info('disputes_request', {
+        statusCode,
+        duration,
+        method: req.method,
+        path: req.path,
+      });
+    });
+
+    next();
+  };
+}
 
 function formatExpressPath(path: unknown): string | null {
   if (typeof path === 'string') {

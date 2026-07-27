@@ -27,13 +27,14 @@ import { pipeline } from 'stream/promises';
 import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
-import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
+import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
 import type { AuditQuery } from './types';
 import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
 import { idempotencyMiddleware } from '../middleware/idempotency';
 import { validateRequest } from '../middleware/validate.middleware';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
+import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -47,21 +48,19 @@ export interface AuditRouterOptions {
    * `rateLimitConfig.auditIntegrity` in `src/config/rateLimit.ts`.
    */
   integrityMiddleware?: RequestHandler[];
+  bulkMiddleware?: RequestHandler[];
 }
 
-function buildValidationErrorResponse(requestId: string, error: ZodError): ValidationErrorResponse {
+function buildValidationErrorResponse(requestId: string, correlationId: string | undefined, error: ZodError): ValidationErrorResponse {
   return {
     error: {
       code: 'validation_error',
       message: 'Request validation failed',
       requestId,
+      ...(correlationId !== undefined && { correlationId }),
       details: mapZodErrorToDetails(error),
     },
   };
-}
-
-function getRequestId(res: Response): string {
-  return typeof res.locals['requestId'] === 'string' ? res.locals['requestId'] : 'unknown';
 }
 
 /**
@@ -79,7 +78,9 @@ function parseAuditQueryOrRespond(
   const result = buildAuditQuerySchema(options).safeParse(req.query);
 
   if (!result.success) {
-    res.status(400).json(buildValidationErrorResponse(getRequestId(res), result.error));
+    const requestId = getRequestIdFromUtils(res);
+    const correlationId = getCorrelationId(res);
+    res.status(400).json(buildValidationErrorResponse(requestId, correlationId, result.error));
     return undefined;
   }
 
@@ -128,16 +129,31 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
         const parseResult = createAuditEntryBodySchema.safeParse(req.body);
 
         if (!parseResult.success) {
-          res.status(400).json(buildValidationErrorResponse(getRequestId(res), parseResult.error));
+          const requestId = getRequestIdFromUtils(res);
+          const correlationId = getCorrelationId(res);
+          res.status(400).json(buildValidationErrorResponse(requestId, correlationId, parseResult.error));
           return;
         }
 
-        const entry = service.log(parseResult.data);
+        // Propagate correlation ID from request context to audit entry
+        const correlationId = getCorrelationId(res);
+        const entryData = parseResult.data;
+        if (correlationId && !entryData.correlationId) {
+          entryData.correlationId = correlationId;
+        }
+
+        const entry = service.log(entryData);
         res.status(201).json(entry);
       } catch (error) {
         const message = (error as Error).message;
         const status = message.startsWith('Missing required fields:') ? 400 : 500;
-        res.status(status).json({ error: message });
+        const requestId = getRequestIdFromUtils(res);
+        const correlationId = getCorrelationId(res);
+        res.status(status).json({ 
+          error: message,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       }
     },
   );
@@ -153,9 +169,21 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     (req: Request, res: Response): void => {
     try {
       const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
-      res.json(result);
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.json({
+        ...result,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(400).json({ 
+        error: (error as Error).message,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
     }
   });
 
@@ -168,9 +196,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
 
     try {
       const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
-      const correlationId = typeof res.locals['requestId'] === 'string'
-        ? res.locals['requestId']
-        : undefined;
+      const correlationId = getCorrelationId(res);
 
       exportResult = await service.exportAuditLogs(
         req.query as Record<string, unknown>,
@@ -186,7 +212,13 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     } catch (error) {
       if (!res.headersSent) {
         const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
-        res.status(status).json({ error: (error as Error).message });
+        const requestId = getRequestIdFromUtils(res);
+        const correlationId = getCorrelationId(res);
+        res.status(status).json({ 
+          error: [(error as Error).message],
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       }
     } finally {
       if (exportResult) {
@@ -202,7 +234,13 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
    */
   router.get('/integrity', ...accessMiddleware, ...integrityMiddleware, (_req: Request, res: Response): void => {
     const { report, status } = service.checkIntegrity();
-    res.status(status).json(report);
+    const requestId = getRequestIdFromUtils(res);
+    const correlationId = getCorrelationId(res);
+    res.status(status).json({
+      ...report,
+      requestId,
+      ...(correlationId !== undefined && { correlationId }),
+    });
   });
 
   /**
@@ -212,7 +250,13 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   router.get('/:id', ...accessMiddleware, (req: Request, res: Response): void => {
     const entry = service.getEntry(req.params['id'] ?? '');
     if (!entry) {
-      res.status(404).json({ error: 'Audit entry not found' });
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(404).json({ 
+        error: 'Audit entry not found',
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
       return;
     }
     res.json(toAuditEntryResponseDto(entry));

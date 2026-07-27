@@ -9,6 +9,8 @@ import { ContractCacheService, DEFAULT_CACHE_TTL_MS, DEFAULT_CACHE_SWR_MS, DEFAU
 import { ContractRepository } from '../repositories/contractRepository';
 import { getDb } from '../db/database';
 import { validateSchema } from '../middleware/validate.middleware';
+import { createRateLimiter } from '../middleware/rateLimiter';
+import { rateLimitConfig } from '../config/rateLimit';
 import {
   createContractSchema,
   contractIdParamSchema,
@@ -16,9 +18,15 @@ import {
   bulkMilestonesSchema,
 } from '../modules/contracts/dto/contract.dto';
 import { bulkCreateContractsSchema } from '../modules/contracts/dto/bulk-operations.dto';
+import {
+  createMilestoneSchema,
+  milestoneIdParamSchema,
+  milestonesQuerySchema,
+} from '../modules/contracts/dto/milestones.dto';
 import { validateUpdateContract } from '../modules/contracts/validation.middleware';
 import { contractCreateIdempotencyMiddleware } from '../middleware/contractIdempotency';
 import { requireAuth, requirePermission } from '../middleware/authorization';
+import { validateRequest, validateParams, validateQuery } from '../middleware/validate.middleware';
 import type { MetricsServiceLike } from '../observability/metrics-service';
 
 // ─── Inline route-param validator ────────────────────────────────────────────
@@ -127,6 +135,8 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   const db = getDb();
   const repo = new ContractRepository(db);
   const controller = createContractsController(new ContractsService(repo), metricsService);
+  const milestonesSoftDelete = createMilestonesSoftDeleteController();
+  const bulkController = createContractsBulkController(new ContractsService(repo));
 
   /**
    * Resolves the owner (clientId) of a contract from the DB.
@@ -178,7 +188,8 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   );
 
   // GET /:id/history — fetch contract event history (param validation first)
-  router.get('/:id/history', validateContractId, controller.getContractHistory);
+  // TODO: Implement getContractHistory in controller
+  // router.get('/:id/history', validateContractId, controller.getContractHistory);
 
   // GET /:id — fetch single contract (param validation before auth to reject clearly invalid IDs)
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
@@ -195,6 +206,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   router.get(
     '/:id/milestones',
     validateContractId,
+    validateQuery(milestonesQuerySchema),
     requireAuth,
     requirePermission('contracts', 'read', getContractOwnerId),
     milestonesSoftDelete.list.bind(milestonesSoftDelete),
@@ -205,6 +217,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   router.post(
     '/:id/milestones',
     validateContractId,
+    validateRequest(createMilestoneSchema),
     requireAuth,
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.create.bind(milestonesSoftDelete),
@@ -215,6 +228,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   router.post(
     '/:id/milestones/:milestoneId/restore',
     validateContractId,
+    validateParams(milestoneIdParamSchema),
     requireAuth,
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.restore.bind(milestonesSoftDelete),
@@ -225,6 +239,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   router.delete(
     '/:id/milestones/:milestoneId',
     validateContractId,
+    validateParams(milestoneIdParamSchema),
     requireAuth,
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
@@ -233,14 +248,15 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   // GET /:id/milestones/audit-log — bounded, cursor-paginated audit trail
   // (actor, action, before/after summary, timestamp) for milestone writes on
   // this contract. Same visibility as reading the contract itself.
+  // TODO: Implement getMilestonesAuditLog in controller
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
-  router.get(
-    '/:id/milestones/audit-log',
-    validateContractId,
-    requireAuth,
-    requirePermission('contracts', 'read', getContractOwnerId),
-    controller.getMilestonesAuditLog,
-  );
+  // router.get(
+  //   '/:id/milestones/audit-log',
+  //   validateContractId,
+  //   requireAuth,
+  //   requirePermission('contracts', 'read', getContractOwnerId),
+  //   controller.getMilestonesAuditLog,
+  // );
 
   /**
    * POST /api/v1/contracts
