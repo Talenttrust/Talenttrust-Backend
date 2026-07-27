@@ -25,8 +25,19 @@ import { validateEnv } from '../config/env.schema';
 export interface RequestAuditHelper {
   /**
    * Emits an audit event scoped to the current HTTP request.
-   * Automatically injects ipAddress and correlationId from the request.
-   * When AUDIT_ENABLED=false this is a no-op and returns a stub entry.
+   *
+   * The middleware automatically injects `ipAddress` (from `req.ip` or the
+   * raw socket) and `correlationId` (from the `X-Correlation-ID` header) so
+   * callers do not need to supply those fields manually.
+   *
+   * When `AUDIT_ENABLED=false` this is a **no-op**: it returns a stub
+   * `AuditEntry` with empty `id`/`hash` fields and does **not** write
+   * anything to the underlying store.
+   *
+   * @param input - Audit event details, excluding `ipAddress` and
+   *   `correlationId` (injected from the request context).
+   * @returns The persisted {@link AuditEntry}, or a stub entry when the
+   *   feature flag is off.
    */
   log(input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>): AuditEntry;
 }
