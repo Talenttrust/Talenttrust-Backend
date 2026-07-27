@@ -32,15 +32,42 @@ import * as crypto from 'crypto';
 import { DeduplicationManager } from './deduplication';
 import { ContractEvent, JsonValue } from '../events/types';
 
-// SECURITY-TEST NOTE: the `crypto.timingSafeEqual` spy below depends on
-// `src/utils/deduplication.ts` doing `import { timingSafeEqual } from
-// 'crypto'` (a destructured named import). JS resolves destructured
-// module exports at call time, so the spy intercepts today, but a
-// future refactor to `import * as cryptoNode from 'crypto'` or any
-// other non-destructured shape would silently turn the spy into a
-// no-op — and the length-guard assertions below would pass for the
-// wrong reason. Pair any future import-shape refactor with a manual
-// re-validation of these tests.
+// SECURITY-TEST NOTE (interception mechanism):
+//   We intercept `crypto.timingSafeEqual` via `jest.mock('crypto', …)`
+//   at module-load time. The mock replaces the named export with a
+//   `jest.fn` that wraps the real implementation, so the production
+//   code (`src/utils/deduplication.ts`, doing
+//   `import { timingSafeEqual } from 'crypto'`) resolves to the SAME
+//   mocked binding — every `timingSafeEqual(...)` call from
+//   production lands in our jest.fn, and assertions on
+//   `crypto.timingSafeEqual.mock.calls` reflect actual invocations.
+//
+//   Why not `jest.spyOn(crypto, 'timingSafeEqual')`? On Node 18+ the
+//   crypto module exports are non-configurable by default, so
+//   `jest.spyOn` throws `TypeError: Cannot redefine property:
+//   timingSafeEqual`. `jest.mock` at module load replaces the export
+//   descriptor entirely before any code captures the binding.
+//
+//   We pass `actual.timingSafeEqual` DIRECTLY to `jest.fn(...)` rather
+//   than re-declaring its parameter types. This avoids parameter-type
+//   contravariance rejections under `strictFunctionTypes` (the wrapper
+//   inherits the real function's full signature verbatim, including
+//   `BinaryLike` overloads).
+//
+//   Pair any future refactor of dedup.ts's import shape (e.g.,
+//   `import * as cryptoNode from 'crypto'`, re-export wrappers, etc.)
+//   with a manual re-validation: a broken interception point would
+//   silently let the length-guard assertions pass for the wrong
+//   reason.
+jest.mock('crypto', () => {
+  const actual = jest.requireActual<typeof import('crypto')>('crypto');
+  return {
+    ...actual,
+    // Delegate to the real implementation; jest wraps it so call
+    // arguments land in `mock.calls`.
+    timingSafeEqual: jest.fn(actual.timingSafeEqual),
+  };
+});
 
 // ── Shared test helpers (TSDoc per issue spec) ────────────────────────────────
 
@@ -200,14 +227,16 @@ describe('DeduplicationManager — payload hashing (stability & distinctness)', 
 });
 
 describe('DeduplicationManager — comparePayloadHashes (timing-safe + length guard)', () => {
-  let spy: jest.SpyInstance;
+  // `crypto.timingSafeEqual` is the jest.fn installed by the top-of-file
+  // `jest.mock('crypto', …)` factory. We use `mockClear()` per test so
+  // assertions on call count are scoped to the single call we make.
+  let tseMock: jest.MockedFunction<typeof crypto.timingSafeEqual>;
 
   beforeEach(() => {
-    spy = jest.spyOn(crypto, 'timingSafeEqual');
-  });
-
-  afterEach(() => {
-    spy.mockRestore();
+    tseMock = crypto.timingSafeEqual as jest.MockedFunction<
+      typeof crypto.timingSafeEqual
+    >;
+    tseMock.mockClear();
   });
 
   it('returns true for identical hashes', () => {
@@ -234,14 +263,17 @@ describe('DeduplicationManager — comparePayloadHashes (timing-safe + length gu
 
     DeduplicationManager.comparePayloadHashes(short, long);
 
-    expect(spy).toHaveBeenCalledTimes(1);
-    const [bufA, bufB] = spy.mock.calls[0];
+    expect(tseMock).toHaveBeenCalledTimes(1);
+    const [bufA, bufB] = (tseMock.mock.calls[0] ?? []) as [
+      NodeJS.ArrayBufferView,
+      NodeJS.ArrayBufferView,
+    ];
     // Both buffers passed to timingSafeEqual MUST be the SAME length
     // (we call it with `actual` vs `actual` to keep wall-time stable).
-    expect(bufA.length).toBe(bufB.length);
+    expect(bufA.byteLength).toBe(bufB.byteLength);
     // And both must equal the SHORTER buffer (length 2 here).
-    expect(bufA.length).toBe(2);
-    expect(bufB.length).toBe(2);
+    expect(bufA.byteLength).toBe(2);
+    expect(bufB.byteLength).toBe(2);
   });
 
   it('SECURITY: returns false (does not throw) when comparing wildly different-length inputs', () => {
@@ -256,10 +288,13 @@ describe('DeduplicationManager — comparePayloadHashes (timing-safe + length gu
   it('SECURITY: empty-string vs non-empty never reaches timingSafeEqual with mismatched buffers', () => {
     // Buffer.from('', 'hex') is 0 bytes; everything else is N bytes.
     DeduplicationManager.comparePayloadHashes('', '00');
-    expect(spy).toHaveBeenCalledTimes(1);
-    const [bufA, bufB] = spy.mock.calls[0];
-    expect(bufA.length).toBe(bufB.length);
-    expect(bufA.length).toBe(0);
+    expect(tseMock).toHaveBeenCalledTimes(1);
+    const [bufA, bufB] = (tseMock.mock.calls[0] ?? []) as [
+      NodeJS.ArrayBufferView,
+      NodeJS.ArrayBufferView,
+    ];
+    expect(bufA.byteLength).toBe(bufB.byteLength);
+    expect(bufA.byteLength).toBe(0);
   });
 
   it('treats a valid 64-char hex digest vs an empty string as length-mismatch → false', () => {
@@ -272,13 +307,21 @@ describe('DeduplicationManager — comparePayloadHashes (timing-safe + length gu
     const a = DeduplicationManager.computePayloadHash({ x: 1 });
     const b = DeduplicationManager.computePayloadHash({ x: 2 });
     DeduplicationManager.comparePayloadHashes(a, b);
-    expect(spy).toHaveBeenCalledTimes(1);
-    const [bufA, bufB] = spy.mock.calls[0];
+    expect(tseMock).toHaveBeenCalledTimes(1);
+    const [bufA, bufB] = (tseMock.mock.calls[0] ?? []) as [
+      NodeJS.ArrayBufferView,
+      NodeJS.ArrayBufferView,
+    ];
     // Compare path — both must be 32-byte SHA-256 digests.
-    expect(bufA.length).toBe(32);
-    expect(bufB.length).toBe(32);
+    expect(bufA.byteLength).toBe(32);
+    expect(bufB.byteLength).toBe(32);
     // The buffers are NOT self-compared (unlike the length-guard path).
-    expect(Buffer.compare(bufA, bufB)).not.toBe(0);
+    // `Buffer.compare` on ArrayBufferView params: wrap each via
+    // `Uint8Array(view.buffer, view.byteOffset, view.byteLength)` so
+    // `Buffer.compare` accepts them without copy.
+    const u8a = new Uint8Array(bufA.buffer, bufA.byteOffset, bufA.byteLength);
+    const u8b = new Uint8Array(bufB.buffer, bufB.byteOffset, bufB.byteLength);
+    expect(Buffer.compare(u8a, u8b)).not.toBe(0);
   });
 });
 
