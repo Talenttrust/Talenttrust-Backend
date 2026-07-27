@@ -1,5 +1,7 @@
 /** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
+  forceExit: true,
+  detectOpenHandles: true,
   setupFiles: ['<rootDir>/src/test-setup.ts'],
   testPathIgnorePatterns: [
     '/node_modules/',
