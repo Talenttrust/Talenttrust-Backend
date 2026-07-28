@@ -12,8 +12,8 @@
 import express from 'express';
 import request from 'supertest';
 import { AuditStore } from './store';
-import { AuditService } from './service';
-import { AuditExportService } from './exportService';
+import { AuditService, auditService } from './service';
+import { AuditExportService, auditExportService } from './exportService';
 import { createAuditRouter } from './router';
 import type { AuditEntry } from './types';
 
@@ -256,28 +256,31 @@ describe('GET /export error classification (non-validation failures)', () => {
     const app = express();
     app.use(express.json());
 
-    const brokenExportService = {
-      createNdjsonExport: jest.fn().mockRejectedValue(exportError),
-    } as unknown as AuditExportService;
-
-    const mockAuditService = {
-      ...new AuditService(new AuditStore()),
+    const mockService = {
+      ...auditService,
       exportAuditLogs: jest.fn().mockRejectedValue(exportError),
     } as unknown as AuditService;
 
+    const mockExportService = {
+      ...auditExportService,
+      createNdjsonExport: jest.fn().mockRejectedValue(exportError),
+    } as unknown as AuditExportService;
+
     const router = createAuditRouter({
-      service: mockAuditService,
-      exportService: brokenExportService,
+      service: mockService,
+      exportService: mockExportService,
     });
 
     app.use('/api/v1/audit', router);
 
-    // Express 4-arg error handler prevents the unhandled rejection from
-    // destroying the TCP socket (TCPSERVERWRAP / serverAddress crash).
+    // 4-arg Express error handler — prevents rejected async promises from
+    // destroying the Supertest TCP socket (TCPSERVERWRAP / serverAddress crash).
     app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      const message = (err as Error)?.message || 'Internal Server Error';
+      const message = (err as Error)?.message || 'Export error';
       const status = message.startsWith('Invalid ') ? 400 : 500;
-      res.status(status).json({ error: message });
+      if (!res.headersSent) {
+        res.status(status).json({ error: message });
+      }
     });
 
     return app;

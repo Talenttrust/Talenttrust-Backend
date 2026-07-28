@@ -21,7 +21,7 @@
  *   see `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
-import { Router, Request, Response, type RequestHandler } from 'express';
+import { Router, Request, Response, NextFunction, type RequestHandler } from 'express';
 import type { ZodError } from 'zod';
 import { pipeline } from 'stream/promises';
 import { z } from 'zod';
@@ -254,7 +254,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
    * GET /api/v1/audit/export
    * Streams a file-backed NDJSON export for compliance downloads.
    */
-  router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response): Promise<void> => {
+  router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const parsed = parseAuditQueryOrRespond(req, res, { maxLimit: 50000 });
     if (!parsed) {
       return;
@@ -283,6 +283,9 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
       if (!res.headersSent) {
         const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
         res.status(status).json({ error: (error as Error).message });
+      } else {
+        // Headers already sent — delegate to Express error handler to close the socket cleanly.
+        next(error);
       }
     } finally {
       if (exportResult) {
