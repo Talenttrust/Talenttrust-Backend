@@ -21,7 +21,7 @@
  * - The item shape of each probe is not changed.
  */
 
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, RequestHandler } from "express";
 import { runHealthCheck } from "./checker";
 import { Probe, HealthResponse, ProbeResult } from "./types";
 import { logger as rootLogger, Logger } from "../logger";
@@ -33,6 +33,9 @@ import {
   paginateItems,
   clampPageSize,
 } from "./pagination";
+import { createRateLimiter, RateLimiterConfig } from "../middleware/rateLimiter";
+import { rateLimitConfig } from "../config/rateLimit";
+import { healthRateLimitKeyFn } from "./rateLimitKey";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,18 +49,16 @@ export interface HealthRouterOptions {
   /** List of probes to run. Defaults to the built-in probe registry. */
   probes?: Probe[];
   /** Optional metrics service for recording health status gauges. */
-  metricsService?: MetricsService;
+  metricsService?: MetricsService | Pick<MetricsServiceLike, "recordHealthStatus">;
   /** Optional logger override (defaults to the root application logger). */
-  log?: typeof rootLogger;
+  log?: typeof rootLogger | Pick<Logger, "info">;
+  /** Optional pre-built rate limiter middleware. */
+  rateLimiter?: RequestHandler;
+  /** Custom rate limiter options if not using pre-built rateLimiter. */
+  rateLimitOptions?: Partial<RateLimiterConfig>;
 }
 
 // ─── Builder ──────────────────────────────────────────────────────────────────
-
-export interface HealthRouterOptions {
-  probes?: Probe[];
-  metricsService?: Pick<MetricsServiceLike, "recordHealthStatus">;
-  log?: Pick<Logger, "info">;
-}
 
 /**
  * Build the health router.
@@ -72,6 +73,16 @@ export function buildHealthRouter(
   const opts = normalizeOptions(optionsOrProbes);
   const log = opts.log ?? rootLogger;
   const router = Router();
+
+  const limiter =
+    opts.rateLimiter ??
+    createRateLimiter({
+      ...rateLimitConfig.health,
+      ...opts.rateLimitOptions,
+      keyFn: opts.rateLimitOptions?.keyFn ?? healthRateLimitKeyFn,
+    });
+
+  router.use(limiter);
 
   router.get("/", validateQuery(HealthQuerySchema), async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store");
@@ -182,11 +193,7 @@ export function buildHealthRouter(
  */
 function normalizeOptions(
   input: Probe[] | HealthRouterOptions | undefined,
-): {
-  probes?: Probe[];
-  metricsService?: Pick<MetricsServiceLike, "recordHealthStatus">;
-  log?: Pick<Logger, "info">;
-} {
+): HealthRouterOptions {
   if (Array.isArray(input)) {
     return { probes: input };
   }
@@ -194,5 +201,7 @@ function normalizeOptions(
     probes: input?.probes,
     metricsService: input?.metricsService,
     log: input?.log,
+    rateLimiter: input?.rateLimiter,
+    rateLimitOptions: input?.rateLimitOptions,
   };
 }

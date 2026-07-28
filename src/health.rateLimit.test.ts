@@ -21,8 +21,9 @@ import { Server } from 'http';
 import { RateLimitStore } from './lib/rateLimitStore';
 import { createRateLimiter } from './middleware/rateLimiter';
 import { healthRateLimitKeyFn } from './health/rateLimitKey';
-import { healthRouter as readinessRouter } from './health';
-import { healthRouter as legacyRouter } from './routes/health';
+import { rateLimitStore } from './config/rateLimit';
+import { createHealthRouter } from './health';
+import { createHealthRouter as createLegacyHealthRouter } from './routes/health';
 
 jest.mock('./health/probes', () => ({
   dbProbe: jest.fn().mockResolvedValue({ name: 'db', ok: true, latencyMs: 1 }),
@@ -56,25 +57,26 @@ function buildTestApp(maxRequests = 3, windowMs = 60_000): Server {
     keyFn: healthRateLimitKeyFn,
   });
 
-  // Mount the readiness router with the test limiter applied BEFORE the router
-  const readiness = express.Router();
-  readiness.use(limiter);
-  readiness.use(readinessRouter);
+  // Build readiness router using options with custom rate limiter options
+  const readinessRouter = createHealthRouter({
+    rateLimiter: limiter,
+  });
 
-  // Mount the legacy router with the same limiter
-  const legacy = express.Router();
-  legacy.use(limiter);
-  legacy.use(legacyRouter);
+  // Build legacy router using options with custom rate limiter options
+  const legacyRouter = createLegacyHealthRouter({
+    rateLimiter: limiter,
+  });
 
-  app.use('/health', legacy);
-  app.use('/health', readiness);
+  app.use('/health', legacyRouter);
+  app.use('/health', readinessRouter);
 
   return app.listen(0);
 }
 
 async function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve, reject) =>
-    server.close((err) => (err ? reject(err) : resolve())),
+  if (!server) return;
+  return new Promise((resolve) =>
+    server.close(() => resolve()),
   );
 }
 
@@ -86,6 +88,7 @@ describe('health rate limiting — /health/live', () => {
   let server: Server;
 
   beforeEach(() => {
+    rateLimitStore.clear();
     server = buildTestApp(3);
   });
 
@@ -169,6 +172,7 @@ describe('health rate limiting — /health/ready', () => {
   let server: Server;
 
   beforeEach(() => {
+    rateLimitStore.clear();
     server = buildTestApp(3);
   });
 
@@ -196,6 +200,7 @@ describe('health rate limiting — GET /health', () => {
   let server: Server;
 
   beforeEach(() => {
+    rateLimitStore.clear();
     server = buildTestApp(3);
   });
 
@@ -226,6 +231,7 @@ describe('health rate limiting — POST /health', () => {
   let server: Server;
 
   beforeEach(() => {
+    rateLimitStore.clear();
     server = buildTestApp(3);
   });
 
@@ -257,6 +263,7 @@ describe('health rate limiting — client isolation', () => {
   let server: Server;
 
   beforeEach(() => {
+    rateLimitStore.clear();
     server = buildTestApp(2);
   });
 
@@ -364,6 +371,10 @@ describe('healthRateLimitKeyFn', () => {
 // ---------------------------------------------------------------------------
 
 describe('health rate limiting — config-driven limits', () => {
+  beforeEach(() => {
+    rateLimitStore.clear();
+  });
+
   it('respects a custom cap (1 request)', async () => {
     const server = buildTestApp(1);
 
@@ -411,6 +422,10 @@ describe('health rate limiting — config-driven limits', () => {
 // ---------------------------------------------------------------------------
 
 describe('health rate limiting — Retry-After accuracy', () => {
+  beforeEach(() => {
+    rateLimitStore.clear();
+  });
+
   it('Retry-After is a positive integer (seconds)', async () => {
     const server = buildTestApp(1);
 

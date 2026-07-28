@@ -32,15 +32,44 @@ import { createRateLimiter } from '../middleware/rateLimiter';
 import { rateLimitConfig } from '../config/rateLimit';
 import { healthRateLimitKeyFn } from '../health/rateLimitKey';
 
-export const healthRouter = Router();
+import { RequestHandler } from 'express';
+import { RateLimiterConfig } from '../middleware/rateLimiter';
 
-// Apply per-client rate limiter to all /health routes in this router.
-healthRouter.use(
-  createRateLimiter({
-    ...rateLimitConfig.health,
-    keyFn: healthRateLimitKeyFn,
-  }),
-);
+export interface CreateLegacyHealthRouterOptions {
+  rateLimiter?: RequestHandler;
+  rateLimitOptions?: Partial<RateLimiterConfig>;
+}
+
+export function createHealthRouter(options?: CreateLegacyHealthRouterOptions): Router {
+  const router = Router();
+
+  const limiter =
+    options?.rateLimiter ??
+    createRateLimiter({
+      ...rateLimitConfig.health,
+      ...options?.rateLimitOptions,
+      keyFn: options?.rateLimitOptions?.keyFn ?? healthRateLimitKeyFn,
+    });
+
+  router.get('/', limiter, validateQuery(HealthQuerySchema), (_req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'ok',
+      service: 'talenttrust-backend',
+    });
+  });
+
+  router.post('/', limiter, validateRequest(HealthWriteBodySchema), (_req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version ?? '0.1.0',
+    });
+  });
+
+  return router;
+}
+
+export const healthRouter = createHealthRouter();
 
 registry.registerPath({
   method: "get",
@@ -96,17 +125,4 @@ registry.registerPath({
   }
 });
 
-healthRouter.get('/', validateQuery(HealthQuerySchema), (_req: Request, res: Response) => {
-  res.status(200).json({
-    status: 'ok',
-    service: 'talenttrust-backend',
-  });
-});
 
-healthRouter.post('/', validateRequest(HealthWriteBodySchema), (_req: Request, res: Response) => {
-  res.status(200).json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    version: process.env.npm_package_version ?? '0.1.0',
-  });
-});
