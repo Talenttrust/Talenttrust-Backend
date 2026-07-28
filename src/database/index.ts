@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { Database, ContractMetadata, Contract, User } from './schema';
+import { Database, ContractMetadata, Contract, User, ApiKey } from './schema';
 
 const DB_PATH = path.join(__dirname, '../../data/database.json');
 
@@ -31,7 +31,8 @@ class DatabaseService {
       this.db = {
         contract_metadata: [],
         contracts: [],
-        users: []
+        users: [],
+      api_keys: []
       };
       await this.saveDatabase();
     }
@@ -176,9 +177,84 @@ class DatabaseService {
     this.db = {
       contract_metadata: [],
       contracts: [],
-      users: []
+      users: [],
+      api_keys: []
     };
     await this.saveDatabase();
+  }
+
+  // API Key operations
+  async createApiKey(data: {
+    name: string;
+    key_hash: string;
+    key_selector: string;
+    scope: string[];
+    created_by: string;
+    expires_at?: Date;
+    is_active: boolean;
+  }): Promise<ApiKey> {
+    const db = await this.loadDatabase();
+    const apiKey: ApiKey = {
+      id: require('crypto').randomUUID(),
+      name: data.name,
+      key_hash: data.key_hash,
+      key_selector: data.key_selector,
+      scope: data.scope,
+      created_by: data.created_by,
+      created_at: new Date(),
+      updated_at: new Date(),
+      expires_at: data.expires_at,
+      is_active: data.is_active,
+    };
+    db.api_keys.push(apiKey);
+    await this.saveDatabase();
+    return apiKey;
+  }
+
+  async getApiKeyBySelector(selector: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    return db.api_keys.find((k) => k.key_selector === selector && k.is_active) || null;
+  }
+
+  async getApiKeyById(id: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    return db.api_keys.find((k) => k.id === id) || null;
+  }
+
+  async updateApiKey(
+    id: string,
+    updates: Partial<Pick<ApiKey, 'key_selector' | 'last_used_at'>>
+  ): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    const index = db.api_keys.findIndex((k) => k.id === id);
+    if (index === -1) return null;
+    db.api_keys[index] = { ...db.api_keys[index], ...updates, updated_at: new Date() };
+    await this.saveDatabase();
+    return db.api_keys[index];
+  }
+
+  async rotateApiKey(id: string, keyHash: string, keySelector: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    const index = db.api_keys.findIndex((k) => k.id === id);
+    if (index === -1) return null;
+    db.api_keys[index] = {
+      ...db.api_keys[index],
+      key_hash: keyHash,
+      key_selector: keySelector,
+      updated_at: new Date(),
+    };
+    await this.saveDatabase();
+    return db.api_keys[index];
+  }
+
+  async deactivateApiKey(id: string): Promise<boolean> {
+    const db = await this.loadDatabase();
+    const index = db.api_keys.findIndex((k) => k.id === id);
+    if (index === -1) return false;
+    db.api_keys[index].is_active = false;
+    db.api_keys[index].updated_at = new Date();
+    await this.saveDatabase();
+    return true;
   }
 }
 
