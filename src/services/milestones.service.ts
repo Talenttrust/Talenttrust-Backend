@@ -8,10 +8,21 @@ import {
   isWithinRetentionWindow,
   parseRetentionDays,
 } from '../utils/softDelete';
+import {
+  MILESTONE_ERROR_CODES,
+  MILESTONE_ERROR_NAMES,
+  MILESTONE_ENV_KEYS,
+  MILESTONE_MESSAGES,
+} from '../modules/contracts/milestones.constants';
 
-/** Env key for milestones soft-delete retention window (days). */
+/**
+ * Env key for milestones soft-delete retention window (days).
+ * @deprecated Import `MILESTONE_ENV_KEYS.SOFT_DELETE_RETENTION_DAYS` from
+ * `milestones.constants` directly.  This re-export is kept for backwards
+ * compatibility with existing tests and callers.
+ */
 export const MILESTONES_SOFT_DELETE_RETENTION_DAYS_ENV =
-  'MILESTONES_SOFT_DELETE_RETENTION_DAYS';
+  MILESTONE_ENV_KEYS.SOFT_DELETE_RETENTION_DAYS;
 
 /**
  * Persisted milestone record with soft-delete metadata.
@@ -40,22 +51,22 @@ export interface CreateMilestoneInput {
 }
 
 export class MilestoneNotFoundError extends Error {
-  public readonly code = 'milestone_not_found';
+  public readonly code = MILESTONE_ERROR_CODES.NOT_FOUND;
   public readonly statusCode = 404;
 
   constructor(message: string) {
     super(message);
-    this.name = 'MilestoneNotFoundError';
+    this.name = MILESTONE_ERROR_NAMES.NOT_FOUND;
   }
 }
 
 export class MilestoneConflictError extends Error {
-  public readonly code = 'milestone_conflict';
+  public readonly code = MILESTONE_ERROR_CODES.CONFLICT;
   public readonly statusCode = 409;
 
   constructor(message: string) {
     super(message);
-    this.name = 'MilestoneConflictError';
+    this.name = MILESTONE_ERROR_NAMES.CONFLICT;
   }
 }
 
@@ -70,7 +81,7 @@ export class MilestonesService {
    * Retention window in days. Overridable via env for tests and ops.
    */
   public getRetentionDays(): number {
-    return parseRetentionDays(process.env[MILESTONES_SOFT_DELETE_RETENTION_DAYS_ENV]);
+    return parseRetentionDays(process.env[MILESTONE_ENV_KEYS.SOFT_DELETE_RETENTION_DAYS]);
   }
 
   /**
@@ -105,8 +116,7 @@ export class MilestonesService {
       );
       if (totalMilestoneAmount > budget) {
         throw new ContractBoundsError(
-          `Total milestone amount exceeds maximum contract amount ` +
-            `(milestones total ${totalMilestoneAmount} exceeds budget of ${budget})`,
+          MILESTONE_MESSAGES.totalExceedsBudget(totalMilestoneAmount, budget),
         );
       }
     }
@@ -162,12 +172,12 @@ export class MilestonesService {
     const record = milestoneStore.get(milestoneId);
     if (!record || record.contractId !== contractId) {
       throw new MilestoneNotFoundError(
-        `Milestone ${milestoneId} not found for contract ${contractId}`,
+        MILESTONE_MESSAGES.notFound(milestoneId, contractId),
       );
     }
     if (!options.includeDeleted && isSoftDeleted(record.deletedAt)) {
       throw new MilestoneNotFoundError(
-        `Milestone ${milestoneId} not found for contract ${contractId}`,
+        MILESTONE_MESSAGES.notFound(milestoneId, contractId),
       );
     }
     return { ...record };
@@ -181,11 +191,11 @@ export class MilestonesService {
     const record = milestoneStore.get(milestoneId);
     if (!record || record.contractId !== contractId) {
       throw new MilestoneNotFoundError(
-        `Milestone ${milestoneId} not found for contract ${contractId}`,
+        MILESTONE_MESSAGES.notFound(milestoneId, contractId),
       );
     }
     if (isSoftDeleted(record.deletedAt)) {
-      throw new MilestoneConflictError(`Milestone ${milestoneId} is already soft-deleted`);
+      throw new MilestoneConflictError(MILESTONE_MESSAGES.alreadySoftDeleted(milestoneId));
     }
 
     const updated: MilestoneRecord = {
@@ -210,17 +220,17 @@ export class MilestonesService {
     const record = milestoneStore.get(milestoneId);
     if (!record || record.contractId !== contractId) {
       throw new MilestoneNotFoundError(
-        `Milestone ${milestoneId} not found for contract ${contractId}`,
+        MILESTONE_MESSAGES.notFound(milestoneId, contractId),
       );
     }
     if (!isSoftDeleted(record.deletedAt) || !record.deletedAt) {
-      throw new MilestoneConflictError(`Milestone ${milestoneId} is not soft-deleted`);
+      throw new MilestoneConflictError(MILESTONE_MESSAGES.notSoftDeleted(milestoneId));
     }
 
     const retentionDays = this.getRetentionDays();
     if (!isWithinRetentionWindow(record.deletedAt, retentionDays, now)) {
       throw new SoftDeleteRetentionError(
-        `Milestone ${milestoneId} retention window of ${retentionDays} days has expired`,
+        MILESTONE_MESSAGES.retentionWindowExpired(milestoneId, retentionDays),
       );
     }
 

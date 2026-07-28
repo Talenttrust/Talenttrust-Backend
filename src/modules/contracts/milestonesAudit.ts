@@ -33,6 +33,7 @@ import type { AuditAction } from '../../audit/types';
 import type { AuditService } from '../../audit/service';
 import { redactBody } from '../../audit/redact';
 import type { ContractMilestoneDto } from './dto/contracts-boundary.dto';
+import { MILESTONE_AUDIT_ACTIONS } from './milestones.constants';
 
 /** Maximum number of individual milestone items retained in one audit summary. */
 export const MAX_SUMMARY_ITEMS = 50;
@@ -146,13 +147,13 @@ export function determineMilestonesAction(
   const hasAfter = after !== null && after.count > 0;
 
   if (!hadBefore && !hasAfter) return null;
-  if (!hadBefore && hasAfter) return 'MILESTONES_CREATED';
-  if (hadBefore && !hasAfter) return 'MILESTONES_DELETED';
+  if (!hadBefore && hasAfter) return MILESTONE_AUDIT_ACTIONS.CREATED;
+  if (hadBefore && !hasAfter) return MILESTONE_AUDIT_ACTIONS.DELETED;
 
   // Both present: only log when the content actually changed, so replaying
   // an identical PATCH does not spam the log with no-op entries.
   if (deepEqual(before, after)) return null;
-  return 'MILESTONES_UPDATED';
+  return MILESTONE_AUDIT_ACTIONS.UPDATED;
 }
 
 /** Builds the audit-entry metadata payload for a milestones write. */

@@ -19,6 +19,9 @@ import { registry } from '../../../docs/openapi-registry';
 import {
   MAX_CONTRACT_AMOUNT_STROOPS,
 } from '../../../contracts/bounds';
+import {
+  MILESTONE_VALIDATION_MSGS,
+} from '../milestones.constants';
 
 // ─── Field-level constants ────────────────────────────────────────────────────
 
@@ -44,8 +47,8 @@ const DATETIME_MAX_LENGTH = 64;
  */
 const datetimeField = z
   .string()
-  .max(DATETIME_MAX_LENGTH, `Datetime string must not exceed ${DATETIME_MAX_LENGTH} characters`)
-  .datetime({ message: 'Must be a valid ISO-8601 datetime string' });
+  .max(DATETIME_MAX_LENGTH, MILESTONE_VALIDATION_MSGS.datetimeMax(DATETIME_MAX_LENGTH))
+  .datetime({ message: MILESTONE_VALIDATION_MSGS.datetimeFormat });
 
 // ─── Request schemas ───────────────────────────────────────────────────────────
 
@@ -67,17 +70,17 @@ export const createMilestoneSchema = z
   .object({
     title: z
       .string()
-      .min(MILESTONE_TITLE_MIN_LENGTH, `Milestone title must be at least ${MILESTONE_TITLE_MIN_LENGTH} character`)
-      .max(MILESTONE_TITLE_MAX_LENGTH, `Milestone title must not exceed ${MILESTONE_TITLE_MAX_LENGTH} characters`),
+      .min(MILESTONE_TITLE_MIN_LENGTH, MILESTONE_VALIDATION_MSGS.titleMin(MILESTONE_TITLE_MIN_LENGTH))
+      .max(MILESTONE_TITLE_MAX_LENGTH, MILESTONE_VALIDATION_MSGS.titleMax(MILESTONE_TITLE_MAX_LENGTH)),
     description: z
       .string()
-      .min(MILESTONE_DESCRIPTION_MIN_LENGTH, `Milestone description must be at least ${MILESTONE_DESCRIPTION_MIN_LENGTH} character`)
-      .max(MILESTONE_DESCRIPTION_MAX_LENGTH, `Milestone description must not exceed ${MILESTONE_DESCRIPTION_MAX_LENGTH} characters`)
+      .min(MILESTONE_DESCRIPTION_MIN_LENGTH, MILESTONE_VALIDATION_MSGS.descriptionMin(MILESTONE_DESCRIPTION_MIN_LENGTH))
+      .max(MILESTONE_DESCRIPTION_MAX_LENGTH, MILESTONE_VALIDATION_MSGS.descriptionMax(MILESTONE_DESCRIPTION_MAX_LENGTH))
       .optional(),
     amount: z
-      .number({ invalid_type_error: 'Milestone amount must be a number' })
-      .positive('Milestone amount must be a positive number')
-      .max(MAX_CONTRACT_AMOUNT_STROOPS, `Milestone amount must not exceed ${MAX_CONTRACT_AMOUNT_STROOPS}`),
+      .number({ invalid_type_error: MILESTONE_VALIDATION_MSGS.amountType })
+      .positive(MILESTONE_VALIDATION_MSGS.amountPositive)
+      .max(MAX_CONTRACT_AMOUNT_STROOPS, MILESTONE_VALIDATION_MSGS.amountMax(MAX_CONTRACT_AMOUNT_STROOPS)),
     deadline: datetimeField.optional(),
     completed: z.boolean().optional(),
   })
@@ -93,18 +96,18 @@ export const updateMilestoneSchema = z
   .object({
     title: z
       .string()
-      .min(MILESTONE_TITLE_MIN_LENGTH, `Milestone title must be at least ${MILESTONE_TITLE_MIN_LENGTH} character`)
-      .max(MILESTONE_TITLE_MAX_LENGTH, `Milestone title must not exceed ${MILESTONE_TITLE_MAX_LENGTH} characters`)
+      .min(MILESTONE_TITLE_MIN_LENGTH, MILESTONE_VALIDATION_MSGS.titleMin(MILESTONE_TITLE_MIN_LENGTH))
+      .max(MILESTONE_TITLE_MAX_LENGTH, MILESTONE_VALIDATION_MSGS.titleMax(MILESTONE_TITLE_MAX_LENGTH))
       .optional(),
     description: z
       .string()
-      .min(MILESTONE_DESCRIPTION_MIN_LENGTH, `Milestone description must be at least ${MILESTONE_DESCRIPTION_MIN_LENGTH} character`)
-      .max(MILESTONE_DESCRIPTION_MAX_LENGTH, `Milestone description must not exceed ${MILESTONE_DESCRIPTION_MAX_LENGTH} characters`)
+      .min(MILESTONE_DESCRIPTION_MIN_LENGTH, MILESTONE_VALIDATION_MSGS.descriptionMin(MILESTONE_DESCRIPTION_MIN_LENGTH))
+      .max(MILESTONE_DESCRIPTION_MAX_LENGTH, MILESTONE_VALIDATION_MSGS.descriptionMax(MILESTONE_DESCRIPTION_MAX_LENGTH))
       .optional(),
     amount: z
-      .number({ invalid_type_error: 'Milestone amount must be a number' })
-      .positive('Milestone amount must be a positive number')
-      .max(MAX_CONTRACT_AMOUNT_STROOPS, `Milestone amount must not exceed ${MAX_CONTRACT_AMOUNT_STROOPS}`)
+      .number({ invalid_type_error: MILESTONE_VALIDATION_MSGS.amountType })
+      .positive(MILESTONE_VALIDATION_MSGS.amountPositive)
+      .max(MAX_CONTRACT_AMOUNT_STROOPS, MILESTONE_VALIDATION_MSGS.amountMax(MAX_CONTRACT_AMOUNT_STROOPS))
       .optional(),
     deadline: datetimeField.optional(),
     completed: z.boolean().optional(),
@@ -145,7 +148,7 @@ export const milestonesListResponseSchema = z.object({
  * Must be a valid UUID.
  */
 export const milestoneIdParamSchema = z.object({
-  milestoneId: z.string().uuid('Milestone ID must be a valid UUID'),
+  milestoneId: z.string().uuid(MILESTONE_VALIDATION_MSGS.milestoneIdUuid),
 });
 
 // ─── Query parameter schemas ───────────────────────────────────────────────────

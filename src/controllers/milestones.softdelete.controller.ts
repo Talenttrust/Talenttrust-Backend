@@ -7,6 +7,7 @@ import {
 import { SoftDeleteRetentionError } from '../utils/softDelete';
 import { fail, ok } from '../utils/apiResponse';
 import { createMilestoneSchema, type CreateMilestoneInput } from '../modules/contracts/dto/milestones.dto';
+import { MILESTONE_CONTROLLER_MSGS } from '../modules/contracts/milestones.constants';
 
 function serializeMilestone(m: {
   id: string;
@@ -89,7 +90,7 @@ export class MilestonesSoftDeleteController {
       const deleted = milestonesService.softDelete(contractId, milestoneId);
       ok(res, {
         milestone: serializeMilestone(deleted),
-        message: `Milestone ${milestoneId} soft-deleted`,
+        message: MILESTONE_CONTROLLER_MSGS.softDeleted(milestoneId),
       });
     } catch (error) {
       if (mapMilestoneError(res, error)) return;
@@ -104,7 +105,7 @@ export class MilestonesSoftDeleteController {
       const restored = milestonesService.restore(contractId, milestoneId);
       ok(res, {
         milestone: serializeMilestone(restored),
-        message: `Milestone ${milestoneId} restored`,
+        message: MILESTONE_CONTROLLER_MSGS.restored(milestoneId),
       });
     } catch (error) {
       if (mapMilestoneError(res, error)) return;
