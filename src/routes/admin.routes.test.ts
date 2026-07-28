@@ -39,6 +39,7 @@ jest.mock('../db/betterSqlite3', () => ({
 jest.mock('../routes/contracts.routes', () => ({
   __esModule: true,
   default: jest.requireActual<typeof import('express')>('express').Router(),
+  createContractsRouter: jest.fn(() => jest.requireActual<typeof import('express')>('express').Router()),
 }));
 
 jest.mock('../routes/events.routes', () => ({
