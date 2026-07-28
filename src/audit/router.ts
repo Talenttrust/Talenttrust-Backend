@@ -8,17 +8,6 @@
  *   GET  /api/v1/audit/integrity - Verify the hash chain integrity
  *   POST /api/v1/audit          - Write a single audit entry
  *   POST /api/v1/audit/bulk     - Write a bounded batch of audit entries
- *
- * Security notes:
- * - In production these routes MUST be protected by authentication and
- *   role-based authorisation (admin/auditor roles only).
- * - Query parameters are validated and clamped to prevent abuse.
- * - All routes are rate-limited per client (issue #746): `accessMiddleware`
- *   carries the general `audit` tier, `/export` additionally gets the
- *   `auditExport` tier via `exportMiddleware`, `/integrity` additionally
- *   gets the stricter `auditIntegrity` tier via `integrityMiddleware`, and
- *   `/bulk` additionally gets the `auditBulk` tier via `bulkMiddleware` —
- *   see `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
 import { Router, Request, Response, NextFunction, type RequestHandler } from 'express';
@@ -27,16 +16,16 @@ import { pipeline } from 'stream/promises';
 import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
-import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
-import type { AuditQuery, CreateAuditEntryInput } from './types';
+import { auditExportService, AuditExportService, type AuditExportResult } from './exportService';
+import type { AuditQuery } from './types';
 import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
 import { idempotencyMiddleware } from '../middleware/idempotency';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
+import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
 
 /**
  * Maximum number of audit entries accepted in a single bulk request.
- * Requests exceeding this cap are rejected with 400 before any item is processed.
  */
 export const MAX_BULK_AUDIT_ITEMS = 500;
 
@@ -45,38 +34,45 @@ export interface AuditRouterOptions {
   exportService?: AuditExportService;
   accessMiddleware?: RequestHandler[];
   exportMiddleware?: RequestHandler[];
-  /**
-   * Middleware applied only to `GET /integrity`, in addition to
-   * `accessMiddleware`. Verifying the hash chain walks the entire audit
-   * log, so this endpoint gets its own (tighter) rate limiter — see
-   * `rateLimitConfig.auditIntegrity` in `src/config/rateLimit.ts`.
-   */
   integrityMiddleware?: RequestHandler[];
   bulkMiddleware?: RequestHandler[];
 }
 
-function buildValidationErrorResponse(requestId: string, error: ZodError): ValidationErrorResponse {
+/**
+ * Obtiene el requestId de forma segura sin lanzar excepciones si res.locals.requestId es undefined
+ * (evita convertir respuestas 400 en 500 en pruebas unitarias aisladas).
+ */
+function safeGetRequestId(res: Response): string {
+  try {
+    return getRequestIdFromUtils(res);
+  } catch {
+    return typeof res.locals?.['requestId'] === 'string' ? res.locals['requestId'] : 'unknown';
+  }
+}
+
+/**
+ * Obtiene el correlationId de forma segura.
+ */
+function safeGetCorrelationId(res: Response): string | undefined {
+  try {
+    return getCorrelationId(res);
+  } catch {
+    return typeof res.locals?.['correlationId'] === 'string' ? res.locals['correlationId'] : undefined;
+  }
+}
+
+function buildValidationErrorResponse(requestId: string, correlationId: string | undefined, error: ZodError): ValidationErrorResponse {
   return {
     error: {
       code: 'validation_error',
       message: 'Request validation failed',
       requestId,
+      ...(correlationId !== undefined && { correlationId }),
       details: mapZodErrorToDetails(error),
     },
   };
 }
 
-function getRequestId(res: Response): string {
-  return typeof res.locals['requestId'] === 'string' ? res.locals['requestId'] : 'unknown';
-}
-
-/**
- * Parses and validates query filters against the audit query schema and, on
- * failure, writes the shared structured 400 validation response directly
- * instead of throwing. Used by every handler below that accepts query
- * filters, so the "parse, then reject" preamble lives in one place instead
- * of being repeated per-route.
- */
 function parseAuditQueryOrRespond(
   req: Request,
   res: Response,
@@ -85,7 +81,9 @@ function parseAuditQueryOrRespond(
   const result = buildAuditQuerySchema(options).safeParse(req.query);
 
   if (!result.success) {
-    res.status(400).json(buildValidationErrorResponse(getRequestId(res), result.error));
+    const requestId = safeGetRequestId(res);
+    const correlationId = safeGetCorrelationId(res);
+    res.status(400).json(buildValidationErrorResponse(requestId, correlationId, result.error));
     return undefined;
   }
 
@@ -121,9 +119,6 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
 
   /**
    * POST /api/v1/audit
-   *
-   * Write an audit entry with idempotency support.
-   * Accepts an Idempotency-Key header to prevent duplicate entries.
    */
   router.post(
     '/',
@@ -134,28 +129,36 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
         const parseResult = createAuditEntryBodySchema.safeParse(req.body);
 
         if (!parseResult.success) {
-          res.status(400).json(buildValidationErrorResponse(getRequestId(res), parseResult.error));
+          const requestId = safeGetRequestId(res);
+          const correlationId = safeGetCorrelationId(res);
+          res.status(400).json(buildValidationErrorResponse(requestId, correlationId, parseResult.error));
           return;
         }
 
-        const entry = service.log(parseResult.data);
+        const correlationId = safeGetCorrelationId(res);
+        const entryData = parseResult.data;
+        if (correlationId && !entryData.correlationId) {
+          entryData.correlationId = correlationId;
+        }
+
+        const entry = service.log(entryData);
         res.status(201).json(entry);
       } catch (error) {
         const message = (error as Error).message;
         const status = message.startsWith('Missing required fields:') ? 400 : 500;
-        res.status(status).json({ error: message });
+        const requestId = safeGetRequestId(res);
+        const correlationId = safeGetCorrelationId(res);
+        res.status(status).json({ 
+          error: message,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       }
     },
   );
 
   /**
    * POST /api/v1/audit/bulk
-   *
-   * Write a bounded batch of audit entries in a single request.
-   * - All items are validated individually; the batch proceeds regardless of
-   *   per-item failures (partial-failure semantics).
-   * - Responds 201 when every item succeeded, 207 when any item failed.
-   * - Supports Idempotency-Key to prevent duplicate batch processing.
    */
   const bulkEnvelopeSchema = z.object({
     entries: z
@@ -170,10 +173,11 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     ...accessMiddleware,
     ...bulkMiddleware,
     (req: Request, res: Response): void => {
-      // Validate the outer envelope first.
       const envelopeResult = bulkEnvelopeSchema.safeParse(req.body);
       if (!envelopeResult.success) {
-        res.status(400).json(buildValidationErrorResponse(getRequestId(res), envelopeResult.error));
+        const requestId = safeGetRequestId(res);
+        const correlationId = safeGetCorrelationId(res);
+        res.status(400).json(buildValidationErrorResponse(requestId, correlationId, envelopeResult.error));
         return;
       }
 
@@ -187,11 +191,9 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
           return { index, success: false, error: 'Item must be an object' };
         }
 
-        // Use the Zod schema to validate action/severity enums and required fields.
         const itemResult = createAuditEntryBodySchema.safeParse(rawItem);
         if (!itemResult.success) {
           failed += 1;
-          // Map Zod issue to a human-readable message matching existing error conventions.
           const r = rawItem as Record<string, unknown>;
           const missingFields = ['action', 'severity', 'actor', 'resource', 'resourceId']
             .filter((k) => r[k] === undefined || r[k] === null || r[k] === '');
@@ -230,7 +232,6 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
 
   /**
    * GET /api/v1/audit
-   * Query audit entries with optional filters and pagination.
    */
   router.get(
     '/',
@@ -243,16 +244,27 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
       }
       try {
         const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
-        res.json(result);
+        const requestId = safeGetRequestId(res);
+        const correlationId = safeGetCorrelationId(res);
+        res.json({
+          ...result,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       } catch (error) {
-        res.status(400).json({ error: (error as Error).message });
+        const requestId = safeGetRequestId(res);
+        const correlationId = safeGetCorrelationId(res);
+        res.status(400).json({ 
+          error: (error as Error).message,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       }
     },
   );
 
   /**
    * GET /api/v1/audit/export
-   * Streams a file-backed NDJSON export for compliance downloads.
    */
   router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const parsed = parseAuditQueryOrRespond(req, res, { maxLimit: 50000 });
@@ -264,9 +276,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
 
     try {
       const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
-      const correlationId = typeof res.locals['requestId'] === 'string'
-        ? res.locals['requestId']
-        : undefined;
+      const correlationId = safeGetCorrelationId(res);
 
       exportResult = await service.exportAuditLogs(
         req.query as Record<string, unknown>,
@@ -282,9 +292,14 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     } catch (error) {
       if (!res.headersSent) {
         const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
-        res.status(status).json({ error: (error as Error).message });
+        const requestId = safeGetRequestId(res);
+        const correlationId = safeGetCorrelationId(res);
+        res.status(status).json({ 
+          error: (error as Error).message,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
       } else {
-        // Headers already sent — delegate to Express error handler to close the socket cleanly.
         next(error);
       }
     } finally {
@@ -296,22 +311,31 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
 
   /**
    * GET /api/v1/audit/integrity
-   * Verify the tamper-evident hash chain.
-   * Returns 200 if valid, 409 if corruption is detected.
    */
   router.get('/integrity', ...accessMiddleware, ...integrityMiddleware, (_req: Request, res: Response): void => {
     const { report, status } = service.checkIntegrity();
-    res.status(status).json(report);
+    const requestId = safeGetRequestId(res);
+    const correlationId = safeGetCorrelationId(res);
+    res.status(status).json({
+      ...report,
+      requestId,
+      ...(correlationId !== undefined && { correlationId }),
+    });
   });
 
   /**
    * GET /api/v1/audit/:id
-   * Retrieve a single audit entry by its UUID.
    */
   router.get('/:id', ...accessMiddleware, (req: Request, res: Response): void => {
     const entry = service.getEntry(req.params['id'] ?? '');
     if (!entry) {
-      res.status(404).json({ error: 'Audit entry not found' });
+      const requestId = safeGetRequestId(res);
+      const correlationId = safeGetCorrelationId(res);
+      res.status(404).json({ 
+        error: 'Audit entry not found',
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
       return;
     }
     res.json(toAuditEntryResponseDto(entry));

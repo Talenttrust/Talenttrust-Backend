@@ -261,7 +261,7 @@ describe('GET /export error classification (non-validation failures)', () => {
 
     const mockExportService = {
       ...auditExportService,
-      createNdjsonExport: jest.fn().mockRejectedValue(exportError),
+      exportAuditLogs: jest.fn().mockRejectedValue(exportError),
     } as unknown as AuditExportService;
 
     const router = createAuditRouter({
@@ -271,11 +271,12 @@ describe('GET /export error classification (non-validation failures)', () => {
 
     app.use('/api/v1/audit', router);
 
+    // Middleware de error para atajar el rechazo y proteger el socket TCP de Supertest
     app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       const message = (err as Error)?.message || 'Export error';
       const status = message.startsWith('Invalid ') ? 400 : 500;
       if (!res.headersSent) {
-        res.status(status).json({ error: [message] });
+        res.status(status).json({ error: message });
       }
     });
 
