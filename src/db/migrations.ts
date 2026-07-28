@@ -170,13 +170,10 @@ MIGRATIONS.push({
     const hasRefreshTokenHash = columns.some((col) => col.name === "refresh_token_hash");
 
     if (!hasPasswordHash || !hasRefreshTokenHash) {
-      // Backup existing data
       const users = db.prepare("SELECT * FROM users").all() as Array<Record<string, unknown>>;
 
-      // Drop old table
       db.exec("DROP TABLE IF EXISTS users");
 
-      // Create new table with auth columns
       db.exec(`
         CREATE TABLE users (
           id              TEXT    PRIMARY KEY,
@@ -190,7 +187,6 @@ MIGRATIONS.push({
         )
       `);
 
-      // Restore data if it existed
       if (users.length > 0) {
         const insertStmt = db.prepare(`
           INSERT INTO users (id, username, email, role, password_hash, refresh_token_hash, created_at)
@@ -218,10 +214,6 @@ MIGRATIONS.push({
   version: 8,
   name: "create_retention_storage_tables",
   up: (db) => {
-    // The retention module uses two independent provider instances (local + archive),
-    // so we create two physically separate tables rather than a single table with a
-    // discriminator column. This keeps each LRU-style operation constrained to its
-    // own table and avoids accidental cross-storage-type data leaks.
     const createRetentionTable = (tableName: string): void => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS ${tableName} (
@@ -258,7 +250,6 @@ MIGRATIONS.push({
   version: 9,
   name: "add_started_at_to_transactions",
   up: (db) => {
-    // Check if the column already exists to prevent errors during repeated migrations
     const columns = db.pragma("table_info(transactions)") as Array<{ name: string }>;
     const hasStartedAt = columns.some((column) => column.name === "started_at");
 
@@ -295,11 +286,6 @@ MIGRATIONS.push({
   version: 11,
   name: "add_normalized_email_unique_index",
   up: (db) => {
-    // Duplicate emails that differ only by surrounding whitespace or letter
-    // case must be rejected. A plain UNIQUE(email) constraint compares the raw
-    // stored value, so 'alice@example.com' and '  Alice@Example.COM  ' would be
-    // treated as distinct. An expression index over lower(trim(email)) makes the
-    // normalized form the uniqueness key.
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_normalized
         ON users (lower(trim(email)));
@@ -324,6 +310,50 @@ MIGRATIONS.push({
         ON notifications(user_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_created_at
         ON notifications(created_at);
+    `);
+  },
+});
+
+// Version 13: DLQ storage tables
+MIGRATIONS.push({
+  version: 13,
+  name: 'create_webhook_dlq_tables',
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS webhook_dlq (",
+    "id TEXT PRIMARY KEY,",
+    "webhook_id TEXT NOT NULL,",
+    "url TEXT NOT NULL,",
+    "body TEXT NOT NULL,",
+    "retry_count INTEGER NOT NULL DEFAULT 0,",
+    "webhook_secret TEXT,",
+    "failed_at TEXT NOT NULL,",
+    "last_error TEXT NOT NULL,",
+    "dedupe_key TEXT NOT NULL,",
+    "replayed_at TEXT,",
+    "replay_attempts INTEGER NOT NULL DEFAULT 0,",
+    "created_at TEXT NOT NULL,",
+    "updated_at TEXT NOT NULL",
+    "UNIQUE(dedupe_key)"
+  ].join('\n'),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webhook_dlq (
+        id TEXT PRIMARY KEY,
+        webhook_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        body TEXT NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        webhook_secret TEXT,
+        failed_at TEXT NOT NULL,
+        last_error TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        replayed_at TEXT,
+        replay_attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
+      CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
     `);
   },
 });
@@ -369,23 +399,6 @@ function assertMigrationsAreValid(migrations: Migration[]): void {
   }
 }
 
-/**
- * Computes the immutable fingerprint stored for an applied migration.
- *
- * @param migration - Migration definition from the ordered migration list.
- * @returns A SHA-256 checksum over version, name, and a body fingerprint.
- *
- * @remarks
- * Migration checksums intentionally include `up.toString()` so edits to an
- * already-applied migration fail fast on the next database open. Add a new
- * migration instead of changing an existing one.
- *
- * Migrations may opt into a stable `checksumSource` (e.g. a short DDL
- * fingerprint) so that editorial whitespace / commenting changes do not
- * invalidate checksums on existing deployments. When a `checksumSource` is
- * declared, it is preferred over the live `up.toString()` so that the
- * fingerprint matches what is currently stored in production databases.
- */
 export function computeMigrationChecksum(migration: Migration): string {
   const source = migration.checksumSource ?? migration.up.toString();
   return createHash("sha256")
@@ -393,15 +406,6 @@ export function computeMigrationChecksum(migration: Migration): string {
     .digest("hex");
 }
 
-/**
- * Computes the legacy fingerprint (the value that was stored for a migration
- * before `checksumSource` support was introduced). Used by
- * {@link verifyAppliedMigrations} to detect and upgrade stored rows so that
- * adding a `checksumSource` to a migration does not block startup.
- *
- * Returns `null` when the migration has no `checksumSource` — in that case
- * the legacy and current fingerprints are identical and no upgrade is needed.
- */
 export function computeLegacyMigrationChecksum(migration: Migration): string | null {
   if (migration.checksumSource === undefined) {
     return null;
@@ -436,7 +440,6 @@ function verifyAppliedMigrations(
     }
 
     if (applied.checksum === null) {
-      // Backfill: row predates checksum tracking
       db.prepare<[string, number]>(
         "UPDATE schema_version SET checksum = ? WHERE version = ?"
       ).run(expectedChecksum, applied.version);
@@ -445,11 +448,6 @@ function verifyAppliedMigrations(
     }
 
     if (applied.checksum !== expectedChecksum) {
-      // Upgrade path: a migration that newly declares a `checksumSource` will
-      // produce a different fingerprint than the legacy `up.toString()` value
-      // already stored in production databases. When that is the cause of the
-      // mismatch, transparently rewrite the stored row instead of refusing to
-      // start, so deployment only requires a one-time automatic upgrade.
       const legacyChecksum = computeLegacyMigrationChecksum(migration);
       if (legacyChecksum !== null && applied.checksum === legacyChecksum) {
         db.prepare<[string, number]>(
@@ -466,18 +464,6 @@ function verifyAppliedMigrations(
   }
 }
 
-/**
- * Applies pending database migrations after verifying applied checksums.
- *
- * @param db - Open SQLite database handle.
- * @param migrations - Ordered migration definitions, primarily overridden by tests.
- *
- * @remarks
- * The database open path calls this synchronously before serving requests.
- * Applied migrations are verified before pending migrations run. Each pending
- * migration and its `schema_version` insert happen inside one SQLite
- * transaction, so partial DDL/DML is rolled back if the migration throws.
- */
 export function runMigrations(
   db: Database.Database,
   migrations: Migration[] = MIGRATIONS

@@ -20,6 +20,7 @@ import { AuthService } from '../services/auth.service';
 import { getDb } from '../db/database';
 import { requireAuth } from '../middleware/authorization';
 import { authRateLimitKeyFn } from '../auth/rateLimitKey';
+import { accountLockout } from '../auth/accountLockout';
 import idempotencyMiddleware from '../middleware/idempotency.middleware';
 import type { AuthenticatedRequest } from '../lib/types';
 
@@ -68,6 +69,22 @@ function authError(res: Response, status: number, code: string, message: string)
   return res.status(status).json({ error: { code, message } });
 }
 
+/**
+ * Pads the response time to a target duration. Used by the lockout
+ * integration to mask the difference between a freshly-failed attempt,
+ * a currently-locked account, and a successful login (uniform timing
+ * across the lockout boundary). Tests that want to "do nothing" pass
+ * `targetMs = 0`.
+ */
+async function padResponseTime(startMs: number, targetMs: number): Promise<void> {
+  if (targetMs <= 0) return;
+  const elapsed = Date.now() - startMs;
+  const remaining = targetMs - elapsed;
+  if (remaining > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+  }
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 router.post(
@@ -76,16 +93,89 @@ router.post(
   idempotencyMiddleware,
   validateSchema(loginSchema),
   async (req: Request, res: Response) => {
+    const { email, password } = req.body as { email: string; password: string };
+    const startMs = Date.now();
+
+    // Capture correlation/IP context once so lockout audit entries can
+    // be cross-referenced to the originating request without forcing
+    // every audit call site to re-derive it.
+    const ipAddress =
+      typeof req.ip === 'string' && req.ip.length > 0 ? req.ip : undefined;
+    const correlationId =
+      (typeof res.locals.requestId === 'string' && (res.locals.requestId as string)) ||
+      (typeof req.headers['x-correlation-id'] === 'string'
+        ? (req.headers['x-correlation-id'] as string)
+        : undefined);
+    const lockoutCtx = {
+      ...(ipAddress !== undefined ? { ipAddress } : {}),
+      ...(correlationId !== undefined ? { correlationId } : {}),
+    };
+
+    // SECURITY: snapshot lockout state BEFORE running scrypt so the
+    // route can use a single `preDelayMs` value across every exit path.
+    // Doing the assess() up-front (instead of after scrypt) closes the
+    // timing oracle where a high-failure success would respond
+    // noticeably faster than the next high-failure failure attempt.
+    // `assess()` is a pure read — flushed pre-scrypt, valid post-scrypt.
+    const pre = accountLockout.assess(email);
+
     try {
-      const { email, password } = req.body as { email: string; password: string };
+      // SECURITY: always run authService.login (constant-time scrypt +
+      // dummy-hash path) regardless of whether the account is currently
+      // locked. Skipping this would create a different timing oracle
+      // that lets an attacker enumerate accounts (locked vs. missing
+      // would respond at conspicuously different latencies).
       const tokens = await getAuthService().login(email, password);
+
+      // Re-assess live state after scrypt completes: `pre` was
+      // captured ~100ms ago and the lockout deadline may have lapsed
+      // during the wait. Without this re-check, a user with the
+      // correct password arriving 1ms before lockout-expiry would be
+      // unjustly rejected. We still pad to `pre.preDelayMs` so the
+      // timing surface (from the attacker's perspective) is uniformly
+      // determined by the request's start-of-flight state.
+      const live = accountLockout.assess(email);
+
+      if (live.isLocked) {
+        // Lockout still active — honor the policy: suppress token
+        // issuance and return the same uniform `invalid_credentials`
+        // shape. The record is NOT cleared — the next eligible user
+        // login will emit AUTH_LOCKOUT_RELEASED via `recordSuccess`.
+        await padResponseTime(startMs, pre.preDelayMs);
+        return authError(res, 401, 'invalid_credentials', 'Request validation failed');
+      }
+
+      // Lockout was cleared between snapshot and now (or never
+      // present) — issue tokens. Padding remains `pre.preDelayMs` so
+      // wall time matches what the request would have taken had the
+      // lockout still been active at the start of the request.
+      // (Note: this is a deliberate security/UX tradeoff — a legit
+      // user who fat-fingers their password N times and then enters
+      // it correctly will wait `computeDelay(N)` ms after the last
+      // failed attempt. The alternative (no success padding) re-
+      // introduces a high-failure timing oracle — see issue #631.)
+      accountLockout.recordSuccess(email, lockoutCtx);
+      await padResponseTime(startMs, pre.preDelayMs);
       return res.status(200).json(tokens);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'invalid_credentials') {
-        return authError(res, 401, 'invalid_credentials', 'Request validation failed');
+      if (code !== 'invalid_credentials') {
+        return authError(res, 500, 'internal_error', 'An unexpected error occurred.');
       }
-      return authError(res, 500, 'internal_error', 'An unexpected error occurred.');
+      // Apply per-account throttling. recordFailure is a synchronous,
+      // map-only mutation: it may emit AUTH_LOCKOUT_TRIGGERED if this
+      // attempt crossed the threshold (strict equality), or be a no-op
+      // if the account is already locked (the lockout deadline is
+      // deliberately not extended by additional failed attempts during
+      // its window — issue #631).
+      const failure = accountLockout.recordFailure(email, lockoutCtx);
+      // Pad the failure response to the post-throttling waitMs so a
+      // failure of N grows progressively slower across the streak.
+      // When the account is currently locked `failure.waitMs ===
+      // maxDelayMs` and matches the live-locked post-scrypt padding
+      // for the same identity.
+      await padResponseTime(startMs, failure.waitMs);
+      return authError(res, 401, 'invalid_credentials', 'Request validation failed');
     }
   }
 );

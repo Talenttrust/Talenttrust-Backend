@@ -23,12 +23,25 @@ export const envSchema = z.object({
     .default('development'),
 
   // API Configuration
-  API_BASE_URL: z.string().url().refine(val => {
-    if (process.env.SSRF_ALLOW_PRIVATE_HOSTS === 'true') return true;
-    return isSafeUrl(val);
-  }, {
+  API_BASE_URL: z.string().url().refine(val => isSafeUrl(val), {
     message: "API_BASE_URL must be a public URL and cannot point to internal resources (SSRF protection)"
   }).optional(),
+
+  /**
+   * Explicit SSRF private-host bypass. Default off.
+   * Rejected outright when NODE_ENV==='production' (see superRefine below).
+   * Only honoured by isSafeUrl when NODE_ENV is development|test|staging.
+   */
+  SSRF_ALLOW_PRIVATE_HOSTS: z.string()
+    .optional()
+    .transform((val) => {
+      if (val === undefined || val.trim() === '') return false;
+      const lower = val.trim().toLowerCase();
+      if (lower === 'true' || lower === '1') return true;
+      if (lower === 'false' || lower === '0') return false;
+      return false;
+    })
+    .pipe(z.boolean()),
 
 
   DEBUG: z.string()
@@ -76,10 +89,7 @@ export const envSchema = z.object({
 
   // Stellar/Soroban Configuration
   STELLAR_HORIZON_URL: z.string().url()
-    .refine(val => {
-      if (process.env.SSRF_ALLOW_PRIVATE_HOSTS === 'true') return true;
-      return isSafeUrl(val);
-    }, {
+    .refine(val => isSafeUrl(val), {
       message: "STELLAR_HORIZON_URL must be a public URL and cannot point to internal resources (SSRF protection)"
     })
     .default('https://horizon-testnet.stellar.org'),
@@ -89,10 +99,7 @@ export const envSchema = z.object({
     .default('Test SDF Network ; September 2015'),
 
   SOROBAN_RPC_URL: z.string().url()
-    .refine(val => {
-      if (process.env.SSRF_ALLOW_PRIVATE_HOSTS === 'true') return true;
-      return isSafeUrl(val);
-    }, {
+    .refine(val => isSafeUrl(val), {
       message: "SOROBAN_RPC_URL must be a public URL and cannot point to internal resources (SSRF protection)"
     })
     .default('https://soroban-testnet.stellar.org'),
@@ -101,10 +108,7 @@ export const envSchema = z.object({
   SOROBAN_CONTRACT_ID: z.string().optional(),
 
   STELLAR_RPC_URL: z.string().url()
-    .refine(val => {
-      if (process.env.SSRF_ALLOW_PRIVATE_HOSTS === 'true') return true;
-      return isSafeUrl(val);
-    }, {
+    .refine(val => isSafeUrl(val), {
       message: "STELLAR_RPC_URL must be a public URL and cannot point to internal resources (SSRF protection)"
     })
     .default('https://rpc-testnet.stellar.org'),
@@ -383,6 +387,14 @@ export const envSchema = z.object({
   }
 
   if (obj.NODE_ENV === 'production') {
+    if (obj.SSRF_ALLOW_PRIVATE_HOSTS === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SSRF_ALLOW_PRIVATE_HOSTS'],
+        message:
+          'SSRF_ALLOW_PRIVATE_HOSTS must not be enabled in production; private hosts are always blocked',
+      });
+    }
     if (!obj.JWT_SECRET) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

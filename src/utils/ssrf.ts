@@ -1,5 +1,12 @@
 import { URL } from 'url';
-import { parseBoolEnv, optionalEnv } from '../config/env';
+import { parseBoolEnv, getEnv } from '../config/env';
+
+/**
+ * Environments that may opt into private-host access via SSRF_ALLOW_PRIVATE_HOSTS.
+ * Any other NODE_ENV value (including unset / misspelled) is treated as unsafe —
+ * the bypass flag is ignored and private hosts are blocked.
+ */
+const SSRF_BYPASS_ALLOWED_ENVS = new Set(['development', 'test', 'staging']);
 
 /**
  * SSRF Protection Utility
@@ -9,8 +16,10 @@ import { parseBoolEnv, optionalEnv } from '../config/env';
  *
  * @security
  * - Default: FAIL CLOSED (unparseable/unknown → unsafe)
- * - In production: private hosts are ALWAYS blocked (ignores SSRF_ALLOW_PRIVATE_HOSTS)
- * - In non-production: set SSRF_ALLOW_PRIVATE_HOSTS=true to allow private hosts
+ * - In production: private hosts are ALWAYS blocked; SSRF_ALLOW_PRIVATE_HOSTS is
+ *   rejected outright at config load (see env.schema superRefine)
+ * - Bypass is allowed only when NODE_ENV is explicitly development|test|staging
+ *   AND SSRF_ALLOW_PRIVATE_HOSTS=true (default-off)
  */
 
 const PRIVATE_HOSTNAMES = [
@@ -181,43 +190,47 @@ export function isPrivateHost(host: string): boolean {
 }
 
 /**
+ * Returns true when the current environment is explicitly allowed to opt into
+ * private-host access via SSRF_ALLOW_PRIVATE_HOSTS.
+ *
+ * @security Unset, misspelled, production, or any other NODE_ENV value returns
+ * false so the bypass cannot leak in by accident.
+ */
+function isSsrfBypassEnvAllowed(): boolean {
+  const nodeEnv = getEnv('NODE_ENV');
+  if (nodeEnv === undefined) {
+    return false;
+  }
+  return SSRF_BYPASS_ALLOWED_ENVS.has(nodeEnv);
+}
+
+/**
  * Validates a URL string for SSRF safety.
  *
  * @security
- * - In production: always blocks private hosts, regardless of SSRF_ALLOW_PRIVATE_HOSTS
- * - In non-production: blocks private hosts unless SSRF_ALLOW_PRIVATE_HOSTS=true
- * - Fail closed: invalid URLs/unparseable hosts are considered unsafe
+ * - Fail closed: invalid URLs / unparseable hosts / unknown NODE_ENV → unsafe
+ * - Production (and any non-allowlisted NODE_ENV): always blocks private hosts;
+ *   SSRF_ALLOW_PRIVATE_HOSTS has no effect at runtime and is rejected at config
+ *   load when NODE_ENV==='production'
+ * - Bypass: only when NODE_ENV ∈ {development, test, staging} AND
+ *   SSRF_ALLOW_PRIVATE_HOSTS=true (default false)
  *
  * @param urlString - The URL to validate
  * @returns true if the URL is safe, false if it points to a private/internal resource
  */
 export function isSafeUrl(urlString: string): boolean {
-  const nodeEnv = optionalEnv('NODE_ENV', 'development');
-  const isProduction = nodeEnv === 'production';
+  /**
+   * Explicit, default-off allow flag. Honoured only in development|test|staging.
+   * In production the flag is rejected at config load; here it is also ignored
+   * so no runtime path returns true for a private host.
+   */
   const allowPrivateHosts = parseBoolEnv('SSRF_ALLOW_PRIVATE_HOSTS', false);
 
-  // In production: never allow private hosts, no exceptions
-  if (isProduction) {
-    try {
-      const url = new URL(urlString);
-      const host = url.hostname;
-
-      if (!host) {
-        return false;
-      }
-
-      return !isPrivateHost(host);
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  // Non-production: check if explicit bypass flag is set
-  if (allowPrivateHosts) {
+  if (allowPrivateHosts && isSsrfBypassEnvAllowed()) {
     return true;
   }
 
-  // Default: block private hosts (fail closed)
+  // Default / production / unknown env: block private hosts (fail closed)
   try {
     const url = new URL(urlString);
     const host = url.hostname;

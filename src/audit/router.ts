@@ -16,7 +16,7 @@ import { pipeline } from 'stream/promises';
 import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
-import { auditExportService, AuditExportService, type AuditExportResult } from './exportService';
+import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
 import type { AuditQuery } from './types';
 import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
@@ -38,10 +38,6 @@ export interface AuditRouterOptions {
   bulkMiddleware?: RequestHandler[];
 }
 
-/**
- * Obtiene el requestId de forma segura sin lanzar excepciones si res.locals.requestId es undefined
- * (evita convertir respuestas 400 en 500 en pruebas unitarias aisladas).
- */
 function safeGetRequestId(res: Response): string {
   try {
     return getRequestIdFromUtils(res);
@@ -50,9 +46,6 @@ function safeGetRequestId(res: Response): string {
   }
 }
 
-/**
- * Obtiene el correlationId de forma segura.
- */
 function safeGetCorrelationId(res: Response): string | undefined {
   try {
     return getCorrelationId(res);
@@ -73,6 +66,10 @@ function buildValidationErrorResponse(requestId: string, correlationId: string |
   };
 }
 
+/**
+ * Parses and validates query filters against the audit query schema and, on
+ * failure, writes the shared structured 400 validation response directly.
+ */
 function parseAuditQueryOrRespond(
   req: Request,
   res: Response,

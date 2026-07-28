@@ -11,6 +11,11 @@ import { getDb, closeDb } from '../db/database';
 import authRouter from './auth.routes';
 import { notFoundHandler, errorHandler } from '../middleware/errorHandlers';
 import { requestIdMiddleware } from '../middleware/requestId';
+import { auditService } from '../audit/service';
+import {
+  accountLockout,
+  DEFAULT_ACCOUNT_LOCKOUT_CONFIG,
+} from '../auth/accountLockout';
 
 // ── Suppress rate limiting in tests ──────────────────────────────────────────
 jest.mock('../middleware/rateLimiter', () => ({
