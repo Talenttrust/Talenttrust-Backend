@@ -22,6 +22,7 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { createApp } from '../app';
 import { circuitBreakerRegistry } from '../circuit-breaker/registry';
+import { auditService } from '../audit/service';
 
 jest.mock('../config/env.schema', () => ({
   validateEnv: jest.fn(() => ({})),
@@ -174,6 +175,56 @@ describe('admin route authorization guard integration', () => {
       const response = await callRoute(adminRoute, adminToken);
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  describe('POST /api/v1/admin/circuit-breaker/:name/reset functionality', () => {
+    let logSpy: jest.SpiedFunction<typeof auditService.log>;
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(auditService, 'log').mockImplementation(() => ({} as any));
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+    });
+
+    it('resets a tripped circuit breaker and emits audit log when called by valid admin', async () => {
+      const breaker = circuitBreakerRegistry.getOrCreate('tripped-dep', { failureThreshold: 1 });
+      await expect(breaker.execute(async () => { throw new Error('upstream failure'); })).rejects.toThrow();
+      expect(breaker.getState()).toBe('OPEN');
+
+      const response = await request(app)
+        .post('/api/v1/admin/circuit-breaker/tripped-dep/reset')
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        success: true,
+        name: 'tripped-dep',
+      });
+      expect(breaker.getState()).toBe('CLOSED');
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ADMIN_ACTION',
+          severity: 'INFO',
+          actor: 'test-user-id',
+          resource: 'circuit_breaker',
+          resourceId: 'tripped-dep',
+        })
+      );
+    });
+
+    it('returns 400 with safe error response when breaker is not found', async () => {
+      const response = await request(app)
+        .post('/api/v1/admin/circuit-breaker/nonexistent-breaker/reset')
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(response.status).toBe(400);
+      expect(response.body.error.code).toBe('bad_request');
+      expect(response.body.error.message).toBe('The request could not be processed');
+      expect(response.body.error).toHaveProperty('requestId');
+      expect(logSpy).not.toHaveBeenCalled();
     });
   });
 });

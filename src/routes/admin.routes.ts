@@ -84,8 +84,14 @@ adminRouter.post(
 /**
  * POST /api/v1/admin/circuit-breaker/:name/reset
  *
- * Resets a single circuit breaker by name. Protected by adminAuthGuard.
- * Logs an audit entry with the performing admin's identity.
+ * Resets a single circuit breaker by name back to CLOSED and clears counters.
+ * Protected by `adminAuthGuard` (requires admin JWT role or admin API key scope).
+ * Emits an audit log entry via `auditService` recording the actor and breaker name.
+ *
+ * @param req - Express request (extended with AdminAuthenticatedRequest info).
+ * @param res - Express response.
+ * @param next - Express next function for error propagation.
+ * @security Requires admin authentication (JWT admin role or API key admin scope).
  */
 adminRouter.post(
   '/circuit-breaker/:name/reset',
