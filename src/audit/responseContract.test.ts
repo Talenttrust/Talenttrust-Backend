@@ -444,12 +444,14 @@ describe('Contract: GET /api/v1/audit/integrity', () => {
     expect(typeof res.body.firstCorruptedIndex).toBe('number');
     expect(typeof res.body.firstCorruptedId).toBe('string');
     
-    // We snapshot the predictable parts of the response (omitting the random ID)
+    // We snapshot the predictable parts of the response (omitting the random ID and timestamp)
     expect({
       ...res.body,
-      firstCorruptedId: 'UUID_MOCKED_FOR_SNAPSHOT'
+      firstCorruptedId: 'UUID_MOCKED_FOR_SNAPSHOT',
+      checkedAt: 'TIMESTAMP_MOCKED_FOR_SNAPSHOT',
     }).toMatchInlineSnapshot(`
       {
+        "checkedAt": "TIMESTAMP_MOCKED_FOR_SNAPSHOT",
         "firstCorruptedId": "UUID_MOCKED_FOR_SNAPSHOT",
         "firstCorruptedIndex": 1,
         "totalEntries": 2,
@@ -489,71 +491,83 @@ describe('Contract: POST /api/v1/audit', () => {
       .send({ action: 'CONTRACT_CREATED' })
       .expect(400);
 
+    // POST / body validation now returns the shared structured error shape.
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.message).toBe('Request validation failed');
+    expect(Array.isArray(res.body.error.details)).toBe(true);
   });
 });
 
 // ─── Error response contract ────────────────────────────────────────────────
 
 describe('Contract: error responses', () => {
-  it('GET / with invalid action returns exactly { error: string }', async () => {
+  /**
+   * As of issue #939, GET / validation errors use the shared structured format:
+   *   { error: { code: 'validation_error', message: string, requestId: string, details: [...] } }
+   * These tests verify that shape rather than the legacy flat { error: string }.
+   */
+  function expectStructuredValidationError(body: unknown) {
+    const parsed = body as { error: { code: string; message: string; requestId: string; details: unknown[] } };
+    expect(parsed.error.code).toBe('validation_error');
+    expect(parsed.error.message).toBe('Request validation failed');
+    expect(typeof parsed.error.requestId).toBe('string');
+    expect(Array.isArray(parsed.error.details)).toBe(true);
+  }
+
+  it('GET / with invalid action returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?action=BOGUS').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
-  it('GET / with invalid severity returns exactly { error: string }', async () => {
+  it('GET / with invalid severity returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?severity=EXTREME').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
-  it('GET / with invalid limit returns exactly { error: string }', async () => {
+  it('GET / with invalid limit returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?limit=abc').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchInlineSnapshot(`
-      {
-        "error": "Invalid to timestamp",
-      }
-    `);
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
-  it('GET / with invalid offset returns exactly { error: string }', async () => {
+  it('GET / with invalid offset returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?offset=-1').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
-  it('GET / with invalid from date returns exactly { error: string }', async () => {
+  it('GET / with invalid from date returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?from=not-a-date').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
-  it('GET / with invalid to date returns exactly { error: string }', async () => {
+  it('GET / with invalid to date returns structured validation error', async () => {
     const { app } = buildApp();
     const res = await request(app).get('/api/v1/audit?to=not-a-date').expect(400);
 
     assertExactKeys(res.body, ['error']);
-    expect(typeof res.body.error).toBe('string');
-    expect(res.body).toMatchSnapshot();
+    expect(typeof res.body.error).toBe('object');
+    expectStructuredValidationError(res.body);
   });
 
   it('returns exactly { error: string } and 500 status on internal error', async () => {

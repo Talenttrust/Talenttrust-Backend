@@ -28,12 +28,17 @@ import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
 import { auditExportService, AuditExportService, type AuditExportFilters } from './exportService';
-import type { AuditQuery } from './types';
+import type { AuditQuery, CreateAuditEntryInput } from './types';
 import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
 import { idempotencyMiddleware } from '../middleware/idempotency';
-import { validateRequest } from '../middleware/validate.middleware';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
+
+/**
+ * Maximum number of audit entries accepted in a single bulk request.
+ * Requests exceeding this cap are rejected with 400 before any item is processed.
+ */
+export const MAX_BULK_AUDIT_ITEMS = 500;
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -140,6 +145,86 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
         const status = message.startsWith('Missing required fields:') ? 400 : 500;
         res.status(status).json({ error: message });
       }
+    },
+  );
+
+  /**
+   * POST /api/v1/audit/bulk
+   *
+   * Write a bounded batch of audit entries in a single request.
+   * - All items are validated individually; the batch proceeds regardless of
+   *   per-item failures (partial-failure semantics).
+   * - Responds 201 when every item succeeded, 207 when any item failed.
+   * - Supports Idempotency-Key to prevent duplicate batch processing.
+   */
+  const bulkEnvelopeSchema = z.object({
+    entries: z
+      .array(z.unknown())
+      .min(1, 'Batch must contain at least one entry')
+      .max(MAX_BULK_AUDIT_ITEMS, `Batch must not exceed ${MAX_BULK_AUDIT_ITEMS} entries`),
+  });
+
+  router.post(
+    '/bulk',
+    idempotencyMiddleware,
+    ...accessMiddleware,
+    ...bulkMiddleware,
+    (req: Request, res: Response): void => {
+      // Validate the outer envelope first.
+      const envelopeResult = bulkEnvelopeSchema.safeParse(req.body);
+      if (!envelopeResult.success) {
+        res.status(400).json(buildValidationErrorResponse(getRequestId(res), envelopeResult.error));
+        return;
+      }
+
+      const rawEntries = envelopeResult.data.entries;
+      let succeeded = 0;
+      let failed = 0;
+
+      const results = rawEntries.map((rawItem, index) => {
+        if (typeof rawItem !== 'object' || rawItem === null || Array.isArray(rawItem)) {
+          failed += 1;
+          return { index, success: false, error: 'Item must be an object' };
+        }
+
+        // Use the Zod schema to validate action/severity enums and required fields.
+        const itemResult = createAuditEntryBodySchema.safeParse(rawItem);
+        if (!itemResult.success) {
+          failed += 1;
+          // Map Zod issue to a human-readable message matching existing error conventions.
+          const r = rawItem as Record<string, unknown>;
+          const missingFields = ['action', 'severity', 'actor', 'resource', 'resourceId']
+            .filter((k) => r[k] === undefined || r[k] === null || r[k] === '');
+
+          let msg: string;
+          if (missingFields.length > 0) {
+            msg = `Missing required fields: ${missingFields.join(', ')}`;
+          } else {
+            const firstIssue = itemResult.error.issues[0];
+            const field = firstIssue?.path[0] as string | undefined;
+            if (field === 'action') {
+              msg = `Invalid action: ${r['action']}`;
+            } else if (field === 'severity') {
+              msg = `Invalid severity: ${r['severity']}`;
+            } else {
+              msg = firstIssue?.message ?? 'Validation failed';
+            }
+          }
+          return { index, success: false, error: msg };
+        }
+
+        try {
+          const entry = service.log(itemResult.data);
+          succeeded += 1;
+          return { index, success: true, entry };
+        } catch (err) {
+          failed += 1;
+          return { index, success: false, error: (err as Error).message };
+        }
+      });
+
+      const status = failed === 0 ? 201 : 207;
+      res.status(status).json({ succeeded, failed, results });
     },
   );
 

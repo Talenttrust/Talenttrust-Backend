@@ -253,15 +253,33 @@ describe('GET /:id (real router, not the parallel test-only reimplementation)', 
 
 describe('GET /export error classification (non-validation failures)', () => {
   function buildAppWithBrokenExport(exportError: Error) {
-    const store = new AuditStore();
-    const service = new AuditService(store);
+    const app = express();
+    app.use(express.json());
+
     const brokenExportService = {
       createNdjsonExport: jest.fn().mockRejectedValue(exportError),
     } as unknown as AuditExportService;
 
-    const app = express();
-    app.use(express.json());
-    app.use('/api/v1/audit', createAuditRouter({ service, exportService: brokenExportService }));
+    const mockAuditService = {
+      ...new AuditService(new AuditStore()),
+      exportAuditLogs: jest.fn().mockRejectedValue(exportError),
+    } as unknown as AuditService;
+
+    const router = createAuditRouter({
+      service: mockAuditService,
+      exportService: brokenExportService,
+    });
+
+    app.use('/api/v1/audit', router);
+
+    // Express 4-arg error handler prevents the unhandled rejection from
+    // destroying the TCP socket (TCPSERVERWRAP / serverAddress crash).
+    app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      const message = (err as Error)?.message || 'Internal Server Error';
+      const status = message.startsWith('Invalid ') ? 400 : 500;
+      res.status(status).json({ error: message });
+    });
+
     return app;
   }
 
