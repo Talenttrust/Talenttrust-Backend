@@ -67,12 +67,13 @@ it("requireAuth: valid token → 200 and req.user populated", async () => {
   expect(res.body.user).toMatchObject({ id: "client-abc", role: "client" });
 });
 
-
 it("requireAuth: missing Authorization header → 401", async () => {
   const app = makeApp([requireAuth]);
   const res = await request(app).get("/test");
   expect(res.status).toBe(401);
-  expect(res.body).toHaveProperty("error");
+  expect(res.body.error).toHaveProperty("code", "unauthorized");
+  expect(res.body.error).toHaveProperty("message");
+  expect(res.body.error).toHaveProperty("requestId");
 });
 
 it("requireAuth: token signed with wrong secret → 401", async () => {
@@ -96,8 +97,10 @@ it("requireAuth: token with unknown role → 401", async () => {
   const app = makeApp([requireAuth]);
   const res = await request(app).get("/test").set(bearer(badRole));
   expect(res.status).toBe(401);
+  expect(res.body.error).toHaveProperty("code", "forbidden");
+  expect(res.body.error).toHaveProperty("message");
+  expect(res.body.error).toHaveProperty("requestId");
 });
-
 
 it("requireRole: matching role → 200; non-matching role → 403", async () => {
   const adminApp      = makeApp([requireAuth, requireRole("admin")]);
@@ -108,9 +111,10 @@ it("requireRole: matching role → 200; non-matching role → 403", async () => 
 
   const fail = await request(freelancerApp).get("/test").set(bearer(freelancerToken()));
   expect(fail.status).toBe(403);
-  expect(fail.body).toHaveProperty("error");
+  expect(fail.body.error).toHaveProperty("code", "forbidden");
+  expect(fail.body.error).toHaveProperty("message");
+  expect(fail.body.error).toHaveProperty("requestId");
 });
-
 
 it("requireRole: called without requireAuth → 401", async () => {
   const app = makeApp([requireRole("admin")]);

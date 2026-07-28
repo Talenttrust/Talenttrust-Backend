@@ -9,51 +9,90 @@
  *  - Machine codes are stable strings clients can rely on.
  */
 
+import type { Application } from 'express';
 import http from 'http';
-import { createApp } from '../app';
+import { Duplex } from 'stream';
+import { z } from 'zod';
+import { attachTerminalHandlers, createApp } from '../app';
+import { AppError } from './appError';
+import { validateSchema } from '../middleware/validate.middleware';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-interface SimpleResponse {
-  statusCode: number;
-  headers: http.IncomingHttpHeaders;
-  body: string;
+interface InjectedResponse {
+  status: number;
+  body: any;
+  text: string;
 }
 
-function req(
-  server: http.Server,
+class MockSocket extends Duplex {
+  _read(): void {
+    // ServerResponse writes are intercepted in inject(); no socket reads needed.
+  }
+
+  _write(_chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    callback();
+  }
+}
+
+function inject(
+  app: Application,
   method: string,
   path: string,
-  body?: string,
-  headers?: Record<string, string>,
-): Promise<SimpleResponse> {
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Promise<InjectedResponse> {
   return new Promise((resolve, reject) => {
-    const addr = server.address() as { port: number };
-    const reqHeaders: Record<string, string> = { ...headers };
-    if (body) {
-      reqHeaders['Content-Type'] = 'application/json';
-      reqHeaders['Content-Length'] = String(Buffer.byteLength(body));
+    const socket = new MockSocket();
+    const req = new http.IncomingMessage(socket as any);
+    req.method = method;
+    req.url = path;
+    req.headers = { ...headers };
+
+    if (body !== undefined) {
+      const payload = typeof body === 'string' ? body : JSON.stringify(body);
+      req.headers['content-type'] = req.headers['content-type'] ?? 'application/json';
+      req.headers['content-length'] = String(Buffer.byteLength(payload));
+      req.push(payload);
     }
+    req.push(null);
 
-    const options: http.RequestOptions = {
-      hostname: '127.0.0.1',
-      port: addr.port,
-      path,
-      method,
-      headers: reqHeaders,
-    };
+    const res = new http.ServerResponse(req);
+    res.assignSocket(socket as any);
 
-    const r = http.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () =>
-        resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body: data }),
-      );
-    });
+    const chunks: Buffer[] = [];
+    const originalWrite = res.write.bind(res);
+    const originalEnd = res.end.bind(res);
 
-    r.on('error', reject);
-    if (body) r.write(body);
-    r.end();
+    res.write = ((chunk: any, encoding?: any, cb?: any) => {
+      if (chunk !== undefined) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      }
+      return originalWrite(chunk, encoding, cb);
+    }) as typeof res.write;
+
+    res.end = ((chunk?: any, encoding?: any, cb?: any) => {
+      if (chunk !== undefined) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      }
+      const text = Buffer.concat(chunks).toString('utf8');
+      let parsed: any = {};
+      try {
+        parsed = text.length > 0 ? JSON.parse(text) : {};
+      } catch {
+        parsed = text;
+      }
+
+      resolve({
+        status: res.statusCode,
+        body: parsed,
+        text,
+      });
+
+      return originalEnd(chunk, encoding, cb);
+    }) as typeof res.end;
+
+    (app as any).handle(req as any, res as any, reject);
   });
 }
 
@@ -82,36 +121,58 @@ function assertNoForbiddenContent(body: string, context: string): void {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('Error message policy — integration', () => {
-  let server: http.Server;
+  let app: Application;
 
-  beforeAll((done) => {
-    server = createApp().listen(0, '127.0.0.1', done);
-  });
+  beforeAll(() => {
+    app = createApp({ includeTerminalHandlers: false });
 
-  afterAll((done) => {
-    server.close(done);
+    app.get('/__policy/unknown-error', (_req, _res, next) => {
+      next(new Error('SELECT token FROM users at /srv/app/src/private.ts:12:1'));
+    });
+
+    app.get('/__policy/app-error', (_req, _res, next) => {
+      next(new AppError(
+        503,
+        'dependency_unavailable',
+        'connect ECONNREFUSED 10.0.0.5:6379 for token=abc',
+      ));
+    });
+
+    app.post(
+      '/__policy/validation-error',
+      validateSchema(
+        z.object({
+          body: z.object({
+            contractId: z.string().uuid(),
+          }),
+        }),
+      ),
+      (_req, res) => res.status(204).end(),
+    );
+
+    attachTerminalHandlers(app);
   });
 
   // ── 404 responses ────────────────────────────────────────────────────────
 
   describe('404 — unknown routes', () => {
     it('returns the standardized envelope with not_found code', async () => {
-      const res = await req(server, 'GET', '/does-not-exist');
-      expect(res.statusCode).toBe(404);
-      const json = JSON.parse(res.body);
+      const res = await inject(app, 'GET', '/does-not-exist');
+      expect(res.status).toBe(404);
+      const json = res.body;
       expect(json.error.code).toBe('not_found');
       expect(json.error.message).toBe('The requested resource was not found');
       expect(json.error).toHaveProperty('requestId');
     });
 
     it('does not leak the probed route path', async () => {
-      const res = await req(server, 'GET', '/api/v1/secret-internal-path');
-      expect(res.body).not.toContain('/api/v1/secret-internal-path');
+      const res = await inject(app, 'GET', '/api/v1/secret-internal-path');
+      expect(JSON.stringify(res.body)).not.toContain('/api/v1/secret-internal-path');
     });
 
     it('contains no forbidden content', async () => {
-      const res = await req(server, 'GET', '/nope');
-      assertNoForbiddenContent(res.body, 'GET /nope');
+      const res = await inject(app, 'GET', '/nope');
+      assertNoForbiddenContent(JSON.stringify(res.body), 'GET /nope');
     });
   });
 
@@ -119,16 +180,71 @@ describe('Error message policy — integration', () => {
 
   describe('400 — malformed JSON', () => {
     it('returns invalid_json code with safe message', async () => {
-      const res = await req(server, 'POST', '/api/v1/contracts', '{bad json');
-      expect(res.statusCode).toBe(400);
-      const json = JSON.parse(res.body);
+      const res = await inject(app, 'POST', '/api/v1/contracts', '{bad json', {
+        'content-type': 'application/json',
+      });
+      expect(res.status).toBe(400);
+      const json = res.body;
       expect(json.error.code).toBe('invalid_json');
       expect(json.error.message).toBe('Malformed JSON payload');
     });
 
     it('contains no forbidden content', async () => {
-      const res = await req(server, 'POST', '/api/v1/contracts', '{{{{');
-      assertNoForbiddenContent(res.body, 'malformed JSON');
+      const res = await inject(app, 'POST', '/api/v1/contracts', '{{{{', {
+        'content-type': 'application/json',
+      });
+      assertNoForbiddenContent(JSON.stringify(res.body), 'malformed JSON');
+    });
+  });
+
+  // ── Central handler mapping ──────────────────────────────────────────────
+
+  describe('central policy mapping', () => {
+    it('maps unknown errors to a safe 500 response', async () => {
+      const res = await inject(app, 'GET', '/__policy/unknown-error');
+      expect(res.status).toBe(500);
+      const json = res.body;
+      expect(json.error).toEqual(
+        expect.objectContaining({
+          code: 'internal_error',
+          message: 'An unexpected error occurred',
+          requestId: expect.any(String),
+        }),
+      );
+      expect(JSON.stringify(res.body)).not.toContain('SELECT token');
+      expect(JSON.stringify(res.body)).not.toContain('/srv/app/src/private.ts');
+      assertNoForbiddenContent(JSON.stringify(res.body), 'unknown error');
+    });
+
+    it('maps AppError instances through the safe message policy', async () => {
+      const res = await inject(app, 'GET', '/__policy/app-error');
+      expect(res.status).toBe(503);
+      const json = res.body;
+      expect(json.error).toEqual(
+        expect.objectContaining({
+          code: 'dependency_unavailable',
+          message: 'A required service is temporarily unavailable',
+          requestId: expect.any(String),
+        }),
+      );
+      assertNoForbiddenContent(JSON.stringify(res.body), 'app error');
+    });
+
+    it('returns validation errors with a safe body and 400 status', async () => {
+      const res = await inject(app, 'POST', '/__policy/validation-error', {
+        contractId: 'not-a-uuid',
+      });
+      expect(res.status).toBe(400);
+      const json = res.body;
+      expect(json.error).toEqual(
+        expect.objectContaining({
+          code: 'validation_error',
+          message: 'Request validation failed',
+          requestId: expect.any(String),
+          details: expect.any(Array),
+        }),
+      );
+      assertNoForbiddenContent(JSON.stringify(res.body), 'validation error');
     });
   });
 
@@ -136,22 +252,22 @@ describe('Error message policy — integration', () => {
 
   describe('envelope shape', () => {
     it('every error response includes requestId', async () => {
-      const res = await req(server, 'GET', '/not-a-real-route');
-      const json = JSON.parse(res.body);
+      const res = await inject(app, 'GET', '/not-a-real-route');
+      const json = res.body;
       expect(typeof json.error.requestId).toBe('string');
       expect(json.error.requestId.length).toBeGreaterThan(0);
     });
 
     it('error code is always a non-empty string', async () => {
-      const res = await req(server, 'GET', '/not-a-real-route');
-      const json = JSON.parse(res.body);
+      const res = await inject(app, 'GET', '/not-a-real-route');
+      const json = res.body;
       expect(typeof json.error.code).toBe('string');
       expect(json.error.code.length).toBeGreaterThan(0);
     });
 
     it('error message is always a non-empty string', async () => {
-      const res = await req(server, 'GET', '/not-a-real-route');
-      const json = JSON.parse(res.body);
+      const res = await inject(app, 'GET', '/not-a-real-route');
+      const json = res.body;
       expect(typeof json.error.message).toBe('string');
       expect(json.error.message.length).toBeGreaterThan(0);
     });
@@ -161,13 +277,15 @@ describe('Error message policy — integration', () => {
 
   describe('machine code stability', () => {
     it('404 always returns not_found', async () => {
-      const res = await req(server, 'GET', '/missing');
-      expect(JSON.parse(res.body).error.code).toBe('not_found');
+      const res = await inject(app, 'GET', '/missing');
+      expect(res.body.error.code).toBe('not_found');
     });
 
     it('malformed JSON always returns invalid_json', async () => {
-      const res = await req(server, 'POST', '/api/v1/contracts', '{');
-      expect(JSON.parse(res.body).error.code).toBe('invalid_json');
+      const res = await inject(app, 'POST', '/api/v1/contracts', '{', {
+        'content-type': 'application/json',
+      });
+      expect(res.body.error.code).toBe('invalid_json');
     });
   });
 });

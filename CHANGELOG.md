@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### Developer Experience (feature/dev-setup)
+
+- Cloned repository and created `feature/dev-setup` branch for local development and GitHub Codespaces workflow
+- Branch ready for Codespace environment setup and onboarding improvements
+
+
+
 ### Added
 
 #### Deployment Automation Pipeline (Issue #45)

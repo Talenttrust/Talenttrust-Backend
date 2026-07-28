@@ -11,7 +11,9 @@ The TalentTrust audit log provides **immutable, tamper-evident recording** of al
 ```
 src/audit/
 ├── types.ts                       — Core interfaces and type definitions
-├── store.ts                       — Append-only, hash-chained in-memory store
+├── repository.ts                  — Repository interface + backend selection
+├── store.ts                       — In-memory repository implementation
+├── sqliteRepository.ts            — Durable SQLite repository implementation
 ├── service.ts                     — Application-level facade with convenience wrappers
 ├── redact.ts                      — Deterministic redaction rules (headers, body, email)
 ├── middleware.ts                  — Express middleware (attaches audit helper to res.locals)
@@ -132,7 +134,7 @@ if (!report.valid) {
 
 All endpoints are mounted at `/api/v1/audit`.
 
-> **Security**: These endpoints must be protected by authentication and restricted to `admin`/`auditor` roles in production.
+> **Security**: These endpoints are protected by JWT authentication and restricted to `admin`/`auditor` roles in the main application.
 
 ### `GET /api/v1/audit`
 
@@ -178,6 +180,20 @@ Verify the hash chain. Returns `200` if valid, `409` if corruption is detected.
 ### `GET /api/v1/audit/:id`
 
 Retrieve a single entry by UUID. Returns `404` if not found.
+
+### `GET /api/v1/audit/export`
+
+Generate a file-backed newline-delimited JSON (`application/x-ndjson`) export and
+stream it back as an attachment for compliance downloads.
+
+Security and operational notes:
+
+- Access is limited to `admin` and `auditor` roles.
+- A dedicated export rate limit applies separately from standard API reads.
+- The export file is created only inside a controlled local temp directory.
+- No user-supplied path or URL is ever dereferenced, preventing path traversal and SSRF.
+- Export filters match the query endpoint (`action`, `severity`, `actor`, `resource`, `resourceId`, `from`, `to`, `limit`, `offset`).
+- Export requests support larger result sets than the interactive query endpoint, up to the configured export cap.
 
 ---
 
@@ -320,8 +336,11 @@ Numbers, booleans, and `null`/`undefined` pass through unmodified.
 
 ### Production Hardening Checklist
 
-- [ ] Replace in-memory store with a write-once database (PostgreSQL with no `UPDATE`/`DELETE` grants, or an append-only table with row-level security)
-- [ ] Gate `/api/v1/audit` endpoints behind JWT authentication + `auditor` role check
+- [x] Repository pattern implemented with pluggable backends (`memory`, `sqlite`)
+- [x] Durable SQLite backend available via `AUDIT_STORAGE_BACKEND=sqlite`
+- [ ] For production, use a write-once policy (no `UPDATE`/`DELETE` grants) and strict file/database access controls
+- [x] Gate `/api/v1/audit` endpoints behind JWT authentication + `admin`/`auditor` role check
+- [x] Rate-limit `/api/v1/audit/export` separately from standard API traffic
 - [ ] Rate-limit the `/integrity` endpoint (it scans the full log)
 - [ ] Run `verifyIntegrity()` on a scheduled job and alert on failure
 - [ ] Ensure `app.set('trust proxy', true)` is set when behind a load balancer so `req.ip` is accurate
@@ -333,16 +352,42 @@ Numbers, booleans, and `null`/`undefined` pass through unmodified.
 ## Testing
 
 ```bash
-npm test                          # run all tests
-npm test -- --coverage            # with coverage report
+npm test                              # run all tests
+npm test -- --coverage                # with coverage report
+npm test -- src/audit                 # just the audit module
 ```
 
-The test suite (`src/audit/audit.test.ts`) covers:
+The audit module's test suite is split across three files so each one pins a
+single layer of the architecture:
 
-- Unit tests for `AuditStore` (append, query, getById, verifyIntegrity, immutability)
-- Unit tests for `AuditService` (all convenience wrappers, error propagation)
-- Unit tests for `auditMiddleware`
-- Integration tests for all REST endpoints via `supertest`
-- Security threat scenario tests (tampering, deletion, mutation, injection)
+| File | Pins | Notes |
+| --- | --- | --- |
+| `src/audit/audit.test.ts` | `AuditStore`, `auditMiddleware`, `auditRouter`, `protectedEndpointAuditMiddleware`, `redact` module | Broad integration + security threat-scenario coverage. |
+| `src/audit/service.test.ts` | `AuditService` contract | Routing of `action`/`actor`/`ipAddress`/`correlationId` to the repository, the redaction responsibility (callers must pre-process via `redactBody()`), write-failure surfacing, and convenience-wrapper severity rules. Uses a pure in-memory mock repository — no SQLite dependency. |
+| `src/audit/sqliteRepository.test.ts` | `SqliteAuditRepository` behaviour | Append → read round-trip with deeply nested metadata, every supported filter (`action`, `severity`, `actor`, `resource`, `resourceId`, `from`/`to`) and combinations thereof, pagination edge cases (`offset > count`, `limit = 0`), incremental `stream()`, transactional write-failure surfacing with no partial rows left behind, two-`:memory:`-DB isolation, and chain-integrity verification over a 100-entry chain. All tests run on a fresh in-memory SQLite connection (`':memory:'`) for determinism and DB isolation. |
+| `src/audit/exportService.test.ts` | `AuditExportService`, `neutraliseCsvInjection` | NDJSON round-trip fidelity, RFC 4180 CSV quoting (commas, embedded quotes, newlines), CSV-injection neutralisation for leading `=`/`+`/`-`/`@` formula prefixes, empty-dataset and large-dataset (1 500-row) streaming, `AuditExportResult` contract fields, `cleanup()` removes temp directory, `streamNdjsonExport`/`streamCsvExport` pipe helpers. All tests use a fresh in-memory `AuditStore` — no live database dependency. |
 
 Coverage targets: ≥ 95% for all audit modules.
+
+---
+
+## Export Security — CSV Injection
+
+The CSV export applies a two-layer defence against **formula injection** (also called CSV injection):
+
+1. **RFC 4180 quoting** — any cell value that contains a comma, double-quote, or newline is wrapped in double-quotes with internal quotes doubled (`""`).
+
+2. **Formula-prefix neutralisation** — before quoting, the `neutraliseCsvInjection` helper checks whether the stringified value begins with a character that spreadsheet applications (Excel, LibreOffice Calc, Google Sheets) interpret as a formula trigger:
+
+   | Trigger | Reason |
+   |---------|--------|
+   | `=`     | Standard formula prefix |
+   | `+`     | Lotus 1-2-3 / alternative formula prefix |
+   | `-`     | Negation evaluated as formula |
+   | `@`     | Legacy Lotus and modern Excel macro prefix |
+   | `\t`    | Tab character used in tab-separated injections |
+   | `\r`    | Carriage-return that can break row parsing |
+
+   Dangerous values are prefixed with a single-quote (`'`) so the cell is treated as plain text. This mitigation follows the [OWASP CSV Injection guidance](https://owasp.org/www-community/attacks/CSV_Injection).
+
+> **Note**: The NDJSON export is not affected by CSV injection because JSON parsers do not evaluate formula syntax.

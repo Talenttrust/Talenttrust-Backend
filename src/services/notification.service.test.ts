@@ -1,66 +1,69 @@
-import { notificationService } from './notification.service';
+import { NotificationService } from './notification.service';
+import { NotificationTransport } from './notification.transport';
+import { NotificationRepository } from '../repositories/notificationRepository';
+import { getDb, closeDb } from '../db/database';
 import { KeyEscrowEvent } from '../types/notification.types';
 
 describe('NotificationService', () => {
-  let consoleLogSpy: jest.SpyInstance;
-  let consoleErrorSpy: jest.SpyInstance;
+  let transportMock: NotificationTransport;
+  let repo: NotificationRepository;
+  let svc: NotificationService;
 
   beforeEach(() => {
-    // Mock transport outputs
-    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    transportMock = {
+      sendEmail: jest.fn().mockResolvedValue({ success: true }),
+      sendWebNotification: jest.fn().mockResolvedValue({ success: true }),
+    } as unknown as NotificationTransport;
+
+    // Use in-memory DB for isolation
+    const db = getDb(':memory:');
+    repo = new NotificationRepository(db);
+    svc = new NotificationService({ emailTransport: transportMock, webTransport: transportMock, repo });
   });
 
   afterEach(() => {
     jest.resetAllMocks();
+    closeDb();
   });
 
   describe('sendEmail', () => {
     it('should successfully send an email for a valid payload', async () => {
-      const result = await notificationService.sendEmail('test@example.com', KeyEscrowEvent.ESCROW_INITIALIZED, { id: '123' });
-      expect(result).toBe(true);
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[NotificationService:Email] Sending mail to test@example.com',
-        expect.objectContaining({ to: 'test@example.com', subject: 'Notification: ESCROW_INITIALIZED' })
-      );
+      const result = await svc.sendEmail('test@example.com', KeyEscrowEvent.ESCROW_INITIALIZED, { id: '123' });
+      expect(result.success).toBe(true);
+      expect(transportMock.sendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'test@example.com' }));
     });
 
-    it('should fail cleanly and log error on invalid email address', async () => {
-      const result = await notificationService.sendEmail('invalid-email-no-at', KeyEscrowEvent.FUNDS_DEPOSITED);
-      expect(result).toBe(false);
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        '[NotificationService:Email] Failed to send email for event FUNDS_DEPOSITED',
-        'Invalid email address'
-      );
+    it('should fail cleanly on invalid email address', async () => {
+      const result = await svc.sendEmail('invalid-email-no-at', KeyEscrowEvent.FUNDS_DEPOSITED);
+      expect(result.success).toBe(false);
+      expect(result.message).toMatch(/Invalid email address/);
+      expect(transportMock.sendEmail).not.toHaveBeenCalled();
     });
 
-    it('should fail cleanly and log error on empty email address', async () => {
-      const result = await notificationService.sendEmail('', KeyEscrowEvent.DISPUTE_RAISED);
-      expect(result).toBe(false);
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        '[NotificationService:Email] Failed to send email for event DISPUTE_RAISED',
-        'Invalid email address'
-      );
+    it('should reject header-injection attempts', async () => {
+      const result = await svc.sendEmail('victim@example.com\nBCC:attacker@example.com', KeyEscrowEvent.DISPUTE_RAISED);
+      expect(result.success).toBe(false);
+      expect(result.message).toMatch(/Invalid email address/);
+      expect(transportMock.sendEmail).not.toHaveBeenCalled();
     });
   });
 
   describe('sendWebNotification', () => {
-    it('should successfully send a web notification for a valid payload', async () => {
-      const result = await notificationService.sendWebNotification('user123', KeyEscrowEvent.MILESTONE_APPROVED, { amount: 500 });
-      expect(result).toBe(true);
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[NotificationService:Web] Sending web alert to user123',
-        expect.objectContaining({ userId: 'user123', title: 'Alert: MILESTONE_APPROVED' })
-      );
+    it('should persist and send a web notification for a valid payload', async () => {
+      const res = await svc.sendWebNotification('user123', KeyEscrowEvent.MILESTONE_APPROVED, { amount: 500 });
+      expect(res.success).toBe(true);
+      expect(transportMock.sendWebNotification).toHaveBeenCalled();
+
+      const entries = repo.findByUser('user123');
+      expect(entries.length).toBeGreaterThanOrEqual(1);
+      expect(entries[0].title).toContain('MILESTONE_APPROVED');
     });
 
-    it('should fail cleanly and log error on empty userId', async () => {
-      const result = await notificationService.sendWebNotification('', KeyEscrowEvent.ESCROW_RESOLVED);
-      expect(result).toBe(false);
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        '[NotificationService:Web] Failed to send web alert for event ESCROW_RESOLVED',
-        'Invalid user ID'
-      );
+    it('should fail cleanly on empty userId', async () => {
+      const result = await svc.sendWebNotification('', KeyEscrowEvent.ESCROW_RESOLVED);
+      expect(result.success).toBe(false);
+      expect(result.message).toMatch(/Invalid user ID/);
+      expect(transportMock.sendWebNotification).not.toHaveBeenCalled();
     });
   });
 });

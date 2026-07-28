@@ -1,20 +1,16 @@
 /**
  * @module rateLimitStore
- * @description
- * In-memory store for rate limiting using a sliding-window counter algorithm.
+ * @description Shared in-process storage for all rate-limit state.
  *
- * Each entry tracks:
- *   - `count`     – requests in the current window
- *   - `windowStart` – epoch ms when the current window began
- *   - `blocked`   – if the key is hard-blocked (abuse guard)
- *   - `blockedUntil` – epoch ms when the block expires
- *
- * The store auto-expires stale entries via a periodic sweep to prevent
- * unbounded memory growth in production.
+ * The HTTP middleware uses fixed-window counter entries, while the outbound
+ * webhook limiter uses token-bucket entries. Both paths store their data
+ * through the same interface so key hashing, lifecycle, and cleanup semantics
+ * stay consistent.
  *
  * @security
- *   - Keys are hashed before storage to avoid leaking raw IPs in heap snapshots.
- *   - Blocked entries survive the sweep until `blockedUntil` passes.
+ *   - Keys are hashed before storage to avoid leaking raw IPs, hostnames, or
+ *     provider IDs in heap snapshots.
+ *   - Blocked counter entries survive the sweep until `blockedUntil` passes.
  */
 
 import { createHash } from 'crypto';
@@ -26,21 +22,65 @@ export interface RateLimitEntry {
   blockedUntil: number;
 }
 
+export interface TokenBucketEntry {
+  /** Current token count, including fractional tokens between refill ticks. */
+  tokens: number;
+  /** Epoch millisecond timestamp of the last refill calculation. */
+  lastRefillMs: number;
+  /** FIFO queue of in-process waiters released when tokens refill. */
+  queue: Array<() => void>;
+}
+
 export interface StoreOptions {
   /** How often (ms) the GC sweep runs. Default: 60_000 */
   sweepIntervalMs?: number;
 }
 
-export class RateLimitStore {
-  private readonly store = new Map<string, RateLimitEntry>();
+/**
+ * Unified storage contract for rate limiting.
+ *
+ * Implementations must hash or otherwise protect raw keys before persistence.
+ * Counter operations are used by Express request limiting. Token bucket
+ * operations are used by outbound webhook delivery pacing. `sweep` only removes
+ * stale counter entries because token-bucket queues may contain live waiters.
+ */
+export interface RateLimitStoreInterface {
+  /** Retrieve a fixed-window counter entry for a raw rate-limit key. */
+  get(rawKey: string): RateLimitEntry | undefined;
+  /** Upsert a fixed-window counter entry for a raw rate-limit key. */
+  set(rawKey: string, entry: RateLimitEntry): void;
+  /** Delete all rate-limit state associated with a raw key. */
+  delete(rawKey: string): void;
+  /** Retrieve a token-bucket entry for a raw provider key. */
+  getTokenBucket(rawKey: string): TokenBucketEntry | undefined;
+  /** Upsert a token-bucket entry for a raw provider key. */
+  setTokenBucket(rawKey: string, entry: TokenBucketEntry): void;
+  /** Number of fixed-window counter entries tracked by this store. */
+  readonly size: number;
+  /** Number of token-bucket entries tracked by this store. */
+  readonly tokenBucketSize: number;
+  /** Remove stale fixed-window entries. */
+  sweep(windowMs?: number): void;
+  /** Clear all stored state without destroying the store. */
+  clear(): void;
+  /** Stop background work and clear all stored state. */
+  destroy(): void;
+}
+
+export class RateLimitStore implements RateLimitStoreInterface {
+  private readonly counters = new Map<string, RateLimitEntry>();
+  private readonly tokenBuckets = new Map<string, TokenBucketEntry>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private _destroyed = false;
 
   constructor(options: StoreOptions = {}) {
     const interval = options.sweepIntervalMs ?? 60_000;
     if (interval > 0) {
-      this.sweepTimer = setInterval(() => this.sweep(), interval);
-      if (this.sweepTimer.unref) this.sweepTimer.unref();
+      const timer: ReturnType<typeof setInterval> = setInterval(() => this.sweep(), interval);
+      if (typeof (timer as unknown as { unref?: () => void }).unref === 'function') {
+        (timer as unknown as { unref: () => void }).unref();
+      }
+      this.sweepTimer = timer;
     }
   }
 
@@ -50,47 +90,72 @@ export class RateLimitStore {
   }
 
   /**
-   * Derive a stable, opaque key from a raw identifier (e.g. IP address).
-   * Using SHA-256 prevents raw PII from appearing in heap snapshots.
+   * Derive a stable, opaque key from a raw identifier.
+   * Using SHA-256 prevents raw PII or provider identifiers from appearing in
+   * heap snapshots.
    */
   static hashKey(raw: string): string {
     return createHash('sha256').update(raw).digest('hex');
   }
 
-  /** Retrieve an entry or undefined if it doesn't exist. */
+  /** Retrieve a fixed-window counter entry or undefined if it does not exist. */
   get(rawKey: string): RateLimitEntry | undefined {
-    return this.store.get(RateLimitStore.hashKey(rawKey));
+    return this.counters.get(RateLimitStore.hashKey(rawKey));
   }
 
-  /** Upsert an entry. */
+  /** Upsert a fixed-window counter entry. */
   set(rawKey: string, entry: RateLimitEntry): void {
-    this.store.set(RateLimitStore.hashKey(rawKey), entry);
+    this.counters.set(RateLimitStore.hashKey(rawKey), entry);
   }
 
-  /** Delete an entry. */
+  /** Delete both counter and token-bucket state for a raw key. */
   delete(rawKey: string): void {
-    this.store.delete(RateLimitStore.hashKey(rawKey));
+    const hashedKey = RateLimitStore.hashKey(rawKey);
+    this.counters.delete(hashedKey);
+    this.tokenBuckets.delete(hashedKey);
   }
 
-  /** Total number of tracked keys (for diagnostics). */
+  /** Retrieve a token-bucket entry or undefined if it does not exist. */
+  getTokenBucket(rawKey: string): TokenBucketEntry | undefined {
+    return this.tokenBuckets.get(RateLimitStore.hashKey(rawKey));
+  }
+
+  /** Upsert a token-bucket entry. */
+  setTokenBucket(rawKey: string, entry: TokenBucketEntry): void {
+    this.tokenBuckets.set(RateLimitStore.hashKey(rawKey), entry);
+  }
+
+  /** Total number of fixed-window counter keys. */
   get size(): number {
-    return this.store.size;
+    return this.counters.size;
+  }
+
+  /** Total number of token-bucket keys. */
+  get tokenBucketSize(): number {
+    return this.tokenBuckets.size;
   }
 
   /**
-   * Remove entries whose windows have expired AND whose block has lifted.
-   * Called automatically; exposed for testing.
+   * Remove counter entries whose windows have expired and whose block has
+   * lifted. Token buckets are intentionally not swept here because queued
+   * waiters are live in-process callbacks.
    */
   sweep(windowMs = 60_000): void {
     if (this._destroyed) return;
     const now = Date.now();
-    for (const [key, entry] of this.store.entries()) {
+    for (const [key, entry] of this.counters.entries()) {
       const windowExpired = now - entry.windowStart > windowMs;
       const blockExpired = !entry.blocked || now > entry.blockedUntil;
       if (windowExpired && blockExpired) {
-        this.store.delete(key);
+        this.counters.delete(key);
       }
     }
+  }
+
+  /** Clear all stored state. */
+  clear(): void {
+    this.counters.clear();
+    this.tokenBuckets.clear();
   }
 
   /** Stop the background sweep and clear all entries. */
@@ -100,6 +165,6 @@ export class RateLimitStore {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    this.store.clear();
+    this.clear();
   }
 }

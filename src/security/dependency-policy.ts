@@ -29,7 +29,9 @@ function toBlockedSeverities(minSeverity: DependencyPolicy['failOn']): Severity[
 function countBySeverity(issues: DependencyIssue[]): VulnerabilityCounts {
   return issues.reduce(
     (acc, issue) => {
-      acc[issue.severity] += 1;
+      if (SEVERITY_ORDER.includes(issue.severity)) {
+        acc[issue.severity] += 1;
+      }
       return acc;
     },
     { ...EMPTY_COUNTS },
@@ -38,6 +40,12 @@ function countBySeverity(issues: DependencyIssue[]): VulnerabilityCounts {
 
 /**
  * @notice Evaluates vulnerabilities against repository policy and returns a merge-safe decision.
+ * @param summary The dependency scan summary containing parsed vulnerabilities.
+ * @param policy The dependency policy config, defining the threshold (failOn) and dev dependency inclusions.
+ *               The failOn threshold blocks any vulnerability at or above that severity level.
+ *               Severities ordered lowest to highest: info < low < moderate < high < critical.
+ *               If any unrecognized severity is encountered in either the policy or issues, the gate fails closed.
+ * @returns A PolicyEvaluation indicating if the scan passed, the counts, and the reason.
  */
 export function evaluateDependencyPolicy(
   summary: DependencyScanSummary,
@@ -48,6 +56,20 @@ export function evaluateDependencyPolicy(
     : summary.issues.filter((issue) => !issue.isDevDependency);
 
   const consideredCounts = countBySeverity(consideredIssues);
+
+  const hasInvalidPolicySeverity = !SEVERITY_ORDER.includes(policy.failOn as any);
+  const hasInvalidIssueSeverity = consideredIssues.some(
+    (issue) => !SEVERITY_ORDER.includes(issue.severity),
+  );
+
+  if (hasInvalidPolicySeverity || hasInvalidIssueSeverity) {
+    return {
+      passed: false,
+      blockingCounts: consideredCounts,
+      reason: 'Failed closed due to unrecognized severity label in policy or scan issues.',
+    };
+  }
+
   const blockedSeverities = toBlockedSeverities(policy.failOn);
   const blockedCount = blockedSeverities.reduce((acc, severity) => acc + consideredCounts[severity], 0);
 

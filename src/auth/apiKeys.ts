@@ -19,25 +19,21 @@
 import * as crypto from 'crypto';
 import { ApiKey } from '../database/schema';
 import { database } from '../database';
-import { AuthCache, ApiKeyInfo } from './authCache';
+import { AuthCache } from './authCache';
+import { validateEnv } from '../config/env.schema';
 
 // Initialize cache with config-driven settings
 let authCache: AuthCache | null = null;
-
-/**
- * Default auth cache configuration when env vars are not set.
- */
-const DEFAULT_CACHE_TTL_MS = 300_000; // 5 minutes
-const DEFAULT_CACHE_MAX_ENTRIES = 1000;
 
 /**
  * Get or initialize the auth cache instance.
  */
 export function getAuthCache(): AuthCache {
   if (!authCache) {
+    const env = validateEnv();
     authCache = new AuthCache({
-      ttlMs: DEFAULT_CACHE_TTL_MS,
-      maxEntries: DEFAULT_CACHE_MAX_ENTRIES,
+      ttlMs: env.AUTH_CACHE_TTL_MS,
+      maxEntries: env.AUTH_CACHE_MAX_ENTRIES,
     });
   }
   return authCache;
@@ -50,7 +46,15 @@ export function resetAuthCache(): void {
   authCache = null;
 }
 
-export { ApiKeyInfo };
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  scope: string[];
+  createdBy: string;
+  createdAt: Date;
+  expiresAt?: Date;
+  isActive: boolean;
+}
 
 export interface ApiKeyRequest {
   name: string;
@@ -125,6 +129,48 @@ export function computeKeySelector(apiKey: string): string {
 }
 
 /**
+ * Creates a new API key with the given specifications.
+ *
+ * @param request - The API key creation request.
+ * @returns The created API key info and the plain key (only returned once).
+ */
+export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: string; info: ApiKeyInfo }> {
+  const apiKey = generateApiKey();
+  const { salt, hash } = hashApiKey(apiKey);
+
+  // Store salt and hash together in the key_hash field
+  const keyHash = `${salt}:${hash}`;
+  const keySelector = computeKeySelector(apiKey);
+
+  const dbKey = await database.createApiKey({
+    name: request.name,
+    key_hash: keyHash,
+    key_selector: keySelector,
+    scope: request.scope,
+    created_by: request.createdBy,
+    expires_at: request.expiresAt,
+    is_active: true
+  });
+
+  // Invalidate cache for this user's keys (conservative approach)
+  const cache = getAuthCache();
+  cache.invalidateByUserId(request.createdBy);
+
+  return {
+    apiKey,
+    info: {
+      id: dbKey.id,
+      name: dbKey.name,
+      scope: dbKey.scope,
+      createdBy: dbKey.created_by,
+      createdAt: dbKey.created_at,
+      expiresAt: dbKey.expires_at,
+      isActive: dbKey.is_active
+    }
+  };
+}
+
+/**
  * Validates that a stored credential is a well-formed salt:hash string.
  *
  * The stored format must be: `<salt>:<hash>`
@@ -160,48 +206,6 @@ export function isValidSaltHashFormat(storedCredential: string): boolean {
   const isValidHash = /^[a-f0-9]{128}$/i.test(hash);
 
   return isValidSalt && isValidHash;
-}
-
-/**
- * Creates a new API key with the given specifications.
- *
- * @param request - The API key creation request.
- * @returns The created API key info and the plain key (only returned once).
- */
-export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: string; info: ApiKeyInfo }> {
-  const apiKey = generateApiKey();
-  const { salt, hash } = hashApiKey(apiKey);
-
-  // Store salt and hash together in the key_hash field
-  const keyHash = `${salt}:${hash}`;
-  const keySelector = computeKeySelector(apiKey);
-
-  const dbKey = await database.createApiKey({
-    name: request.name,
-    key_hash: keyHash,
-    key_selector: keySelector,
-    scope: request.scope,
-    created_by: request.createdBy,
-    expires_at: request.expiresAt,
-    is_active: true,
-  });
-
-  // Invalidate cache for this user's keys (conservative approach)
-  const cache = getAuthCache();
-  cache.invalidateByUserId(request.createdBy);
-
-  return {
-    apiKey,
-    info: {
-      id: dbKey.id,
-      name: dbKey.name,
-      scope: dbKey.scope,
-      createdBy: dbKey.created_by,
-      createdAt: dbKey.created_at,
-      expiresAt: dbKey.expires_at,
-      isActive: dbKey.is_active,
-    },
-  };
 }
 
 /**
@@ -270,29 +274,29 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
   if (!pbkdf2Verified && !verifyApiKey(apiKey, salt, hash)) {
     return null;
   }
-
+  
   // Backfill the selector for legacy keys so future lookups hit the fast path
   if (!dbKey.key_selector) {
     await database.updateApiKey(dbKey.id, { key_selector: selector });
   }
-
+  
   // Update last used timestamp
   await database.updateApiKey(dbKey.id, { last_used_at: new Date() });
-
+  
   // Check if key has expired
   if (dbKey.expires_at && new Date() > dbKey.expires_at) {
     await database.deactivateApiKey(dbKey.id);
     return null;
   }
 
-  const result: ApiKeyInfo = {
+  const result = {
     id: dbKey.id,
     name: dbKey.name,
     scope: dbKey.scope,
     createdBy: dbKey.created_by,
     createdAt: dbKey.created_at,
     expiresAt: dbKey.expires_at,
-    isActive: dbKey.is_active,
+    isActive: dbKey.is_active
   };
 
   // Cache the successful validation result
@@ -340,8 +344,8 @@ export async function rotateApiKey(keyId: string): Promise<{ apiKey: string; inf
       createdBy: updatedKey.created_by,
       createdAt: updatedKey.created_at,
       expiresAt: updatedKey.expires_at,
-      isActive: updatedKey.is_active,
-    },
+      isActive: updatedKey.is_active
+    }
   };
 }
 

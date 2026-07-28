@@ -8,7 +8,9 @@ describe('ReputationStore', () => {
     jobsCompleted: 1,
     totalRatings: 1,
     reviews: [],
-    lastUpdated: new Date().toISOString()
+    lastUpdated: new Date().toISOString(),
+    weightedScore: 5,
+    scoreAlgorithm: 'exp-decay-v1'
   };
 
   beforeEach(() => {

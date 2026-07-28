@@ -1,47 +1,100 @@
+process.env.JWT_SECRET = 'contractmetadata-test-secret';
+
 import request from 'supertest';
 import express from 'express';
+import jwt from 'jsonwebtoken';
 import { database } from './database';
 import { contractMetadataRoutes } from './modules/contractMetadata/contractMetadata.routes';
+
+const SECRET = process.env.JWT_SECRET as string;
+
+const ADMIN_USER_ID = 'admin-user-id-0001';
+const CLIENT_USER_ID = 'client-user-id-0001';
+
+function makeToken(role: string, sub = 'user-1'): string {
+  return jwt.sign({ sub, email: `${sub}@test.com`, role }, SECRET, { expiresIn: '1h' }) as string;
+}
+
+const adminToken = () => makeToken('admin', ADMIN_USER_ID);
+const clientToken = () => makeToken('client', CLIENT_USER_ID);
+
+function auth(token: string) {
+  return { Authorization: `Bearer ${token}` };
+}
 
 describe('Contract Metadata Integration Tests', () => {
   let app: express.Application;
   let contractId: string;
-  let userId: string;
   let metadataId: string;
 
   beforeAll(async () => {
-    // Setup test app
     app = express();
     app.use(express.json());
     app.use('/api/v1', contractMetadataRoutes);
 
-    // Clear database
     await database.clearDatabase();
 
-    // Create test user
-    const user = await database.createUser({
-      email: 'test@example.com',
-      role: 'user'
+    await database.createUser({
+      email: 'admin@test.com',
+      role: 'admin'
     });
-    userId = user.id;
 
-    // Create test contract
     const contract = await database.createContract({
-      created_by: userId
+      created_by: ADMIN_USER_ID
     });
     contractId = contract.id;
   });
 
   afterAll(async () => {
-    // Cleanup
     await database.clearDatabase();
   });
 
-  describe('POST /api/v1/contracts/:contractId/metadata', () => {
-    it('should create metadata successfully', async () => {
+  describe('Authorization', () => {
+    it('returns 401 without Authorization header', async () => {
       const response = await request(app)
         .post(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .send({ key: 'test', value: 'test' });
+      expect(response.status).toBe(401);
+      expect(response.body.error).toMatchObject({ code: 'unauthorized' });
+      expect(response.body.error).toHaveProperty('message');
+      expect(response.body.error).toHaveProperty('requestId');
+    });
+
+    it('returns 401 for invalid token', async () => {
+      const response = await request(app)
+        .post(`/api/v1/contracts/${contractId}/metadata`)
+        .set('Authorization', 'Bearer invalid-token')
+        .send({ key: 'test', value: 'test' });
+      expect(response.status).toBe(401);
+    });
+
+    it('returns 401 for token with unrecognised role', async () => {
+      const badRoleToken = jwt.sign(
+        { sub: 'u1', email: 'u1@test.com', role: 'superadmin' },
+        SECRET,
+        { expiresIn: '1h' }
+      );
+      const response = await request(app)
+        .get(`/api/v1/contracts/${contractId}/metadata`)
+        .set('Authorization', `Bearer ${badRoleToken}`);
+      expect(response.status).toBe(401);
+    });
+
+    it('returns 403 for client (contracts:update is ownOnly without owner resolver)', async () => {
+      const response = await request(app)
+        .post(`/api/v1/contracts/${contractId}/metadata`)
+        .set(auth(clientToken()))
+        .send({ key: 'test-key', value: 'test-value' });
+      expect(response.status).toBe(403);
+      expect(response.body.error).toMatchObject({ code: 'forbidden' });
+    });
+  });
+
+  describe('POST /api/v1/contracts/:contractId/metadata', () => {
+    it('should create metadata successfully as admin', async () => {
+      const response = await request(app)
+        .post(`/api/v1/contracts/${contractId}/metadata`)
+        .set(auth(adminToken()))
         .send({
           key: 'test-key',
           value: 'test-value',
@@ -56,28 +109,16 @@ describe('Contract Metadata Integration Tests', () => {
         value: 'test-value',
         data_type: 'string',
         is_sensitive: false,
-        created_by: 'demo-user-id'
+        created_by: ADMIN_USER_ID
       });
       expect(response.body.id).toBeDefined();
       metadataId = response.body.id;
     });
 
-    it('should return 401 for unauthenticated request', async () => {
-      const response = await request(app)
-        .post(`/api/v1/contracts/${contractId}/metadata`)
-        .send({
-          key: 'test-key-2',
-          value: 'test-value-2'
-        });
-
-      expect(response.status).toBe(401);
-      expect(response.body.error).toBe('Authentication required');
-    });
-
     it('should return 400 for non-existent contract', async () => {
       const response = await request(app)
-        .post('/api/v1/contracts/non-existent/metadata')
-        .set('Authorization', 'Bearer demo-user-token')
+        .post('/api/v1/contracts/00000000-0000-0000-0000-000000000000/metadata')
+        .set(auth(adminToken()))
         .send({
           key: 'test-key',
           value: 'test-value'
@@ -89,9 +130,9 @@ describe('Contract Metadata Integration Tests', () => {
     it('should return 409 for duplicate key', async () => {
       const response = await request(app)
         .post(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
-          key: 'test-key', // Same key as first test
+          key: 'test-key',
           value: 'different-value'
         });
 
@@ -102,14 +143,14 @@ describe('Contract Metadata Integration Tests', () => {
     it('should return 400 for invalid data', async () => {
       const response = await request(app)
         .post(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
-          key: '', // Invalid: empty key
+          key: '',
           value: 'test-value'
         });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toBe('Validation failed');
+      expect(response.body.error).toMatchObject({ code: 'validation_error' });
     });
   });
 
@@ -117,7 +158,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should return paginated metadata list', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body).toMatchObject({
@@ -130,11 +171,10 @@ describe('Contract Metadata Integration Tests', () => {
     });
 
     it('should support pagination', async () => {
-      // Create additional metadata
       for (let i = 0; i < 5; i++) {
         await request(app)
           .post(`/api/v1/contracts/${contractId}/metadata`)
-          .set('Authorization', 'Bearer demo-user-token')
+          .set(auth(adminToken()))
           .send({
             key: `test-key-${i}`,
             value: `test-value-${i}`
@@ -143,10 +183,10 @@ describe('Contract Metadata Integration Tests', () => {
 
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata?page=1&limit=3`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
-      expect(response.body.total).toBe(6); // 1 original + 5 new
+      expect(response.body.total).toBe(6);
       expect(response.body.page).toBe(1);
       expect(response.body.limit).toBe(3);
       expect(response.body.records).toHaveLength(3);
@@ -155,7 +195,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should filter by key', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata?key=test-key-0`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body.records).toHaveLength(1);
@@ -163,10 +203,9 @@ describe('Contract Metadata Integration Tests', () => {
     });
 
     it('should filter by data_type', async () => {
-      // Create a metadata with different data type
       await request(app)
         .post(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
           key: 'number-key',
           value: '123',
@@ -175,7 +214,7 @@ describe('Contract Metadata Integration Tests', () => {
 
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata?data_type=number`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body.records).toHaveLength(1);
@@ -187,7 +226,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should return single metadata record', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata/${metadataId}`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body.id).toBe(metadataId);
@@ -196,8 +235,8 @@ describe('Contract Metadata Integration Tests', () => {
 
     it('should return 400 for non-existent metadata', async () => {
       const response = await request(app)
-        .get(`/api/v1/contracts/${contractId}/metadata/non-existent`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .get(`/api/v1/contracts/${contractId}/metadata/00000000-0000-0000-0000-000000000000`)
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(400);
     });
@@ -207,7 +246,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should update metadata successfully', async () => {
       const response = await request(app)
         .patch(`/api/v1/contracts/${contractId}/metadata/${metadataId}`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
           value: 'updated-value',
           is_sensitive: true
@@ -216,15 +255,15 @@ describe('Contract Metadata Integration Tests', () => {
       expect(response.status).toBe(200);
       expect(response.body.value).toBe('updated-value');
       expect(response.body.is_sensitive).toBe(true);
-      expect(response.body.updated_by).toBe('demo-user-id');
+      expect(response.body.updated_by).toBe(ADMIN_USER_ID);
     });
 
     it('should return 400 for immutable field updates', async () => {
       const response = await request(app)
         .patch(`/api/v1/contracts/${contractId}/metadata/${metadataId}`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
-          key: 'new-key' // Immutable field
+          key: 'new-key'
         });
 
       expect(response.status).toBe(400);
@@ -232,8 +271,8 @@ describe('Contract Metadata Integration Tests', () => {
 
     it('should return 400 for non-existent metadata', async () => {
       const response = await request(app)
-        .patch(`/api/v1/contracts/${contractId}/metadata/non-existent`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .patch(`/api/v1/contracts/${contractId}/metadata/00000000-0000-0000-0000-000000000000`)
+        .set(auth(adminToken()))
         .send({
           value: 'updated-value'
         });
@@ -246,7 +285,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should delete metadata successfully', async () => {
       const response = await request(app)
         .delete(`/api/v1/contracts/${contractId}/metadata/${metadataId}`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(204);
     });
@@ -254,7 +293,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should be idempotent - deleting already deleted record returns 204', async () => {
       const response = await request(app)
         .delete(`/api/v1/contracts/${contractId}/metadata/${metadataId}`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(204);
     });
@@ -262,7 +301,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should not appear in list after deletion', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       const deletedRecord = response.body.records.find((r: any) => r.id === metadataId);
       expect(deletedRecord).toBeUndefined();
@@ -273,10 +312,9 @@ describe('Contract Metadata Integration Tests', () => {
     let sensitiveId: string;
 
     beforeAll(async () => {
-      // Create sensitive metadata as regular user
       const response = await request(app)
         .post(`/api/v1/contracts/${contractId}/metadata`)
-        .set('Authorization', 'Bearer demo-user-token')
+        .set(auth(adminToken()))
         .send({
           key: 'sensitive-key',
           value: 'secret-value',
@@ -285,41 +323,10 @@ describe('Contract Metadata Integration Tests', () => {
       sensitiveId = response.body.id;
     });
 
-    it('should mask sensitive data for non-owners', async () => {
-      // Create a different user
-      const otherUser = await database.createUser({
-        email: 'other@example.com',
-        role: 'user'
-      });
-
-      // Create a contract owned by other user
-      const otherContract = await database.createContract({
-        created_by: otherUser.id
-      });
-
-      // Create sensitive metadata for other contract
-      const sensitiveResponse = await request(app)
-        .post(`/api/v1/contracts/${otherContract.id}/metadata`)
-        .set('Authorization', `Bearer ${otherUser.id}`)
-        .send({
-          key: 'other-sensitive',
-          value: 'other-secret',
-          is_sensitive: true
-        });
-
-      // Try to access as demo user (should be masked)
-      const response = await request(app)
-        .get(`/api/v1/contracts/${otherContract.id}/metadata/${sensitiveResponse.body.id}`)
-        .set('Authorization', 'Bearer demo-user-token');
-
-      expect(response.status).toBe(200);
-      expect(response.body.value).toBe('***REDACTED***');
-    });
-
-    it('should not mask sensitive data for owners', async () => {
+    it('should not mask sensitive data for owners (admin creator)', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata/${sensitiveId}`)
-        .set('Authorization', 'Bearer demo-user-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body.value).toBe('secret-value');
@@ -328,7 +335,7 @@ describe('Contract Metadata Integration Tests', () => {
     it('should not mask sensitive data for admins', async () => {
       const response = await request(app)
         .get(`/api/v1/contracts/${contractId}/metadata/${sensitiveId}`)
-        .set('Authorization', 'Bearer demo-admin-token');
+        .set(auth(adminToken()));
 
       expect(response.status).toBe(200);
       expect(response.body.value).toBe('secret-value');

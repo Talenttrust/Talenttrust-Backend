@@ -383,6 +383,15 @@ describe('AuditService', () => {
     expect(service.query({ actor: 'alice' })).toHaveLength(1);
   });
 
+  it('stream() yields entries without preloading all records', () => {
+    service.log(makeInput({ actor: 'alice' }));
+    service.log(makeInput({ actor: 'bob' }));
+
+    const entries = Array.from(service.stream({ limit: 1 }));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].actor).toBe('alice');
+  });
+
   it('getById() returns correct entry', () => {
     const entry = service.log(makeInput());
     expect(service.getById(entry.id)).toBe(entry);
@@ -550,13 +559,15 @@ describe('auditRouter (singleton, real router)', () => {
   it('GET /api/v1/audit rejects invalid action param', async () => {
     const app = buildTestApp();
     const res = await request(app).get('/api/v1/audit?action=INVALID_ACTION').expect(400);
-    expect(res.body.error).toMatch(/Invalid action/);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: { path: string[] }) => d.path.includes('action'))).toBe(true);
   });
 
   it('GET /api/v1/audit rejects invalid severity param', async () => {
     const app = buildTestApp();
     const res = await request(app).get('/api/v1/audit?severity=UNKNOWN').expect(400);
-    expect(res.body.error).toMatch(/Invalid severity/);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: { path: string[] }) => d.path.includes('severity'))).toBe(true);
   });
 
   it('GET /api/v1/audit/:id returns 404 for unknown id', async () => {
@@ -567,6 +578,22 @@ describe('auditRouter (singleton, real router)', () => {
   it('GET /api/v1/audit/integrity returns 200 for empty log', async () => {
     const app = buildTestApp();
     await request(app).get('/api/v1/audit/integrity').expect(200);
+  });
+
+  it('GET /api/v1/audit/export streams NDJSON output', async () => {
+    const app = buildTestApp();
+    singletonStore.append(makeInput({ actor: 'stream-user-1' }));
+    singletonStore.append(makeInput({ actor: 'stream-user-2' }));
+
+    const res = await request(app)
+      .get('/api/v1/audit/export?limit=1')
+      .expect(200);
+
+    expect(res.headers['content-type']).toContain('application/x-ndjson');
+    const lines = res.text.trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const first = JSON.parse(lines[0]) as { actor: string };
+    expect(first.actor).toBe('stream-user-1');
   });
 });
 

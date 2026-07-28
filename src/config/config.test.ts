@@ -14,6 +14,7 @@ const CONFIG_ENV_KEYS = [
   'STELLAR_NETWORK_PASSPHRASE',
   'SOROBAN_RPC_URL',
   'SOROBAN_CONTRACT_ID',
+  'ALLOWED_ASSETS',
 ];
 
 function clearConfigEnvVars(): void {
@@ -238,5 +239,95 @@ describe('loadConfig (appConfiguration)', () => {
     const cfg = loadConfig();
     expect(cfg.port).toBe(3001);
     expect(cfg.upstreamContractsUrl).toBe('https://example.invalid/contracts');
+  });
+
+  describe('allowedAssets', () => {
+    beforeEach(() => {
+      clearConfigEnvVars();
+      delete process.env.ALLOWED_ASSETS;
+    });
+
+    it('returns default assets when ALLOWED_ASSETS is not set', () => {
+      const cfg = loadConfig({});
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM', 'BTC', 'ETH']);
+    });
+
+    it('parses a comma-separated list from ALLOWED_ASSETS', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: 'USDC,XLM' });
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM']);
+    });
+
+    it('normalises asset codes to uppercase', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: 'usdc,xlm,eth' });
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM', 'ETH']);
+    });
+
+    it('trims whitespace from each asset code', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: ' USDC , XLM ' });
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM']);
+    });
+
+    it('filters out empty segments from ALLOWED_ASSETS', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: 'USDC,,XLM,' });
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM']);
+    });
+
+    it('returns a single-element list when one asset is provided', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: 'USDC' });
+      expect(cfg.allowedAssets).toEqual(['USDC']);
+    });
+
+    it('returns default assets when ALLOWED_ASSETS is an empty string', () => {
+      const cfg = loadConfig({ ALLOWED_ASSETS: '' });
+      expect(cfg.allowedAssets).toEqual(['USDC', 'XLM', 'BTC', 'ETH']);
+    });
+  });
+});
+
+describe('loadConfig — circuit breaker config', () => {
+  const savedEnv = { ...process.env };
+
+  afterEach(() => {
+    delete process.env.CB_FAILURE_THRESHOLD;
+    delete process.env.CB_SUCCESS_THRESHOLD;
+    delete process.env.CB_TIMEOUT_MS;
+  });
+
+  afterAll(() => {
+    process.env = savedEnv;
+  });
+
+  it('uses defaults when CB env vars are absent', () => {
+    const cfg = loadConfig({});
+    expect(cfg.circuitBreaker).toEqual({
+      failureThreshold: 5,
+      successThreshold: 1,
+      timeoutMs: 30_000,
+    });
+  });
+
+  it('reads CB_FAILURE_THRESHOLD from env', () => {
+    const cfg = loadConfig({ CB_FAILURE_THRESHOLD: '10' });
+    expect(cfg.circuitBreaker.failureThreshold).toBe(10);
+  });
+
+  it('reads CB_SUCCESS_THRESHOLD from env', () => {
+    const cfg = loadConfig({ CB_SUCCESS_THRESHOLD: '3' });
+    expect(cfg.circuitBreaker.successThreshold).toBe(3);
+  });
+
+  it('reads CB_TIMEOUT_MS from env', () => {
+    const cfg = loadConfig({ CB_TIMEOUT_MS: '60000' });
+    expect(cfg.circuitBreaker.timeoutMs).toBe(60_000);
+  });
+
+  it('clamps CB_FAILURE_THRESHOLD to minimum of 1', () => {
+    const cfg = loadConfig({ CB_FAILURE_THRESHOLD: '0' });
+    expect(cfg.circuitBreaker.failureThreshold).toBe(1);
+  });
+
+  it('clamps CB_TIMEOUT_MS to minimum of 1000', () => {
+    const cfg = loadConfig({ CB_TIMEOUT_MS: '0' });
+    expect(cfg.circuitBreaker.timeoutMs).toBe(1_000);
   });
 });

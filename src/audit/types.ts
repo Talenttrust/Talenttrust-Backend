@@ -9,12 +9,45 @@
  * - Sensitive payloads are stored as opaque strings; callers must sanitise PII before logging.
  */
 
+/**
+ * Every audited action, as a runtime value list.
+ *
+ * This is the single source of truth: {@link AuditAction} is derived from it,
+ * and both the request-body validator (`audit/inputValidation`) and the query
+ * filter validator (`audit/router`) validate against this same array, so a new
+ * action can never be accepted by one path and rejected by the other.
+ */
+export const AUDIT_ACTIONS = [
+  'CONTRACT_CREATED',
+  'CONTRACT_UPDATED',
+  'CONTRACT_CANCELLED',
+  'CONTRACT_COMPLETED',
+  'PAYMENT_INITIATED',
+  'PAYMENT_RELEASED',
+  'PAYMENT_DISPUTED',
+  'REPUTATION_UPDATED',
+  'USER_CREATED',
+  'USER_UPDATED',
+  'USER_DELETED',
+  'AUTH_LOGIN',
+  'AUTH_LOGOUT',
+  'AUTH_FAILED',
+  'AUTH_LOCKOUT_TRIGGERED',
+  'AUTH_LOCKOUT_RELEASED',
+  'ADMIN_ACTION',
+  'ENDPOINT_ACCESS',
+  'ENDPOINT_MUTATION',
+  'DEPLOYMENT_PROMOTED',
+  'DEPLOYMENT_ROLLED_BACK',
+] as const;
+
 /** Categories of sensitive state changes that must be audited. */
 export type AuditAction =
   | 'CONTRACT_CREATED'
   | 'CONTRACT_UPDATED'
   | 'CONTRACT_CANCELLED'
   | 'CONTRACT_COMPLETED'
+  | 'CONTRACT_DELETED'
   | 'PAYMENT_INITIATED'
   | 'PAYMENT_RELEASED'
   | 'PAYMENT_DISPUTED'
@@ -25,12 +58,21 @@ export type AuditAction =
   | 'AUTH_LOGIN'
   | 'AUTH_LOGOUT'
   | 'AUTH_FAILED'
+  | 'AUTH_LOCKOUT_TRIGGERED'
+  | 'AUTH_LOCKOUT_RELEASED'
   | 'ADMIN_ACTION'
   | 'ENDPOINT_ACCESS'
-  | 'ENDPOINT_MUTATION';
+  | 'ENDPOINT_MUTATION'
+  | 'DEPLOYMENT_PROMOTED'
+  | 'DEPLOYMENT_ROLLED_BACK'
+  | 'MILESTONES_CREATED'
+  | 'MILESTONES_UPDATED'
+  | 'MILESTONES_DELETED';
+
+export const AUDIT_SEVERITIES = ['INFO', 'WARNING', 'CRITICAL'] as const;
 
 /** Severity level of the audit event. */
-export type AuditSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
+export type AuditSeverity = (typeof AUDIT_SEVERITIES)[number];
 
 /**
  * An immutable audit log entry.
@@ -72,6 +114,46 @@ export interface AuditEntry {
 /** Input required to create a new audit entry (hash fields are computed internally). */
 export type CreateAuditEntryInput = Omit<AuditEntry, 'id' | 'timestamp' | 'hash' | 'previousHash'>;
 
+/**
+ * Outcome of a single item within a `POST /api/v1/audit/bulk` request.
+ * Exactly one of `entry` / `error` is populated, matching `success`.
+ */
+export interface BulkAuditItemResult {
+  /** Position of this item within the submitted `entries` array. */
+  index: number;
+  success: boolean;
+  entry?: AuditEntry;
+  error?: string;
+}
+
+/** Aggregate response body for `POST /api/v1/audit/bulk`. */
+export interface BulkAuditResult {
+  results: BulkAuditItemResult[];
+  succeeded: number;
+  failed: number;
+}
+
+/** Opaque cursor for pagination. Encodes position and filters. */
+export type AuditCursor = string;
+
+/** Internal cursor structure (encoded to base64 for API). */
+export interface CursorData {
+  /** ID of the last entry in the previous page. */
+  lastId: string;
+  /** Timestamp of the last entry for ordering stability. */
+  lastTimestamp: string;
+  /** Filters applied when this cursor was generated. */
+  filters: {
+    action?: AuditAction;
+    severity?: AuditSeverity;
+    actor?: string;
+    resource?: string;
+    resourceId?: string;
+    from?: string;
+    to?: string;
+  };
+}
+
 /** Query filters for retrieving audit log entries. */
 export interface AuditQuery {
   action?: AuditAction;
@@ -83,10 +165,12 @@ export interface AuditQuery {
   from?: string;
   /** ISO-8601 end of time range (inclusive). */
   to?: string;
-  /** Maximum number of results to return (default: 100, max: 1000). */
+  /** Maximum number of results to return. Undefined means "no explicit limit". */
   limit?: number;
-  /** Zero-based offset for pagination. */
+  /** Zero-based offset for pagination (deprecated, use cursor instead). */
   offset?: number;
+  /** Opaque cursor for pagination. */
+  cursor?: AuditCursor;
 }
 
 /** Result of a chain integrity verification. */
@@ -98,4 +182,29 @@ export interface IntegrityReport {
   /** ID of the first corrupted entry, if any. */
   firstCorruptedId?: string;
   checkedAt: string;
+}
+
+/** Paginated audit query result. */
+export interface AuditQueryResult {
+  entries: AuditEntry[];
+  count: number;
+  limit: number;
+  /** Opaque cursor for the next page, if more results exist. */
+  nextCursor?: string;
+}
+
+/** Encodes cursor data to an opaque base64 string. */
+export function encodeCursor(data: CursorData): string {
+  const json = JSON.stringify(data);
+  return Buffer.from(json, 'utf-8').toString('base64');
+}
+
+/** Decodes an opaque base64 cursor string to cursor data. */
+export function decodeCursor(cursor: string): CursorData {
+  try {
+    const json = Buffer.from(cursor, 'base64').toString('utf-8');
+    return JSON.parse(json) as CursorData;
+  } catch {
+    throw new Error('Invalid cursor format');
+  }
 }

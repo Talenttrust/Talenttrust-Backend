@@ -1,7 +1,10 @@
-import { ContractEvent, EventIngestionResult, ValidationResult } from './types';
-import { EventValidator } from '../validation/eventValidator';
 import { EventAuditService } from '../repository/eventAuditRepository';
-import { DeduplicationManager } from '../utils/deduplication';
+import { ContractEvent } from './types';
+import {
+  EnvelopeValidationOptions,
+  isRecord,
+  validateEventEnvelopePreamble,
+} from '../shared/eventEnvelopeValidation';
 
 export interface EventIngestionConfig {
   enableStrictValidation: boolean;
@@ -10,143 +13,154 @@ export interface EventIngestionConfig {
   batchSize: number;
 }
 
+export interface EventValidationError {
+  field: string;
+  message: string;
+}
+
+export interface EventValidationResult {
+  isValid: boolean;
+  errors: EventValidationError[];
+}
+
+export interface EventIngestionResult {
+  deduplicationKey?: string;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  reason?: string;
+  processedAt: Date;
+  code?: string;
+}
+
+function toTimestampNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+/**
+ * Preamble options for the event-ingestion-service validator.
+ * Mirrors the inline behaviour that used to live here:
+ * - collect every failing field (`abortEarly: false`)
+ * - accept numeric or numeric-string timestamps (`timestampRule: 'numeric'`)
+ * - messages suffixed with a trailing `.`
+ */
+const INGESTION_PREAMBLE_OPTIONS = {
+  rootErrorMessage: 'Event must be a JSON object.',
+  messageSuffix: '.',
+  timestampRule: 'numeric',
+  abortEarly: false,
+} satisfies EnvelopeValidationOptions;
+
 export class EventIngestionService {
   constructor(
-    private auditService: EventAuditService,
-    private config: EventIngestionConfig
+    private readonly auditService: EventAuditService,
+    private readonly config: EventIngestionConfig,
   ) {}
 
-  /**
-   * Processes a single contract event with full idempotency guarantees
-   * @param event The contract event to process
-   * @param contractType The type of contract for schema validation
-   * @returns Promise resolving to the ingestion result
-   */
-  async processEvent(event: ContractEvent, contractType: string): Promise<EventIngestionResult> {
+  public async processEvent(
+    event: ContractEvent,
+    contractType: string,
+    correlationId?: string,
+  ): Promise<EventIngestionResult> {
+    const validation = this.validateEvent(event, contractType);
+    if (!validation.isValid) {
+      return {
+        status: 'rejected',
+        reason: `Validation failed: ${validation.errors.map((error) => error.message).join('; ')}`,
+        processedAt: new Date(),
+      };
+    }
+
     try {
-      // 1. Validate event structure
-      const baseValidation = EventValidator.validate(event);
-      if (!baseValidation.isValid) {
-        const reason = `Validation failed: ${baseValidation.errors.map(e => `${e.field}: ${e.message}`).join(', ')}`;
-        return this.auditService.rejectEvent(event, reason);
-      }
+      const response = await this.auditService.processEvent(event, contractType, correlationId);
 
-      // 2. Validate event age
-      if (this.config.maxEventAgeMs > 0) {
-        const eventAge = Date.now() - event.timestamp;
-        if (eventAge > this.config.maxEventAgeMs) {
-          return this.auditService.rejectEvent(event, `Event too old: ${eventAge}ms > ${this.config.maxEventAgeMs}ms`);
-        }
-      }
-
-      // 3. Contract-specific validation if enabled
-      if (this.config.enableStrictValidation) {
-        const contractValidation = EventValidator.validateContractSpecificEvent(event, contractType);
-        if (!contractValidation.isValid) {
-          const reason = `Contract validation failed: ${contractValidation.errors.map(e => `${e.field}: ${e.message}`).join(', ')}`;
-          return this.auditService.rejectEvent(event, reason);
-        }
-      }
-
-      // 4. Check for duplicates (idempotency check)
-      const deduplicationKey = DeduplicationManager.computeDeduplicationKey(event);
-      const existingEvent = await this.auditService.repository.findByDeduplicationKey(deduplicationKey);
-      
-      if (existingEvent) {
-        // Verify payload integrity if enabled
-        if (this.config.enablePayloadIntegrityCheck) {
-          const payloadIntegrityValid = DeduplicationManager.validatePayloadIntegrity(
-            event, 
-            existingEvent.payloadHash
-          );
-          
-          if (!payloadIntegrityValid) {
-            return this.auditService.rejectEvent(event, 'Payload integrity check failed - possible tampering');
-          }
-        }
-
+      if (
+        response.status === 'rejected' &&
+        this.config.enablePayloadIntegrityCheck &&
+        response.reason?.includes('already used')
+      ) {
         return {
-          deduplicationKey,
-          status: 'duplicate',
-          reason: 'Event already processed',
-          processedAt: new Date()
+          deduplicationKey: response.deduplicationKey,
+          status: 'rejected',
+          reason: 'Payload integrity check failed: event payload does not match previously processed event.',
+          processedAt: response.processedAt,
+          code: response.code,
         };
       }
 
-      // 5. Process the event (accept it)
-      return this.auditService.processEvent(event, contractType);
-
+      return response;
     } catch (error) {
-      const reason = error instanceof Error ? error.message : 'Unknown error during event processing';
-      return this.auditService.rejectEvent(event, `Processing error: ${reason}`);
+      const message = error instanceof Error ? error.message : 'Unknown processing error';
+      return {
+        status: 'rejected',
+        reason: `Processing error: ${message}`,
+        processedAt: new Date(),
+      };
     }
   }
 
-  /**
-   * Processes multiple events in a batch with idempotency guarantees
-   * @param events Array of contract events to process
-   * @param contractType The type of contract for schema validation
-   * @returns Promise resolving to array of ingestion results
-   */
-  async processBatch(events: ContractEvent[], contractType: string): Promise<EventIngestionResult[]> {
+  public async processBatch(
+    events: ContractEvent[],
+    contractType: string,
+    correlationId?: string,
+  ): Promise<EventIngestionResult[]> {
+    const batchSize = Math.max(1, this.config.batchSize);
     const results: EventIngestionResult[] = [];
-    const batchSize = this.config.batchSize;
 
-    // Process events in batches to avoid overwhelming the system
-    for (let i = 0; i < events.length; i += batchSize) {
-      const batch = events.slice(i, i + batchSize);
-      
-      // Process batch in parallel for better performance
-      const batchPromises = batch.map(event => this.processEvent(event, contractType));
-      const batchResults = await Promise.all(batchPromises);
-      
-      results.push(...batchResults);
+    for (let index = 0; index < events.length; index += batchSize) {
+      const batch = events.slice(index, index + batchSize);
+      const chunkResults = await Promise.all(
+        batch.map((event) => this.processEvent(event, contractType, correlationId)),
+      );
+      results.push(...chunkResults);
     }
 
     return results;
   }
 
-  /**
-   * Validates an event without processing it (dry run)
-   * @param event The contract event to validate
-   * @param contractType The type of contract for schema validation
-   * @returns Validation result
-   */
-  validateEvent(event: ContractEvent, contractType: string): ValidationResult {
-    // Base validation
-    const baseValidation = EventValidator.validate(event);
-    if (!baseValidation.isValid) {
-      return baseValidation;
+  public validateEvent(event: unknown, contractType: string): EventValidationResult {
+    const errors: EventValidationError[] = [];
+
+    // Delegate the shared preamble to the helper. This produces the same
+    // set of field errors as the previous inline implementation, with the
+    // same messages and field names.
+    const preambleErrors = validateEventEnvelopePreamble(event, INGESTION_PREAMBLE_OPTIONS);
+    for (const err of preambleErrors) {
+      errors.push({ field: err.field, message: err.message });
     }
 
-    // Event age validation
-    if (this.config.maxEventAgeMs > 0) {
-      const eventAge = Date.now() - event.timestamp;
-      if (eventAge > this.config.maxEventAgeMs) {
-        return {
-          isValid: false,
-          errors: [{
-            field: 'timestamp',
-            message: `Event too old: ${eventAge}ms > ${this.config.maxEventAgeMs}ms`,
-            value: event.timestamp
-          }]
-        };
+    // Caller-specific follow-up: age check (numeric timestamp only) and
+    // contract-type-specific payload shape. Both early-exit when `event`
+    // is not a record, which the helper has already established.
+    if (isRecord(event)) {
+      const timestampNumber = toTimestampNumber(event.timestamp);
+      if (
+        timestampNumber !== null &&
+        !preambleErrors.some((e) => e.field === 'timestamp') &&
+        Date.now() - timestampNumber > this.config.maxEventAgeMs
+      ) {
+        errors.push({ field: 'timestamp', message: 'Event too old.' });
+      }
+
+      if (this.config.enableStrictValidation) {
+        errors.push(...this.validateContractSpecificPayload(contractType, event.payload));
       }
     }
 
-    // Contract-specific validation if enabled
-    if (this.config.enableStrictValidation) {
-      return EventValidator.validateContractSpecificEvent(event, contractType);
-    }
-
-    return { isValid: true, errors: [] };
+    return {
+      isValid: errors.length === 0,
+      errors,
+    };
   }
 
-  /**
-   * Gets processing statistics for monitoring
-   * @returns Processing statistics
-   */
-  async getStatistics(): Promise<{
+  public async getStatistics(): Promise<{
     total: number;
     accepted: number;
     rejected: number;
@@ -155,12 +169,29 @@ export class EventIngestionService {
     return this.auditService.getStatistics();
   }
 
-  /**
-   * Gets event history for a specific contract
-   * @param contractId The contract ID to get history for
-   * @returns Array of processed events
-   */
-  async getContractHistory(contractId: string): Promise<any[]> {
+  public async getContractHistory(contractId: string) {
     return this.auditService.getEventHistory(contractId);
+  }
+
+  private validateContractSpecificPayload(
+    contractType: string,
+    payload: unknown,
+  ): EventValidationError[] {
+    if (!isRecord(payload)) {
+      return [];
+    }
+
+    if (contractType === 'talent_contract') {
+      const errors: EventValidationError[] = [];
+      if (typeof payload.talentId !== 'string' || payload.talentId.trim().length === 0) {
+        errors.push({ field: 'payload.talentId', message: 'talentId is required for talent_contract events.' });
+      }
+      if (typeof payload.action !== 'string' || payload.action.trim().length === 0) {
+        errors.push({ field: 'payload.action', message: 'action is required for talent_contract events.' });
+      }
+      return errors;
+    }
+
+    return [];
   }
 }

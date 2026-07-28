@@ -244,14 +244,11 @@ Event listeners track:
 
 ## Testing
 
-Run the test suite:
+The queue system is tested using a hybrid approach of unit tests and integration tests.
 
-```bash
-npm test
-```
+For detailed information on how Redis is mocked and how to run integration tests, see the [Redis Testing Guide](./redis-testing-guide.md).
 
-Test coverage includes:
-
+### Test Coverage includes:
 - Unit tests for all processors
 - Integration tests for API endpoints
 - Configuration validation tests

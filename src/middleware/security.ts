@@ -6,14 +6,16 @@
 import { Application } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
-import { corsConfig, helmetConfig } from '../config/security';
+import { corsConfig, helmetConfig, createCorsConfig } from '../config/security';
 
 /**
  * @notice Applies security policies to the Express application
- * @dev Attaches CORS and Helmet middlewares with predefined config
+ * @dev Attaches CORS and Helmet middlewares with predefined config.
+ *      When allowedOrigins is provided, it overrides the environment-based config.
  * @param app The Express Application instance
+ * @param allowedOrigins Optional explicit list of allowed CORS origins
  */
-export function applySecurityMiddleware(app: Application): void {
+export function applySecurityMiddleware(app: Application, allowedOrigins?: string[]): void {
     app.use(helmet(helmetConfig));
-    app.use(cors(corsConfig));
+    app.use(cors(allowedOrigins ? createCorsConfig(allowedOrigins) : corsConfig));
 }

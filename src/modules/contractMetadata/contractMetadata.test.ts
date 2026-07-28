@@ -329,4 +329,62 @@ describe('ContractMetadataService', () => {
       expect(result).toBe(false);
     });
   });
+
+  describe('Security: Fail-closed masking logic (formatResponse)', () => {
+    const sensitiveRecord = {
+      id: 'sec-1',
+      contract_id: contractId,
+      key: 'sec-key',
+      value: 'super-secret-value',
+      data_type: 'string' as const,
+      is_sensitive: true,
+      created_by: userId,
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+
+    const nonSensitiveRecord = {
+      ...sensitiveRecord,
+      id: 'sec-2',
+      is_sensitive: false,
+      value: 'public-value'
+    };
+
+    beforeEach(() => {
+      mockRepository.getById.mockImplementation(async (id) => {
+        if (id === 'sec-1') return sensitiveRecord;
+        if (id === 'sec-2') return nonSensitiveRecord;
+        return null;
+      });
+    });
+
+    it('Edge Case 1: An undefined or null user requesting a sensitive record ➔ Value MUST be masked', async () => {
+      const result = await service.getById('sec-1', undefined);
+      expect(result?.value).toBe('***REDACTED***');
+    });
+
+    it('Edge Case 2: An authenticated non-owner user requesting a sensitive record ➔ Value MUST be masked', async () => {
+      const otherUser = { id: 'other-user', email: 'other@test.com', role: 'user' as const };
+      const result = await service.getById('sec-1', otherUser);
+      expect(result?.value).toBe('***REDACTED***');
+    });
+
+    it('Edge Case 3: The actual owner requesting a sensitive record ➔ Value is NOT masked', async () => {
+      const result = await service.getById('sec-1', regularUser);
+      expect(result?.value).toBe('super-secret-value');
+    });
+
+    it('Edge Case 4: An admin user requesting a sensitive record ➔ Value is NOT masked', async () => {
+      const result = await service.getById('sec-1', adminUser);
+      expect(result?.value).toBe('super-secret-value');
+    });
+
+    it('Edge Case 5: Any user (or unknown user) requesting a non-sensitive record ➔ Value passes through unchanged', async () => {
+      const result1 = await service.getById('sec-2', undefined);
+      expect(result1?.value).toBe('public-value');
+
+      const result2 = await service.getById('sec-2', regularUser);
+      expect(result2?.value).toBe('public-value');
+    });
+  });
 });

@@ -1,8 +1,11 @@
 /**
  * Deployment Validator Tests
- * 
- * Comprehensive test suite for deployment validation module
- * covering configuration validation, health checks, and readiness checks.
+ *
+ * Comprehensive test suite for deployment validation module covering:
+ * - Configuration validation (all environments, edge cases)
+ * - Real HTTP probe: healthy 200, 503 unhealthy, connection refused,
+ *   timeout, SSRF rejection, HttpResponseError path, invalid URL
+ * - Deployment readiness orchestration
  */
 
 import {
@@ -11,6 +14,8 @@ import {
   validateDeploymentReadiness,
 } from './validator';
 import { EnvironmentConfig } from '../config/environment';
+import { AxiosInstance } from 'axios';
+import { HttpResponseError } from '../httpClient';
 
 describe('Deployment Validator', () => {
   const createMockConfig = (overrides?: Partial<EnvironmentConfig>): EnvironmentConfig => ({
@@ -174,31 +179,301 @@ describe('Deployment Validator', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // performHealthCheck
+  // ---------------------------------------------------------------------------
   describe('performHealthCheck', () => {
-    it('should return healthy status for valid service', async () => {
-      const result = await performHealthCheck('http://localhost:3001');
+    let mockHttpClient: jest.Mocked<Pick<AxiosInstance, 'get'>>;
+
+    beforeEach(() => {
+      mockHttpClient = {
+        get: jest.fn(),
+      };
+    });
+
+    afterEach(() => {
+      jest.clearAllMocks();
+    });
+
+    // ── Happy path ─────────────────────────────────────────────────────────
+    it('returns healthy status for a 200 OK response', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
 
       expect(result.service).toBe('talenttrust-backend');
       expect(result.status).toBe('healthy');
       expect(result.timestamp).toBeInstanceOf(Date);
       expect(result.details).toBeDefined();
-      expect(result.details?.baseUrl).toBe('http://localhost:3001');
-    });
-
-    it('should include response time in details', async () => {
-      const result = await performHealthCheck('http://localhost:3001');
-
-      expect(result.details?.responseTime).toBeDefined();
+      expect(result.details?.baseUrl).toBe('https://api.example.com');
+      expect(result.details?.statusCode).toBe(200);
       expect(typeof result.details?.responseTime).toBe('number');
     });
 
-    it('should handle different base URLs', async () => {
-      const result = await performHealthCheck('https://api.example.com');
+    it('probes the /health/ready path specifically', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(mockHttpClient.get).toHaveBeenCalledWith(
+        'https://api.example.com/health/ready'
+      );
+    });
+
+    it('correctly constructs /health/ready even when baseUrl has a trailing slash', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      await performHealthCheck(
+        'https://api.example.com/',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      // new URL('/health/ready', 'https://api.example.com/') → correct path
+      expect(mockHttpClient.get).toHaveBeenCalledWith(
+        'https://api.example.com/health/ready'
+      );
+    });
+
+    it('includes an accurate responseTime in details', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      const before = Date.now();
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+      const after = Date.now();
+
+      const rt = result.details?.responseTime as number;
+      expect(rt).toBeGreaterThanOrEqual(0);
+      expect(rt).toBeLessThanOrEqual(after - before + 5); // allow tiny skew
+    });
+
+    // ── Unhealthy paths ────────────────────────────────────────────────────
+    it('returns unhealthy status for a 503 response (raw Axios error shape)', async () => {
+      mockHttpClient.get.mockRejectedValue({
+        response: { status: 503 },
+        code: undefined,
+      });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('HTTP 503');
+      expect(result.details?.statusCode).toBe(503);
+    });
+
+    it('returns unhealthy for a 503 response via HttpResponseError (real client path)', async () => {
+      mockHttpClient.get.mockRejectedValue(
+        new HttpResponseError(503, 'Service Unavailable', null, 'HTTP 503 Service Unavailable')
+      );
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('HTTP 503');
+      expect(result.details?.statusCode).toBe(503);
+    });
+
+    it('returns unhealthy for a 404 via HttpResponseError', async () => {
+      mockHttpClient.get.mockRejectedValue(
+        new HttpResponseError(404, 'Not Found', null, 'HTTP 404 Not Found')
+      );
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('HTTP 404');
+      expect(result.details?.statusCode).toBe(404);
+    });
+
+    it('returns unhealthy for connection refused (ECONNREFUSED)', async () => {
+      mockHttpClient.get.mockRejectedValue({
+        code: 'ECONNREFUSED',
+      });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('Connection refused');
+    });
+
+    it('returns unhealthy for request timeout (ECONNABORTED)', async () => {
+      mockHttpClient.get.mockRejectedValue({
+        code: 'ECONNABORTED',
+      });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('Request timeout');
+    });
+
+    it('returns unhealthy for a generic Error (unknown network failure)', async () => {
+      mockHttpClient.get.mockRejectedValue(new Error('Network socket destroyed'));
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('unhealthy');
+      expect(result.details?.error).toBe('Network socket destroyed');
+    });
+
+    it('includes responseTime in the details even when the request fails', async () => {
+      mockHttpClient.get.mockRejectedValue({ code: 'ECONNREFUSED' });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(typeof result.details?.responseTime).toBe('number');
+      expect((result.details?.responseTime as number)).toBeGreaterThanOrEqual(0);
+    });
+
+    it('preserves baseUrl in details for all error cases', async () => {
+      mockHttpClient.get.mockRejectedValue({ code: 'ECONNREFUSED' });
+
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
 
       expect(result.details?.baseUrl).toBe('https://api.example.com');
     });
+
+    // ── SSRF rejection ─────────────────────────────────────────────────────
+    it('rejects private loopback address (127.0.0.1) in production', async () => {
+      const saved = process.env['NODE_ENV'];
+      process.env['NODE_ENV'] = 'production';
+      try {
+        const result = await performHealthCheck(
+          'http://127.0.0.1:3001',
+          mockHttpClient as unknown as AxiosInstance
+        );
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.details?.error).toBe('URL not safe for SSRF');
+        // The HTTP client must NOT have been called
+        expect(mockHttpClient.get).not.toHaveBeenCalled();
+      } finally {
+        process.env['NODE_ENV'] = saved;
+      }
+    });
+
+    it('rejects RFC-1918 address (10.0.0.1) in production', async () => {
+      const saved = process.env['NODE_ENV'];
+      process.env['NODE_ENV'] = 'production';
+      try {
+        const result = await performHealthCheck(
+          'http://10.0.0.1:3001',
+          mockHttpClient as unknown as AxiosInstance
+        );
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.details?.error).toBe('URL not safe for SSRF');
+        expect(mockHttpClient.get).not.toHaveBeenCalled();
+      } finally {
+        process.env['NODE_ENV'] = saved;
+      }
+    });
+
+    it('rejects cloud metadata address (169.254.169.254) in production', async () => {
+      const saved = process.env['NODE_ENV'];
+      process.env['NODE_ENV'] = 'production';
+      try {
+        const result = await performHealthCheck(
+          'http://169.254.169.254/latest/meta-data',
+          mockHttpClient as unknown as AxiosInstance
+        );
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.details?.error).toBe('URL not safe for SSRF');
+        expect(mockHttpClient.get).not.toHaveBeenCalled();
+      } finally {
+        process.env['NODE_ENV'] = saved;
+      }
+    });
+
+    it('rejects private hostname in production even when SSRF_ALLOW_PRIVATE_HOSTS is set', async () => {
+      const savedEnv = process.env['NODE_ENV'];
+      const savedAllow = process.env['SSRF_ALLOW_PRIVATE_HOSTS'];
+      process.env['NODE_ENV'] = 'production';
+      process.env['SSRF_ALLOW_PRIVATE_HOSTS'] = 'true';
+      try {
+        const result = await performHealthCheck(
+          'http://192.168.1.100:3001',
+          mockHttpClient as unknown as AxiosInstance
+        );
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.details?.error).toBe('URL not safe for SSRF');
+        expect(mockHttpClient.get).not.toHaveBeenCalled();
+      } finally {
+        process.env['NODE_ENV'] = savedEnv;
+        if (savedAllow === undefined) {
+          delete process.env['SSRF_ALLOW_PRIVATE_HOSTS'];
+        } else {
+          process.env['SSRF_ALLOW_PRIVATE_HOSTS'] = savedAllow;
+        }
+      }
+    });
+
+    it('allows a public URL in test environment', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      // NODE_ENV=test + SSRF_ALLOW_PRIVATE_HOSTS not set → blocks private,
+      // but a real public host must pass through.
+      const result = await performHealthCheck(
+        'https://api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.status).toBe('healthy');
+      expect(mockHttpClient.get).toHaveBeenCalled();
+    });
+
+    it('handles different public base URLs correctly', async () => {
+      mockHttpClient.get.mockResolvedValue({ status: 200 });
+
+      const result = await performHealthCheck(
+        'https://staging-api.example.com',
+        mockHttpClient as unknown as AxiosInstance
+      );
+
+      expect(result.details?.baseUrl).toBe('https://staging-api.example.com');
+      expect(mockHttpClient.get).toHaveBeenCalledWith(
+        'https://staging-api.example.com/health/ready'
+      );
+    });
   });
 
+  // ---------------------------------------------------------------------------
+  // validateDeploymentReadiness
+  // ---------------------------------------------------------------------------
   describe('validateDeploymentReadiness', () => {
     it('should validate deployment readiness for valid config', async () => {
       const config = createMockConfig();
@@ -231,6 +506,9 @@ describe('Deployment Validator', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Edge Cases
+  // ---------------------------------------------------------------------------
   describe('Edge Cases', () => {
     it('should handle config with all optional fields undefined', () => {
       const config = createMockConfig({

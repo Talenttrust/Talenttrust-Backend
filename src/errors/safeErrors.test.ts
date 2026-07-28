@@ -4,6 +4,19 @@ import {
   sanitizeErrorMessage,
   SAFE_ERROR_MESSAGES,
 } from './safeErrors';
+import {
+  APP_ERROR_CODES,
+  ConflictError,
+  ContractMetadataMismatchError,
+  ForbiddenError,
+  InvalidVersionError,
+  mapErrorToPayload,
+  MissingVersionError,
+  NotFoundError,
+  UnauthorizedError,
+  ValidationError,
+  VersionConflictError,
+} from './appError';
 
 describe('safeErrors', () => {
   describe('SAFE_ERROR_MESSAGES', () => {
@@ -11,14 +24,19 @@ describe('safeErrors', () => {
       const expectedCodes = [
         'internal_error',
         'invalid_json',
-        'validation_error',
-        'not_found',
-        'unauthorized',
+        APP_ERROR_CODES.VALIDATION_ERROR,
+        APP_ERROR_CODES.NOT_FOUND,
+        APP_ERROR_CODES.UNAUTHORIZED,
+        APP_ERROR_CODES.FORBIDDEN,
         'forbidden',
         'dependency_unavailable',
         'rate_limited',
-        'conflict',
+        APP_ERROR_CODES.CONFLICT,
+        APP_ERROR_CODES.VERSION_CONFLICT,
         'bad_request',
+        APP_ERROR_CODES.MISSING_VERSION,
+        APP_ERROR_CODES.INVALID_VERSION,
+        APP_ERROR_CODES.CONTRACT_METADATA_MISMATCH,
       ];
       for (const code of expectedCodes) {
         expect(SAFE_ERROR_MESSAGES).toHaveProperty(code);
@@ -29,6 +47,13 @@ describe('safeErrors', () => {
     it('messages contain no stack-trace-like content', () => {
       for (const msg of Object.values(SAFE_ERROR_MESSAGES)) {
         expect(containsUnsafeContent(msg)).toBe(false);
+      }
+    });
+
+    it('codes contain no internal details', () => {
+      for (const code of Object.keys(SAFE_ERROR_MESSAGES)) {
+        expect(containsUnsafeContent(code)).toBe(false);
+        expect(code).not.toMatch(/password|secret|token|apikey|node_modules|[A-Z]:\\/i);
       }
     });
   });
@@ -79,9 +104,14 @@ describe('safeErrors', () => {
 
   describe('safeMessageForCode', () => {
     it('returns the mapped message for known codes', () => {
-      expect(safeMessageForCode('not_found')).toBe('The requested resource was not found');
+      expect(safeMessageForCode(APP_ERROR_CODES.NOT_FOUND)).toBe(
+        'The requested resource was not found',
+      );
       expect(safeMessageForCode('internal_error')).toBe('An unexpected error occurred');
       expect(safeMessageForCode('invalid_json')).toBe('Malformed JSON payload');
+      expect(safeMessageForCode(APP_ERROR_CODES.VERSION_CONFLICT)).toBe(
+        'The request conflicts with the current state',
+      );
     });
 
     it('falls back to internal_error for unknown codes', () => {
@@ -92,7 +122,9 @@ describe('safeErrors', () => {
 
   describe('sanitizeErrorMessage', () => {
     it('passes through safe messages unchanged', () => {
-      expect(sanitizeErrorMessage('Resource not found', 'not_found')).toBe('Resource not found');
+      expect(sanitizeErrorMessage('Resource not found', APP_ERROR_CODES.NOT_FOUND)).toBe(
+        'Resource not found',
+      );
     });
 
     it('replaces messages containing stack traces', () => {
@@ -120,6 +152,40 @@ describe('safeErrors', () => {
       expect(sanitizeErrorMessage(unsafe, 'dependency_unavailable')).toBe(
         'A required service is temporarily unavailable',
       );
+    });
+  });
+
+  describe('safe serialized AppError responses', () => {
+    it('includes each subclass code in the safe response body', () => {
+      const errors = [
+        new NotFoundError(),
+        new UnauthorizedError(),
+        new MissingVersionError(),
+        new InvalidVersionError(),
+        new VersionConflictError(),
+        new ForbiddenError(),
+        new ConflictError(),
+        new ContractMetadataMismatchError(),
+        new ValidationError(),
+      ];
+
+      for (const error of errors) {
+        const { payload } = mapErrorToPayload(error, 'req-safe');
+        expect(payload.error.code).toBe(error.code);
+        expect(payload.error.requestId).toBe('req-safe');
+        expect(containsUnsafeContent(payload.error.message)).toBe(false);
+      }
+    });
+
+    it('falls through non-AppError values without exposing internals', () => {
+      const { statusCode, payload } = mapErrorToPayload('token leaked in thrown string', 'req-raw');
+
+      expect(statusCode).toBe(500);
+      expect(payload.error).toEqual({
+        code: 'internal_error',
+        message: 'An unexpected error occurred',
+        requestId: 'req-raw',
+      });
     });
   });
 });

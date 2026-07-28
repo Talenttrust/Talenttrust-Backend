@@ -6,11 +6,35 @@
  * failing probe never blocks the others.
  */
 
-import { dbProbe, envProbe, redisProbe, stellarRpcProbe } from "./probes";
+import { dbProbe, envProbe, redisProbe, stellarRpcProbe, queueProbe, circuitBreakerProbe } from "./probes";
 import { HealthResponse, Probe } from "./types";
+import { HealthProbeConfig } from "../appConfiguration";
+
+const DEFAULT_QUEUE_CONFIG: Required<HealthProbeConfig> = {
+  queueFailedThreshold: 10,
+  queueBacklogThreshold: 100,
+  queueProbeTimeoutMs: 3_000,
+};
 
 /** Default probe registry. Override via the probes parameter for testing. */
-const DEFAULT_PROBES: Probe[] = [envProbe, dbProbe, redisProbe, stellarRpcProbe];
+const DEFAULT_PROBES: Probe[] = [
+  envProbe,
+  dbProbe,
+  redisProbe,
+  stellarRpcProbe,
+  () => queueProbe(DEFAULT_QUEUE_CONFIG),
+  circuitBreakerProbe,
+];
+
+/**
+ * Build a probe list with the given queue health configuration.
+ *
+ * @param config - Optional health probe thresholds; falls back to defaults when omitted.
+ */
+export function buildProbes(config?: HealthProbeConfig): Probe[] {
+  const queue = () => queueProbe(config);
+  return [envProbe, dbProbe, redisProbe, stellarRpcProbe, queue, circuitBreakerProbe];
+}
 
 /**
  * Run all probes concurrently and return a structured health response.
@@ -23,18 +47,28 @@ export async function runHealthCheck(
 ): Promise<HealthResponse> {
   const results = await Promise.allSettled(probes.map((p) => p()));
 
-  const probeResults = results.map((r, i) =>
-    r.status === "fulfilled"
-      ? r.value
-      : {
-          name: probes[i].name || `probe-${i}`,
-          ok: false,
-          detail: String((r as PromiseRejectedResult).reason),
-          latencyMs: 0,
-        }
-  );
+  const probeResults = results.map((r, i) => {
+    if (r.status === "fulfilled") {
+      const probe = r.value;
+      // Normalize: if status is missing, derive from ok field
+      if (!probe.status && probe.ok !== undefined) {
+        return {
+          ...probe,
+          status: (probe.ok ? "up" : "down") as import("./types").ProbeStatus,
+        };
+      }
+      return probe;
+    }
+    return {
+      name: probes[i]!.name || `probe-${i}`,
+      ok: false,
+      status: "down" as import("./types").ProbeStatus,
+      detail: String((r as PromiseRejectedResult).reason),
+      latencyMs: 0,
+    };
+  });
 
-  const allOk = probeResults.every((p) => p.ok);
+  const allOk = probeResults.every((p) => p.status === "up" || p.ok);
 
   return {
     status: allOk ? "ok" : "degraded",

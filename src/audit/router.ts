@@ -17,18 +17,22 @@
  *   carries the general `audit` tier, `/export` additionally gets the
  *   `auditExport` tier via `exportMiddleware`, `/integrity` additionally
  *   gets the stricter `auditIntegrity` tier via `integrityMiddleware`, and
+ *   `/bulk` additionally gets the `auditBulk` tier via `bulkMiddleware` —
  *   see `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
 import { Router, Request, Response, type RequestHandler } from 'express';
 import type { ZodError } from 'zod';
 import { pipeline } from 'stream/promises';
+import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
-import { auditExportService, AuditExportService, type AuditExportResult } from './exportService';
-import { createAuditEntryBodySchema } from './schemas';
+import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
+import type { AuditQuery } from './types';
+import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
 import { idempotencyMiddleware } from '../middleware/idempotency';
+import { validateRequest } from '../middleware/validate.middleware';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
 import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
 
@@ -59,6 +63,48 @@ function buildValidationErrorResponse(requestId: string, correlationId: string |
   };
 }
 
+/**
+ * Parses and validates query filters against the audit query schema and, on
+ * failure, writes the shared structured 400 validation response directly
+ * instead of throwing. Used by every handler below that accepts query
+ * filters, so the "parse, then reject" preamble lives in one place instead
+ * of being repeated per-route.
+ */
+function parseAuditQueryOrRespond(
+  req: Request,
+  res: Response,
+  options: { defaultLimit?: number; maxLimit: number },
+): { query: AuditQuery; limit?: number; offset: number } | undefined {
+  const result = buildAuditQuerySchema(options).safeParse(req.query);
+
+  if (!result.success) {
+    const requestId = getRequestIdFromUtils(res);
+    const correlationId = getCorrelationId(res);
+    res.status(400).json(buildValidationErrorResponse(requestId, correlationId, result.error));
+    return undefined;
+  }
+
+  const params: AuditQueryParams = result.data;
+  const { action, severity, actor, resource, resourceId, from, to, limit, offset, cursor } = params;
+
+  return {
+    query: {
+      ...(action && { action }),
+      ...(severity && { severity }),
+      ...(actor && { actor }),
+      ...(resource && { resource }),
+      ...(resourceId && { resourceId }),
+      ...(from && { from }),
+      ...(to && { to }),
+      ...(limit !== undefined && { limit }),
+      offset,
+      ...(cursor && { cursor }),
+    },
+    limit,
+    offset,
+  };
+}
+
 export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const router = Router();
   const service = options.service ?? auditService;
@@ -66,6 +112,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const accessMiddleware = options.accessMiddleware ?? [];
   const exportMiddleware = options.exportMiddleware ?? [];
   const integrityMiddleware = options.integrityMiddleware ?? [];
+  const bulkMiddleware = options.bulkMiddleware ?? [];
 
   /**
    * POST /api/v1/audit

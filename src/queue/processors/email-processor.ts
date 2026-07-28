@@ -1,62 +1,91 @@
 /**
  * Email Notification Processor
- * 
+ *
  * Handles asynchronous email sending for notifications.
  * Validates email addresses and handles delivery failures.
  */
 
 import { EmailNotificationPayload, JobResult } from '../types';
+import { createLogger } from '../../logger';
+import {
+  assertSafeEmailHeaders,
+  isValidRecipientEmail,
+  resolveEmailTransport,
+} from './email.transport';
+
+/**
+ * Generate a cryptographically-strong unique tracking ID for an outbound email.
+ *
+ * Uses `crypto.randomUUID()` (RFC 4122 v4) so that IDs are collision-resistant
+ * even under rapid successive calls, unlike the previous `Date.now() +
+ * Math.random()` approach which could produce duplicates under load.
+ *
+ * @returns A UUID v4 string prefixed with `email_` for readability in logs.
+ */
+export function generateEmailId(): string {
+  return `email_${crypto.randomUUID()}`;
+}
 
 /**
  * Process email notification job
- * 
+ *
+ * Validates the recipient, guards against header injection, dispatches through
+ * the configured {@link EmailTransport}, and surfaces provider failures so the
+ * queue manager can retry the job.
+ *
  * @param payload - Email notification data
  * @returns Job result with success status
- * @throws Error if email validation fails
+ * @throws Error if validation or delivery fails
  */
 export async function processEmailNotification(
-  payload: EmailNotificationPayload
+  payload: EmailNotificationPayload,
 ): Promise<JobResult> {
-  // Validate email format
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(payload.to)) {
+  const log = createLogger({
+    processor: 'email',
+    ...(payload.correlationId && { correlationId: payload.correlationId }),
+    ...(payload.requestId && { requestId: payload.requestId }),
+  });
+
+  if (!isValidRecipientEmail(payload.to)) {
+    log.warn('Email validation failed: invalid address format');
     throw new Error(`Invalid email address: ${payload.to}`);
   }
 
-  // Validate required fields
   if (!payload.subject || !payload.body) {
+    log.warn('Email validation failed: missing subject or body');
     throw new Error('Email subject and body are required');
   }
 
-  // Simulate email sending (replace with actual email service integration)
-  console.log(`Sending email to ${payload.to}: ${payload.subject}`);
-  
-  // In production, integrate with services like SendGrid, AWS SES, etc.
-  await simulateEmailSend(payload);
+  assertSafeEmailHeaders({
+    to: payload.to,
+    subject: payload.subject,
+    body: payload.body,
+    templateId: payload.templateId,
+  });
+
+  log.info('Sending email notification', {
+    subject: payload.subject,
+    templateId: payload.templateId,
+  });
+
+  const emailId = generateEmailId();
+  const transport = resolveEmailTransport();
+
+  await transport.send(
+    {
+      to: payload.to,
+      subject: payload.subject,
+      body: payload.body,
+      templateId: payload.templateId,
+    },
+    log,
+  );
+
+  log.info('Email notification delivered', { emailId, subject: payload.subject });
 
   return {
     success: true,
     message: `Email sent to ${payload.to}`,
-    data: { emailId: generateEmailId() },
+    data: { emailId },
   };
-}
-
-/**
- * Simulate email sending with artificial delay
- * Replace with actual email service API call
- */
-async function simulateEmailSend(payload: EmailNotificationPayload): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      console.log(`Email delivered: ${payload.subject} -> ${payload.to}`);
-      resolve();
-    }, 100);
-  });
-}
-
-/**
- * Generate unique email ID for tracking
- */
-function generateEmailId(): string {
-  return `email_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }

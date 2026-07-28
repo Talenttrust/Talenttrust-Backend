@@ -8,14 +8,22 @@
  */
 
 import {
-  RetentionPolicy,
-  RetentionPeriod,
-  DataEntityType,
-  DataClassification,
-  ArchivalStorageType,
-  RetainedData,
-  RetentionStatus,
+  RetentionPolicy as _RetentionPolicy,
+  RetentionPeriod as _RetentionPeriod,
+  DataEntityType as _DataEntityType,
+  DataClassification as _DataClassification,
+  ArchivalStorageType as _ArchivalStorageType,
+  RetainedData as _RetainedData,
+  RetentionStatus as _RetentionStatus,
 } from './types';
+
+export type RetentionPolicy = _RetentionPolicy;
+export type RetainedData = _RetainedData;
+export type RetentionStatus = _RetentionStatus;
+export const RetentionPeriod = _RetentionPeriod;
+export const DataEntityType = _DataEntityType;
+export const DataClassification = _DataClassification;
+export const ArchivalStorageType = _ArchivalStorageType;
 
 /**
  * Retention period durations in milliseconds
@@ -32,6 +40,99 @@ const PERIOD_DURATIONS: Record<RetentionPeriod, number> = {
 };
 
 /**
+ * Ordered list of retention periods from shortest to longest.
+ * Used to find the smallest period that satisfies a legal minimum.
+ * @private
+ */
+const PERIOD_ORDER: RetentionPeriod[] = [
+  RetentionPeriod.THIRTY_DAYS,
+  RetentionPeriod.NINETY_DAYS,
+  RetentionPeriod.SIX_MONTHS,
+  RetentionPeriod.ONE_YEAR,
+  RetentionPeriod.TWO_YEARS,
+  RetentionPeriod.INDEFINITE,
+];
+
+/**
+ * Legal minimum retention periods per entity type.
+ *
+ * These represent the shortest retention an operator may configure for
+ * each entity type.  An override shorter than the legal minimum is
+ * rejected at startup.
+ *
+ * @see {@link getLegalMinimums} for the runtime accessor.
+ */
+const LEGAL_MINIMUMS: Record<DataEntityType, RetentionPeriod> = {
+  [DataEntityType.CONTRACT]: RetentionPeriod.ONE_YEAR,
+  [DataEntityType.TRANSACTION]: RetentionPeriod.ONE_YEAR,
+  [DataEntityType.AUDIT_LOG]: RetentionPeriod.TWO_YEARS,
+  [DataEntityType.USER_PROFILE]: RetentionPeriod.THIRTY_DAYS,
+  [DataEntityType.DOCUMENT]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.MESSAGE]: RetentionPeriod.THIRTY_DAYS,
+};
+
+/**
+ * Default retention periods per entity type.
+ * Used when no policy and no override is configured.
+ */
+const DEFAULT_PERIODS: Record<DataEntityType, RetentionPeriod> = {
+  [DataEntityType.CONTRACT]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.TRANSACTION]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.AUDIT_LOG]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.USER_PROFILE]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.DOCUMENT]: RetentionPeriod.NINETY_DAYS,
+  [DataEntityType.MESSAGE]: RetentionPeriod.NINETY_DAYS,
+};
+
+/**
+ * Return the legal minimum retention period for each entity type.
+ *
+ * @returns {Readonly<Record<DataEntityType, RetentionPeriod>>} Copy of the
+ *   legal-minimum map.
+ */
+export function getLegalMinimums(): Readonly<Record<DataEntityType, RetentionPeriod>> {
+  return { ...LEGAL_MINIMUMS };
+}
+
+/**
+ * Return the default retention period for each entity type.
+ *
+ * @returns {Readonly<Record<DataEntityType, RetentionPeriod>>} Copy of the
+ *   default-period map.
+ */
+export function getDefaultPeriods(): Readonly<Record<DataEntityType, RetentionPeriod>> {
+  return { ...DEFAULT_PERIODS };
+}
+
+/**
+ * Resolve the effective retention period for an entity type, taking the
+ * override (if any) and the legal minimum into account.
+ *
+ * @param {DataEntityType} entityType - Entity type to resolve.
+ * @param {Record<string, string>} [overrides] - Operator overrides from env.
+ * @returns {RetentionPeriod} The effective period.
+ */
+export function resolvePeriod(
+  entityType: DataEntityType,
+  overrides?: Record<string, string>,
+): RetentionPeriod {
+  const minimum = LEGAL_MINIMUMS[entityType];
+  const overrideValue = overrides?.[entityType] as RetentionPeriod | undefined;
+
+  if (overrideValue && PERIOD_ORDER.includes(overrideValue)) {
+    // Enforce the legal minimum: pick the larger of the override and the minimum.
+    if (PERIOD_ORDER.indexOf(overrideValue) >= PERIOD_ORDER.indexOf(minimum)) {
+      return overrideValue;
+    }
+    // Override is below the legal minimum — clamp to the minimum.
+    return minimum;
+  }
+
+  // No valid override; use the default.
+  return DEFAULT_PERIODS[entityType];
+}
+
+/**
  * Policy management and enforcement engine
  * 
  * Handles creation, validation, and application of retention policies
@@ -42,6 +143,108 @@ const PERIOD_DURATIONS: Record<RetentionPeriod, number> = {
 export class RetentionPolicyEngine {
   private policies: Map<string, RetentionPolicy> = new Map();
   private entityDefaults: Map<DataEntityType, RetentionPolicy> = new Map();
+
+  /**
+   * Apply per-entity retention overrides loaded from environment
+   * configuration.
+   *
+   * For each entity type that appears in `overrides`, the engine:
+   * 1. Picks the larger of the override value and the legal minimum.
+   * 2. Creates a default policy for that entity type (if one doesn't
+   *    already exist) with the resolved period.
+   *
+   * @param {Record<string, string>} overrides - Map of
+   *   `DataEntityType → RetentionPeriod` parsed from
+   *   `RETENTION_OVERRIDES`.
+   * @returns {RetentionPolicy[]} The policies that were created or
+   *   updated as a result of applying overrides.
+   */
+  applyOverrides(overrides: Record<string, string>): RetentionPolicy[] {
+    const applied: RetentionPolicy[] = [];
+
+    for (const [entityTypeStr, periodStr] of Object.entries(overrides)) {
+      const entityType = entityTypeStr as DataEntityType;
+      if (!Object.values(DataEntityType).includes(entityType)) continue;
+
+      const resolvedPeriod = resolvePeriod(entityType, overrides);
+      const existing = this.entityDefaults.get(entityType);
+
+      if (existing) {
+        // Update the existing default policy's period if it changed.
+        if (existing.period !== resolvedPeriod) {
+          existing.period = resolvedPeriod;
+          existing.updatedAt = new Date();
+          applied.push(existing);
+        }
+      } else {
+        // Create a new default policy for this entity type.
+        const classification =
+          entityType === DataEntityType.AUDIT_LOG
+            ? DataClassification.RESTRICTED
+            : entityType === DataEntityType.TRANSACTION
+              ? DataClassification.CONFIDENTIAL
+              : DataClassification.INTERNAL;
+
+        const policy = this.createPolicy({
+          name: `Default ${entityType} policy (env override)`,
+          description: `Auto-generated default policy for ${entityType} from RETENTION_OVERRIDES`,
+          entityType,
+          period: resolvedPeriod,
+          classification,
+          archivalType: ArchivalStorageType.COLD_STORAGE,
+          encryptArchive: classification === DataClassification.RESTRICTED || classification === DataClassification.CONFIDENTIAL,
+          allowPermanentRetention: false,
+          isActive: true,
+        });
+
+        this.entityDefaults.set(entityType, policy);
+        applied.push(policy);
+      }
+    }
+
+    return applied;
+  }
+
+  /**
+   * Return the full set of effective, resolved policies — one per
+   * entity type — with the period that would actually be used for
+   * expiration calculations.
+   *
+   * This method is intended for audit and observability: operators
+   * can inspect it to verify that overrides have been applied
+   * correctly.
+   *
+   * @returns {Record<DataEntityType, { period: RetentionPeriod;
+   *   source: 'override' | 'default' }>} The resolved policy map.
+   */
+  getResolvedPolicies(): Record<
+    DataEntityType,
+    { period: RetentionPeriod; source: 'override' | 'default' }
+  > {
+    const result = {} as Record<
+      DataEntityType,
+      { period: RetentionPeriod; source: 'override' | 'default' }
+    >;
+
+    for (const entityType of Object.values(DataEntityType)) {
+      const defaultPolicy = this.entityDefaults.get(entityType);
+      if (defaultPolicy) {
+        const isOverride =
+          defaultPolicy.name.includes('(env override)');
+        result[entityType] = {
+          period: defaultPolicy.period,
+          source: isOverride ? 'override' : 'default',
+        };
+      } else {
+        result[entityType] = {
+          period: DEFAULT_PERIODS[entityType],
+          source: 'default',
+        };
+      }
+    }
+
+    return result;
+  }
 
   /**
    * Create and register a retention policy
@@ -181,7 +384,7 @@ export class RetentionPolicyEngine {
 
     const duration = effectivePolicy
       ? PERIOD_DURATIONS[effectivePolicy.period]
-      : PERIOD_DURATIONS[RetentionPeriod.NINETY_DAYS];
+      : PERIOD_DURATIONS[resolvePeriod(data.entityType)];
 
     const expirationTime = data.createdAt.getTime() + duration;
     return new Date(expirationTime);

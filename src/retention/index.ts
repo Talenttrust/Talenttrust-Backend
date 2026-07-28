@@ -1,9 +1,9 @@
 /**
  * Data Retention Control Manager
- * 
+ *
  * Main orchestrator for all data retention, archival, and compliance operations.
  * Coordinates policies, storage, archival, and audit logging.
- * 
+ *
  * @module retention/index
  */
 
@@ -19,17 +19,60 @@ import {
   RetentionAction,
   RetentionConfig,
 } from './types';
-import { StorageManager, IStorageProvider, InMemoryStorageProvider } from './storage';
+import {
+  StorageManager,
+  IStorageProvider,
+  InMemoryStorageProvider,
+  SqliteStorageProvider,
+} from './storage';
 import { RetentionPolicyEngine } from './policies';
 import { DataArchivalService } from './archival';
 import { ComplianceAuditLogger, AuditLogFilter } from './audit';
 
 /**
+ * Source the `DataRetentionManager` should use when neither caller-supplied
+ * providers nor an explicit `options.storageBackend` value are provided.
+ *
+ * - `auto`  – SQLite outside Jest, in-memory inside Jest. This is the
+ *             default and matches the issue requirement that prod restarts
+ *             (or blue-green switches) must not wipe the archival inventory.
+ * - `sqlite`– Always SQLite. Useful for production-going integration tests
+ *             that still want durability but want to assert against a
+ *             controlled database path.
+ * - `memory`– Always in-memory. Mirrors the legacy default and is the safest
+ *             fallback for ad-hoc scripts and one-off pipelines.
+ */
+export type RetentionStorageBackend = 'auto' | 'sqlite' | 'memory';
+
+/**
+ * Options accepted by {@link DataRetentionManager} for storage-backend selection.
+ *
+ * @interface DataRetentionManagerOptions
+ * @property {RetentionStorageBackend} [storageBackend] - Choose how the manager
+ *   picks its default providers when no caller-supplied providers are passed.
+ */
+export interface DataRetentionManagerOptions {
+  storageBackend?: RetentionStorageBackend;
+}
+
+/**
+ * Returns true when Jest is the current test runner. We deliberately key off
+ * `JEST_WORKER_ID` (set on every Jest process) rather than `NODE_ENV` so a
+ * production deployment that runs with `NODE_ENV=test` cannot silently demote
+ * its retention store to in-memory.
+ *
+ * @returns {boolean}
+ */
+function isJestRuntime(): boolean {
+  return typeof process !== 'undefined' && Boolean(process.env && process.env.JEST_WORKER_ID);
+}
+
+/**
  * Primary data retention control manager
- * 
+ *
  * Provides high-level API for managing data retention, archival,
  * and compliance requirements across the application.
- * 
+ *
  * @class DataRetentionManager
  */
 export class DataRetentionManager {
@@ -42,21 +85,44 @@ export class DataRetentionManager {
   private checkInterval?: NodeJS.Timeout;
 
   /**
-   * Initialize the data retention manager
+   * Initialize the data retention manager.
+   *
+   * Provider selection precedence:
+   * 1. Explicit `customLocalProvider` / `customArchiveProvider` arguments.
+   * 2. `options.storageBackend` (`auto` chooses SQLite outside Jest and
+   *    in-memory inside Jest; `sqlite` / `memory` force the corresponding
+   *    default provider).
+   * 3. The legacy default of two in-memory providers, preserved for
+   *    backwards compatibility with callers that don't pass options.
+   *
    * @param {RetentionConfig} config - Configuration settings
    * @param {IStorageProvider} [customLocalProvider] - Optional custom storage provider
    * @param {IStorageProvider} [customArchiveProvider] - Optional custom archive provider
+   * @param {DataRetentionManagerOptions} [options] - Backend selection options
    */
   constructor(
     config: RetentionConfig,
     customLocalProvider?: IStorageProvider,
     customArchiveProvider?: IStorageProvider,
+    options: DataRetentionManagerOptions = {},
   ) {
     this.config = config;
     this.policyEngine = new RetentionPolicyEngine();
+
+    const backend = options.storageBackend ?? 'auto';
+    const useSqliteDefaults =
+      backend === 'sqlite' || (backend === 'auto' && !isJestRuntime());
+
+    const defaultLocal = useSqliteDefaults
+      ? new SqliteStorageProvider({ tableName: 'retention_local' })
+      : new InMemoryStorageProvider();
+    const defaultArchive = useSqliteDefaults
+      ? new SqliteStorageProvider({ tableName: 'retention_archive' })
+      : new InMemoryStorageProvider();
+
     this.storageManager = new StorageManager(
-      customLocalProvider || new InMemoryStorageProvider(),
-      customArchiveProvider || new InMemoryStorageProvider(),
+      customLocalProvider || defaultLocal,
+      customArchiveProvider || defaultArchive,
     );
     this.archivalService = new DataArchivalService(
       this.storageManager,
@@ -296,12 +362,17 @@ export class DataRetentionManager {
    * @returns {Promise<boolean>}
    */
   async deleteData(dataId: string, actor: string = 'system'): Promise<boolean> {
-    const data = await this.retrieveData(dataId);
+    const data = await this.retrieveData(dataId) || await this.archivalService.getArchivedData(dataId);
     if (!data) {
       throw new Error(`Data not found: ${dataId}`);
     }
 
-    const deleted = await this.storageManager.delete(dataId, ArchivalStorageType.LOCAL);
+    // Attempt to delete from both local and archive storage
+    const deletedLocal = await this.storageManager.delete(dataId, ArchivalStorageType.LOCAL);
+    const deletedArchive = await this.storageManager.delete(dataId, ArchivalStorageType.COLD_STORAGE) || 
+                           await this.storageManager.delete(dataId, ArchivalStorageType.ENCRYPTED_ARCHIVE);
+
+    const deleted = deletedLocal || deletedArchive;
 
     if (deleted) {
       this.auditLogger.logAction({
@@ -312,6 +383,8 @@ export class DataRetentionManager {
         details: {
           classification: data.classification,
           wasArchived: data.isArchived,
+          deletedFromLocal: deletedLocal,
+          deletedFromArchive: deletedArchive,
         },
         compliance: this.config.complianceStandard,
       });
@@ -336,23 +409,42 @@ export class DataRetentionManager {
     let deleted = 0;
     let failed = 0;
 
-    // This is a placeholder for the actual implementation
-    // In production, would process all data in batches
-    // const allData = await this.storageManager.list();
+    try {
+      // Process local data for archival
+      if (this.config.automaticArchival) {
+        const localData = await this.storageManager.getProvider(ArchivalStorageType.LOCAL).list();
+        for (const data of localData) {
+          try {
+            if (!data.isArchived && this.policyEngine.shouldArchive(data)) {
+              await this.archiveData(data.id, 'system-autoprocess');
+              archived++;
+            }
+          } catch (error) {
+            failed++;
+          }
+        }
+      }
 
-    // for (const data of allData) {
-    //   try {
-    //     if (!data.isArchived && this.policyEngine.shouldArchive(data)) {
-    //       await this.archiveData(data.id);
-    //       archived++;
-    //     } else if (data.isArchived && this.policyEngine.shouldPermanentlyDelete(data, this.config.postArchivalRetentionDays)) {
-    //       await this.storageManager.delete(data.id, ArchivalStorageType.COLD_STORAGE);
-    //       deleted++;
-    //     }
-    //   } catch (error) {
-    //     failed++;
-    //   }
-    // }
+      // Process archived data for permanent deletion
+      if (this.config.automaticDeletion) {
+        const archiveProviders = [ArchivalStorageType.COLD_STORAGE, ArchivalStorageType.ENCRYPTED_ARCHIVE];
+        for (const storageType of archiveProviders) {
+          const archivedData = await this.storageManager.getProvider(storageType).list();
+          for (const data of archivedData) {
+            try {
+              if (data.isArchived && this.policyEngine.shouldPermanentlyDelete(data, this.config.postArchivalRetentionDays)) {
+                await this.deleteData(data.id, 'system-autoprocess');
+                deleted++;
+              }
+            } catch (error) {
+              failed++;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error during batch retention processing:', error);
+    }
 
     return { archived, deleted, failed };
   }
@@ -422,6 +514,18 @@ export class DataRetentionManager {
   }
 
   /**
+   * Export archived data for external use or compliance
+   * 
+   * @param {string} dataId - Data identifier
+   * @param {'json' | 'csv'} [format] - Optional export format override
+   * @returns {Promise<string>}
+   */
+  async exportArchivedData(dataId: string, format?: 'json' | 'csv'): Promise<string> {
+    const exportFormat = format || this.config.exportFormat || 'json';
+    return this.archivalService.exportData(dataId, exportFormat);
+  }
+
+  /**
    * Generate unique data ID
    * @private
    * @returns {string}
@@ -431,7 +535,14 @@ export class DataRetentionManager {
   }
 }
 
-// Export all types and utilities
+// Export all types and utilities. `RetentionStorageBackend` and
+// `DataRetentionManagerOptions` are declared above as `export type` /
+// `export interface` so re-listing them here would surface as a duplicate
+// exported declaration (TS2484); keep them out of this list.
+// `SqliteStorageProviderOptions` and `RETENTION_PAGE_MAX_LIMIT` are re-exports
+// from `./storage` and consumers should import them from there directly; they
+// were intentionally omitted here to keep `index.ts` from carrying even
+// no-op re-exports of types it doesn't internally consume.
 export {
   RetentionPolicy,
   RetainedData,
@@ -446,6 +557,7 @@ export {
   StorageManager,
   IStorageProvider,
   InMemoryStorageProvider,
+  SqliteStorageProvider,
   RetentionPolicyEngine,
   DataArchivalService,
   ComplianceAuditLogger,

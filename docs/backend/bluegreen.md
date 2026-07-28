@@ -22,6 +22,10 @@
 4. Rollback: `npm run deploy:rollback`
 5. Status: `npm run deploy:status`
 
+After `deploy:switch-green`, an automatic post-switch soak watches the HTTP
+error rate and rolls back on its own if a threshold is breached. See
+[auto-rollback.md](./auto-rollback.md).
+
 ## Tests
 
 95%+ coverage on router/deploy. Run `npm test`.

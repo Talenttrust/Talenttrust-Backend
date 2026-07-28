@@ -1,6 +1,9 @@
-import * as fs from 'fs/promises';
+import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Database, ContractMetadata, Contract, User, ApiKey } from './schema';
+import { decodeCursor, encodeCursor } from '../contracts/cursor.repository';
+import type { CursorPage, CursorPaginationInput } from '../contracts/cursor.types';
+import { MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT } from '../utils/pagination';
 
 const DB_PATH = path.join(__dirname, '../../data/database.json');
 
@@ -32,7 +35,7 @@ class DatabaseService {
         contract_metadata: [],
         contracts: [],
         users: [],
-      api_keys: []
+        api_keys: []
       };
       await this.saveDatabase();
     }
@@ -73,7 +76,11 @@ class DatabaseService {
     } = {}
   ): Promise<{ records: ContractMetadata[]; total: number; page: number; limit: number }> {
     const db = await this.loadDatabase();
+    const MAX_LIMIT = 100;
     const { page = 1, limit = 20, key, data_type, includeDeleted = false } = options;
+    
+    // Bound limit
+    const boundedLimit = Math.min(Math.max(1, limit), MAX_LIMIT);
 
     let filtered = db.contract_metadata.filter(record => {
       if (record.contract_id !== contractId) return false;
@@ -83,12 +90,21 @@ class DatabaseService {
       return true;
     });
 
-    const total = filtered.length;
-    const startIndex = (page - 1) * limit;
-    const records = filtered.slice(startIndex, startIndex + limit);
+    // Stable sorting: latest first, then by ID for absolute stability
+    filtered.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      if (dateB !== dateA) return dateB - dateA;
+      return a.id.localeCompare(b.id);
+    });
 
-    return { records, total, page, limit };
+    const total = filtered.length;
+    const startIndex = (page - 1) * boundedLimit;
+    const records = filtered.slice(startIndex, startIndex + boundedLimit);
+
+    return { records, total, page, limit: boundedLimit };
   }
+
 
   async getContractMetadataById(id: string): Promise<ContractMetadata | null> {
     const db = await this.loadDatabase();
@@ -170,6 +186,151 @@ class DatabaseService {
     db.users.push(user);
     await this.saveDatabase();
     return user;
+  }
+
+  // API Key operations
+  async createApiKey(data: Omit<ApiKey, 'id' | 'created_at' | 'updated_at'>): Promise<ApiKey> {
+    const db = await this.loadDatabase();
+    const apiKey: ApiKey = {
+      ...data,
+      id: require('crypto').randomUUID(),
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+    db.api_keys.push(apiKey);
+    await this.saveDatabase();
+    return apiKey;
+  }
+
+  async getApiKeyById(id: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    return db.api_keys.find(key => key.id === id && key.is_active) || null;
+  }
+
+  async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    return db.api_keys.find(key => key.key_hash === keyHash && key.is_active) || null;
+  }
+
+  async getApiKeyBySelector(selector: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    return db.api_keys.find(key => key.key_selector === selector && key.is_active) || null;
+  }
+
+  /**
+   * Returns a cursor-paginated, newest-first page of active API keys created by `userId`.
+   *
+   * Ordering is stable (created_at DESC, id DESC as tie-breaker) so that concurrent
+   * inserts never shift already-issued cursors. `limit` is bounded to
+   * [1, MAX_PAGE_LIMIT] and silently clamped rather than rejected; omitted or
+   * non-positive values fall back to DEFAULT_PAGE_LIMIT. An invalid `cursor`
+   * throws and must be handled by the caller.
+   */
+  async listApiKeysPage(userId: string, input: CursorPaginationInput = {}): Promise<CursorPage<ApiKey>> {
+    const db = await this.loadDatabase();
+    const limit =
+      input.limit !== undefined && Number.isFinite(input.limit) && input.limit >= 1
+        ? Math.min(Math.trunc(input.limit), MAX_PAGE_LIMIT)
+        : DEFAULT_PAGE_LIMIT;
+
+    let filtered = db.api_keys.filter(
+      key => key.created_by === userId && key.is_active
+    );
+
+    filtered.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      if (dateB !== dateA) return dateB - dateA;
+      return b.id.localeCompare(a.id);
+    });
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      filtered = filtered.filter(key => {
+        const createdAt = new Date(key.created_at).toISOString();
+        return createdAt < pos.createdAt || (createdAt === pos.createdAt && key.id < pos.id);
+      });
+    }
+
+    const hasNextPage = filtered.length > limit;
+    const data = filtered.slice(0, limit);
+    const lastItem = data.at(-1);
+    const nextCursor =
+      hasNextPage && lastItem
+        ? encodeCursor({ createdAt: new Date(lastItem.created_at).toISOString(), id: lastItem.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
+  }
+
+  async updateApiKey(id: string, updates: Partial<Pick<ApiKey, 'name' | 'scope' | 'expires_at' | 'is_active' | 'last_used_at' | 'key_selector'>>): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    const index = db.api_keys.findIndex(key => key.id === id);
+    
+    if (index === -1) return null;
+
+    db.api_keys[index] = {
+      ...db.api_keys[index],
+      ...updates,
+      updated_at: new Date()
+    };
+
+    await this.saveDatabase();
+    return db.api_keys[index];
+  }
+
+  async deactivateApiKey(id: string): Promise<boolean> {
+    const db = await this.loadDatabase();
+    const apiKey = db.api_keys.find(key => key.id === id);
+    
+    if (!apiKey) return false;
+
+    apiKey.is_active = false;
+    apiKey.updated_at = new Date();
+    
+    await this.saveDatabase();
+    return true;
+  }
+
+  async rotateApiKey(id: string, newKeyHash: string, newKeySelector?: string): Promise<ApiKey | null> {
+    const db = await this.loadDatabase();
+    const apiKey = db.api_keys.find(key => key.id === id);
+    
+    if (!apiKey) return null;
+
+    apiKey.key_hash = newKeyHash;
+    if (newKeySelector !== undefined) {
+      apiKey.key_selector = newKeySelector;
+    }
+    apiKey.updated_at = new Date();
+    
+    await this.saveDatabase();
+    return apiKey;
+  }
+
+  /**
+   * Backfills the key_selector field for all existing API keys that lack it.
+   * Uses the stored key_hash (salt:hash) to derive the selector deterministically.
+   * This must be called with the original plain-text key — we store the selector
+   * during createApiKey, so this is only needed for legacy keys.
+   *
+   * For security, this function does NOT attempt to recompute selectors from
+   * stored hashes (impossible). Instead it is provided as a hook; callers pass
+   * plain-text keys that are being validated and the selector is backfilled
+   * lazily in validateApiKey.
+   */
+  async backfillKeySelectors(): Promise<number> {
+    const db = await this.loadDatabase();
+    let count = 0;
+    for (const key of db.api_keys) {
+      if (!key.key_selector) {
+        // Selector cannot be derived from stored hash; it must be set during
+        // validation when the plain-text key is available (handled in validateApiKey).
+        // This method counts unindexed keys for monitoring/reporting.
+        count++;
+      }
+    }
+    return count;
   }
 
   // Cleanup for testing

@@ -5,8 +5,9 @@
  * environment variable (default: talenttrust.db).  Pass ':memory:' during
  * tests to use an ephemeral, isolated in-memory database.
  *
- * Runs schema migrations synchronously on first open so the tables are
- * guaranteed to exist before the application serves any requests.
+ * Runs schema migrations synchronously on first open so applied migration
+ * checksums are verified and tables are guaranteed to exist before the
+ * application serves any requests.
  *
  * Security notes:
  *  - All SQL statements in repositories use prepared statements / parameter
@@ -15,31 +16,63 @@
  *  - In production, restrict filesystem permissions on the DB file (chmod 600).
  */
 
-import Database from "better-sqlite3";
-import path from "path";
+import Database, { type Database as DatabaseInstance } from "./betterSqlite3";
 
-let instance: Database.Database | null = null;
+import path from "path";
+import { runMigrations } from "./migrations";
+
+let instance: DatabaseInstance | null = null;
+let instancePath: string | null = null;
 
 /**
  * Returns the shared database instance, creating it on first call.
  *
  * @param dbPath - Optional path override (used by tests to pass ':memory:').
  *                 If omitted, falls back to DB_PATH env var or 'talenttrust.db'.
+ *
+ * @remarks
+ * When an explicit `dbPath` is supplied that differs from the currently open
+ * database, the existing instance is closed and replaced. This keeps tests that
+ * request an isolated `:memory:` database from being handed a stale, shared
+ * file-backed instance left open by an earlier suite. Production callers invoke
+ * `getDb()` with no argument, so they always reuse the single shared instance.
  */
-export function getDb(dbPath?: string): Database.Database {
-  if (instance) return instance;
-
+export function getDb(dbPath?: string): DatabaseInstance {
   const resolvedPath =
     dbPath ??
     process.env["DB_PATH"] ??
     path.join(process.cwd(), "talenttrust.db");
 
-  instance = new Database(resolvedPath);
-  instance.pragma("journal_mode = WAL"); // Better concurrency
-  instance.pragma("foreign_keys = ON"); // Enforce FK constraints
+  if (instance) {
+    if (dbPath !== undefined && instancePath !== resolvedPath) {
+      try {
+        instance.close();
+      } catch {
+        // Best-effort close; proceed to open the requested database.
+      }
+      instance = null;
+      instancePath = null;
+    } else {
+      return instance;
+    }
+  }
 
-  runMigrations(instance);
-  return instance;
+  // `Database` (the default export from the wrapper) is the constructor; the
+  // result of `new Database(path)` is an instance whose type is `DatabaseInstance`.
+  const created = new Database(resolvedPath);
+  instance = created;
+  instancePath = resolvedPath;
+
+  // Apply idempotent pragmas for performance and concurrency
+  created.pragma("journal_mode = WAL"); // Better concurrency
+  created.pragma("synchronous = NORMAL"); // Balance durability and performance
+  const busyTimeout = parseInt(process.env["DB_BUSY_TIMEOUT"] ?? "5000", 10);
+  created.pragma(`busy_timeout = ${busyTimeout}`); // Configurable timeout (default 5000ms)
+
+  created.pragma("foreign_keys = ON"); // Enforce FK constraints
+
+  runMigrations(created);
+  return created;
 }
 
 /**
@@ -48,59 +81,9 @@ export function getDb(dbPath?: string): Database.Database {
  */
 export function closeDb(): void {
   if (instance) {
-    instance.close();
+    (instance as DatabaseInstance).close();
     instance = null;
+    instancePath = null;
   }
 }
 
-/**
- * Runs all DDL migrations against the provided database connection.
- * Each statement uses IF NOT EXISTS so re-runs are idempotent.
- *
- * @param db - An open better-sqlite3 Database instance.
- */
-function runMigrations(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id          TEXT    PRIMARY KEY,
-      username    TEXT    NOT NULL UNIQUE,
-      email       TEXT    NOT NULL UNIQUE,
-      role        TEXT    NOT NULL DEFAULT 'client'
-                          CHECK (role IN ('client', 'freelancer', 'both')),
-      created_at  TEXT    NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS contracts (
-      id            TEXT    PRIMARY KEY,
-      title         TEXT    NOT NULL,
-      client_id     TEXT    NOT NULL REFERENCES users(id),
-      freelancer_id TEXT    NOT NULL REFERENCES users(id),
-      amount        INTEGER NOT NULL CHECK (amount >= 0),
-      status        TEXT    NOT NULL DEFAULT 'draft'
-                            CHECK (status IN (
-                              'draft', 'active', 'completed', 'disputed', 'cancelled'
-                            )),
-      version       INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
-      created_at    TEXT    NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_contracts_client_id
-      ON contracts(client_id);
-
-    CREATE INDEX IF NOT EXISTS idx_contracts_freelancer_id
-      ON contracts(freelancer_id);
-
-    CREATE INDEX IF NOT EXISTS idx_contracts_status
-      ON contracts(status);
-  `);
-
-  // Migration guard: add version column to existing databases that pre-date OCC.
-  // PRAGMA table_info returns one row per column; if 'version' is absent we add it.
-  const columns = db.pragma("table_info(contracts)") as Array<{ name: string }>;
-  const hasVersion = columns.some((col) => col.name === "version");
-  if (!hasVersion) {
-    db.exec(
-      "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-}

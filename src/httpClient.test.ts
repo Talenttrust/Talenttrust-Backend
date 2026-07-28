@@ -1,6 +1,5 @@
-import axios from 'axios';
 import MockAdapter from 'axios-mock-adapter';
-import logger from './logger';
+import { logger } from './logger';
 import { createHttpClient } from './httpClient';
 
 // We spy on the pino logger methods so we can assert on structured log entries

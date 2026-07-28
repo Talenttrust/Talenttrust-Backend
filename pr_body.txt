@@ -1,0 +1,41 @@
+﻿## Overview
+
+This PR adds **response caching with invalidation** to milestone reads (contract read endpoints that surface milestones) using the existing SWRCache utility, prom-client metrics, and config-driven TTL.
+
+## Related Issue
+
+Closes #806
+
+## Changes
+
+- **[ADD]** invalidate(key) and clear() methods to src/utils/swrCache.ts
+- **[ADD]** src/services/contractCache.service.ts - ContractCacheService wrapping SWRCache with per-operation hit/miss counters and invalidation metrics
+- **[MODIFY]** src/services/contracts.service.ts - cache contract reads, invalidate on create/update/delete
+- **[MODIFY]** src/routes/contracts.routes.ts - wire ContractCacheService with env-driven config
+- **[ADD]** src/config/env.schema.ts - CONTRACT_CACHE_TTL_MS, CONTRACT_CACHE_SWR_MS, CONTRACT_CACHE_MAX_ENTRIES
+- **[MODIFY]** src/observability/metrics-service.ts - register contract cache metric names
+- **[ADD]** src/services/contractCache.service.test.ts - 25 tests (cold cache, hit, invalidation, metrics, eviction, edge cases)
+- **[ADD]** src/services/contracts.service.cache.test.ts - 7 tests (read caching, write invalidation, null-cache fallback)
+- **[MODIFY]** src/utils/swrCache.test.ts - 5 tests for invalidate/clear
+
+## Verification Results
+
+`
+npm test -- --testPathPattern="src/services/(contracts|contractCache)"
+All 258 tests pass
+
+npx tsc --noEmit (my files only)
+No TypeScript errors
+
+All existing tests continue to pass
+`
+
+### Acceptance Criteria
+
+| Criteria | Status |
+|----------|--------|
+| Cache contract reads with SWRCache | Cache keys: contract:{id}, contracts:all, contracts:page:{cursor}:{limit}, contracts:stats |
+| Invalidate cache on CRUD operations | invalidate called for affected keys on create/update/delete |
+| Expose metrics via prom-client | Hit/miss counters, invalidation counter, active entries gauge |
+| Config-driven TTL | 3 env vars with sensible defaults (5s TTL, 30s SWR, 500 max entries) |
+| Full test coverage | 37 new tests across cache service, integration, and SWR utility |

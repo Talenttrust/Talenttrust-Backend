@@ -1,6 +1,10 @@
 import express, { Request, Response, NextFunction } from "express";
 import * as http from "http";
 import type { IncomingMessage, ServerResponse } from "http";
+import { createLogger } from "./logger";
+import { redactHeaders, redactUrl } from "./redact";
+import { CORRELATION_ID_HEADER, REQUEST_ID_HEADER, validateExternalId } from "./middleware/requestId";
+import { randomUUID } from "crypto";
 
 /**
  * Simple blue-green router using Node http proxy (no extra deps).
@@ -19,10 +23,34 @@ const getActiveBackendUrl = (): string => {
   return `http://localhost:${port}`;
 };
 
+/**
+ * Build a request-scoped logger with correlation IDs extracted from request headers.
+ * Falls back to a fresh UUID for the requestId when no header is present.
+ *
+ * @param req - Incoming Express request
+ */
+function buildRouterLogger(req: Request) {
+  const requestId =
+    validateExternalId(req.headers[REQUEST_ID_HEADER]) ?? randomUUID();
+  const correlationId = validateExternalId(req.headers[CORRELATION_ID_HEADER]);
+  return createLogger({
+    component: "blue-green-router",
+    requestId,
+    ...(correlationId !== undefined && { correlationId }),
+  });
+}
+
 // Proxy middleware
 routerApp.use("/api", (req: Request, res: Response, next: NextFunction) => {
   const target = getActiveBackendUrl();
-  console.log(`Routing ${req.method} ${req.url} to ${target}`);
+  const log = buildRouterLogger(req);
+
+  log.info("Routing request", {
+    method: req.method,
+    url: redactUrl(req.url),
+    target,
+    headers: redactHeaders(req.headers as Record<string, string | string[] | undefined>),
+  });
 
   // Remove host header (important for proxying)
   const headers = Object.fromEntries(
@@ -49,7 +77,7 @@ routerApp.use("/api", (req: Request, res: Response, next: NextFunction) => {
       proxyRes.pipe(nodeRes);
 
       proxyRes.on("error", (err: Error) => {
-        console.error("Proxy response error:", err);
+        log.error("Proxy response error", { err });
         if (!res.headersSent) {
           res.status(502).json({ error: "Backend response error" });
         }
@@ -65,13 +93,13 @@ routerApp.use("/api", (req: Request, res: Response, next: NextFunction) => {
   });
 
   nodeReq.on("error", (err: Error) => {
-    console.error("Client request error:", err);
+    log.error("Client request error", { err });
     proxyReq.destroy();
     next(err);
   });
 
   proxyReq.on("error", (err: Error) => {
-    console.error("Proxy request error:", err);
+    log.error("Proxy request error", { err });
     if (!res.headersSent) {
       res.status(502).json({ error: "Backend unavailable" });
     }

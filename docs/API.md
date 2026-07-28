@@ -1,3 +1,40 @@
+## Response Envelope Contract
+
+All API endpoints return a consistent JSON envelope.
+
+### Success Response
+
+```json
+{
+  "status": "success",
+  "data": <payload>,
+  "meta": <optional pagination or extra metadata>,
+  "requestId": "trace-id-from-request"
+}
+```
+
+### Error Response
+
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "machine_readable_code",
+    "message": "Human readable message",
+    "requestId": "trace-id-from-request"
+  }
+}
+```
+
+### Helper Functions
+
+Use `ok(res, data, meta?, status?)` and `fail(res, code, message, status?)` from `src/utils/apiResponse.ts` in all controllers.
+
+- `requestId` is always included from `res.locals.requestId`
+- Falls back to `"unknown"` if requestId is not set
+- `meta` is omitted from the response when not provided
+
+---
 # TalentTrust Backend API Documentation
 
 ## Overview
@@ -9,6 +46,84 @@ The TalentTrust Backend API provides RESTful endpoints for managing escrow contr
 ```
 http://localhost:3001/api/v1
 ```
+
+## Request Sanitization
+
+Incoming request data is sanitized by the `sanitize` middleware
+(`src/middleware/sanitize.ts`) before it reaches route handlers. The
+sanitization contract is:
+
+- **Scope:** `req.body`, `req.query`, and `req.params` are sanitized recursively
+  (nested objects and arrays included).
+- **Strings:** every string value is trimmed and passed through a strict XSS
+  filter that strips all HTML tags (and the body of `<script>`/`<style>`).
+- **Type preservation:** the sanitizer is generic and returns the same shape as
+  its input, so `req.query`/`req.params` retain their expected string/array
+  structures (e.g. `?tag=a&tag=b` stays an array of strings).
+- **Prototype-pollution safe:** the keys `__proto__`, `constructor`, and
+  `prototype` are dropped during recursion and the result uses a `null`
+  prototype, so a crafted payload cannot reach `Object.prototype`.
+- **Idempotent and non-mutating:** running the middleware twice yields the same
+  result, and the original input objects are copied rather than mutated.
+- **Pass-through values:** `Date` and `Buffer` instances are returned unchanged;
+  non-string primitives (numbers, booleans, `null`) are preserved as-is.
+
+## Request Headers
+
+### Standard Request Headers
+
+All requests support the following standard headers for request tracing and correlation:
+
+#### X-Request-Id
+
+Unique identifier for each HTTP request. If provided, the server will echo back the same value in the response; otherwise, a new UUID v4 is generated server-side.
+
+- **Type:** String (UUID v4 or alphanumeric+hyphen/underscore, max 128 chars)
+- **Required:** No
+- **Example:** `X-Request-Id: 550e8400-e29b-41d4-a716-446655440000`
+
+#### X-Correlation-Id
+
+Optional correlation ID for distributed tracing across service boundaries. Enables tracking a single logical operation through multiple services and components (e.g., from API ingress through event processing to outbound webhook deliveries).
+
+- **Type:** String (alphanumeric+hyphen/underscore, max 128 chars)
+- **Required:** No
+- **Format:** Alphanumeric characters, hyphens, and underscores only
+- **Example:** `X-Correlation-Id: trace-12345-abc`
+
+**Security Note:** The correlation ID is validated for injection attacks. Only safe characters are accepted; invalid IDs are rejected, omitted from outbound webhook headers, and not echoed back in the response.
+
+### Propagation Through the System
+
+When a request includes `X-Correlation-Id`:
+1. The ID is validated and attached to the request-scoped logger context
+2. The ID is included in all event processing audit records (for deduplication and tracing)
+3. The ID is propagated to outbound webhook deliveries in the `X-Correlation-Id` header
+4. The ID is echoed back in the response header `X-Correlation-Id`
+
+This enables end-to-end tracing of a single logical operation across:
+- API request ingress
+- Event ingestion and processing
+- Webhook delivery attempts
+- All related log entries
+
+### Example: Distributed Tracing Flow
+
+```bash
+# 1. Client initiates request with correlation ID
+curl -X GET http://localhost:3001/api/v1/contracts \
+  -H "X-Correlation-Id: my-trace-id-001"
+
+# 2. Response includes both request ID and echoed correlation ID
+# Response Headers:
+# X-Request-Id: 550e8400-e29b-41d4-a716-446655440000
+# X-Correlation-Id: my-trace-id-001
+```
+
+The same `X-Correlation-Id` value will appear in:
+- Request-scoped logs
+- Event processing audit records
+- Webhook delivery attempt headers
 
 ## Authentication
 
@@ -22,23 +137,254 @@ Authorization: Bearer <token>
 - `demo-admin-token` - Admin user with full access
 - `demo-user-token` - Regular user with limited access
 
+## Error Responses
+
+All terminal API errors are serialized through the safe error message policy.
+Internal exception details, stack traces, file paths, SQL fragments, dependency hostnames, tokens, and secrets are logged only through redacted structured logs and are never returned to API clients.
+
+Every policy-managed error response uses this envelope:
+
+```json
+{
+  "error": {
+    "code": "machine_readable_code",
+    "message": "safe client-facing message",
+    "requestId": "request-correlation-id"
+  }
+}
+```
+
+Validation responses may include a `details` array with field-level Zod issue metadata. These details are also passed through the same safe-message filters.
+
+Common status/code mappings:
+
+| Status | Code | Message |
+|---:|---|---|
+| 400 | `invalid_json` | Malformed JSON payload |
+| 400 | `validation_error` | Request validation failed |
+| 401 | `unauthorized` | Authentication is required |
+| 403 | `forbidden` | You do not have permission to perform this action |
+| 404 | `not_found` | The requested resource was not found |
+| 409 | `conflict` | The request conflicts with the current state |
+| 413 | `payload_too_large` | Payload Too Large |
+| 415 | `unsupported_media_type` | Unsupported Media Type |
+| 500 | `internal_error` | An unexpected error occurred |
+| 503 | `dependency_unavailable` | A required service is temporarily unavailable |
+
+Use the returned `requestId` when contacting support; it ties the response to redacted server-side logs without exposing sensitive internals.
+
+### Request Validation Middleware
+
+All request validation is consolidated in `src/middleware/validate.middleware.ts`.
+
+| Middleware | Purpose | Import Path |
+|---|---|---|
+| `validateSchema(schema)` | Validates `body`, `query`, and `params` together | `./validate.middleware` |
+| `validateRequest(schema)` | Validates `req.body` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateParams(schema)` | Validates `req.params` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateQuery(schema)` | Validates `req.query` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+
+The deprecated paths `./validation` and `./requestValidation` are thin re-exports and will be removed in a future version. Update new imports to use `./validate.middleware` directly.
+
+**Validation error shape (400):**
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Request validation failed",
+    "requestId": "unknown",
+    "details": [
+      { "path": ["fieldName"], "message": "Expected string, received number", "code": "invalid_type" }
+    ]
+  }
+}
+```
+
+The `details` array uses the `ValidationIssue` shape from `src/errors/appError.ts` (`path: string[]`, `message: string`, `code: string`).
+
+## Configuration API
+### Get Application Configuration
+**GET** `/api/config`
+
+**Access**: Public
+
+Returns application configuration including allowed assets.
+
+## System & Dependency Health
+### Get Dependency Scan Report
+**GET** `/api/v1/dependency-scan`
+
+**Access**: Admin (`Authorization: Bearer <admin-token>`)
+
+Admin-only. Returns production dependency scan status and remediation guidance.
+
+## Admin Operations
+Admin endpoints provide operational visibility and are secured via the `adminAuthGuard`.
+
+### Queue Health
+**GET** `/api/v1/admin/queue-health`
+
+Returns health metrics for the background job queues, including recent failures and pending job counts.
+
+### Circuit Breakers
+**GET** `/api/v1/admin/circuit-breakers`
+
+Returns the current state (closed, open, half-open) and failure/success counters for all registered upstream circuit breakers. Useful for monitoring upstream dependency health without exposing internals to unauthenticated callers.
+
+## Deployment API (Blue/Green)
+Manage zero-downtime deployments. All deployment routes are mounted at `/api/v1/admin/deploy` and require admin authentication via JWT or API key.
+
+### Get Deployment Status
+**GET** `/api/v1/admin/deploy/status`
+
+Returns the current deployment state without modifying it. Returns 200 with deployment state JSON.
+
+### Switch to Green
+**POST** `/api/v1/admin/deploy/switch-green`
+
+Promotes the green instance to active status.
+- Idempotent if already green (returns 202 Accepted or 200 OK).
+- Returns 502 Bad Gateway if the green instance is unhealthy.
+- Returns 409 Conflict if a switch is already in progress.
+
+### Rollback to Blue
+**POST** `/api/v1/admin/deploy/rollback`
+
+Reverts traffic to the blue instance. Idempotent if already blue (returns `200 OK`).
+
+## Webhooks API
+
+The Webhooks API provides endpoints for managing webhook subscriptions, recording delivery metrics, and replaying failed deliveries. See [webhooks.md](webhooks.md) for comprehensive documentation covering all webhook subscription management, signature verification, and admin operations.
+
+### Quick Links
+
+- **Subscription Management** — Create, list, retrieve, update, and delete webhook subscriptions
+- **Metrics Recording** — Record webhook delivery outcomes and DLQ depth
+- **Admin Operations** — Replay dead-letter queue entries with controlled concurrency
+
+For full endpoint reference, error codes, request/response shapes, and signature verification examples, see [webhooks.md](webhooks.md).
+
 ## Contracts API
 
 ### Overview
 
 The Contracts API provides endpoints for managing escrow contract records. Contract records include a `version` field that enables Optimistic Concurrency Control (OCC) on update operations.
 
+### Authentication & Authorization
+
+All contract endpoints require a valid `Authorization: Bearer <jwt>` header (HS256, signed with `JWT_SECRET`).
+
+#### Role-based access matrix
+
+| Method | Path | admin | client | freelancer |
+|--------|------|-------|--------|------------|
+| GET | `/contracts` | ✅ | ❌ (ownOnly — collection requires owner resolver) | ❌ (ownOnly) |
+| POST | `/contracts` | ✅ | ✅ | ❌ |
+| GET | `/contracts/:id` | ✅ | ✅ (ownOnly) | ✅ (ownOnly) |
+| PATCH | `/contracts/:id` | ✅ | ✅ (ownOnly) | ✅ (ownOnly) |
+| DELETE | `/contracts/:id` | ✅ | ❌ | ❌ |
+
+**ownOnly** — the caller's JWT `sub` must equal the contract's `clientId`. The owner check is resolved from the database; it is never derived from caller-supplied parameters.
+
+#### Error responses
+
+- `401 Unauthorized` — missing header, malformed token, expired token, wrong secret, or invalid role claim.
+- `403 Forbidden` — authenticated but role/ownership check failed.
+- `404 Not Found` — the contract does not exist (also returned by `requirePermission` when the `getResourceOwnerId` resolver returns `null`, to avoid leaking resource existence to non-owners).
+
 ### The `version` Field
 
 Every contract record carries a `version` field:
 
 - **Type:** `integer` (non-negative)
-- **Initial value:** `0` — set automatically when a contract is created
+- **Initial value:** `0` - set automatically when a contract is created
 - **Increment:** incremented by exactly `1` on every successful update
 
 The `version` field is included in all GET and PATCH responses. Clients must echo back the `version` they last read when submitting an update; the server accepts the write only when the stored version matches, then atomically increments it.
 
 ### Endpoints
+#### List Contracts
+**GET** `/api/v1/contracts`
+
+Retrieves a list of available contracts.
+
+#### Get Contract Bounds
+**GET** `/api/v1/contracts/bounds`
+
+Retrieves global statistical bounds and limits for contracts.
+
+#### Get Contract Stats
+**GET** `/api/v1/contracts/stats`
+
+Retrieves contract system statistics (e.g., total active volume, total completed volume).
+
+#### Create Contract
+**POST** `/api/v1/contracts`
+
+Creates a new escrow contract.
+
+**Access**: Admin or Client (`Authorization: Bearer <jwt>`)
+
+**Request Body:**
+```json
+{
+  "title": "Escrow Contract Title",
+  "description": "Escrow contract detailed description",
+  "clientId": "00000000-0000-0000-0000-000000000001",
+  "freelancerId": "00000000-0000-0000-0000-000000000002",
+  "budget": 5000,
+  "milestones": [
+    {
+      "title": "Milestone 1",
+      "amount": 2500
+    },
+    {
+      "title": "Milestone 2",
+      "amount": 2500
+    }
+  ]
+}
+```
+
+**Response (201) - Created:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "title": "Escrow Contract Title",
+    "clientId": "00000000-0000-0000-0000-000000000001",
+    "freelancerId": "00000000-0000-0000-0000-000000000002",
+    "amount": 5000,
+    "status": "draft",
+    "version": 0,
+    "createdAt": "2024-01-15T10:00:00.000Z"
+  }
+}
+```
+
+**Validation and Bounds Check Errors:**
+- `400 Bad Request` — validation error. Triggered for invalid types, negative amounts, or if the contract budget exceeds the maximum permitted global contract amount limit.
+- `422 Unprocessable Entity` — contract bounds error. Triggered if the number of milestones exceeds the maximum global limit, or if the sum of milestone amounts does not match the contract's total budget.
+
+**Error Response (422) Example:**
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "ContractBoundsError",
+    "message": "Milestone count (12) exceeds maximum limit (10).",
+    "requestId": "trace-id"
+  }
+}
+```
+
+
+#### Get Contract by ID
+**GET** `/api/v1/contracts/:id`
+
+Retrieves details for a single contract by its UUID.
 
 #### Update Contract
 
@@ -54,7 +400,7 @@ Updates an existing contract record using Optimistic Concurrency Control. The re
 }
 ```
 
-**Response (200) — success:**
+**Response (200) - success:**
 ```json
 {
   "status": "success",
@@ -73,7 +419,7 @@ Updates an existing contract record using Optimistic Concurrency Control. The re
 
 The `version` in the response (`4`) is exactly 1 greater than the version supplied in the request (`3`).
 
-**Response (409) — version conflict:**
+**Response (409) - version conflict:**
 ```json
 {
   "success": false,
@@ -86,7 +432,7 @@ The `version` in the response (`4`) is exactly 1 greater than the version suppli
 
 Returned when the supplied `version` does not match the stored version, meaning another client has modified the contract since you last read it.
 
-**Response (400) — missing version:**
+**Response (400) - missing version:**
 ```json
 {
   "success": false,
@@ -99,7 +445,7 @@ Returned when the supplied `version` does not match the stored version, meaning 
 
 Returned when the request body does not include a `version` field.
 
-**Response (400) — invalid version:**
+**Response (400) - invalid version:**
 ```json
 {
   "success": false,
@@ -111,6 +457,11 @@ Returned when the request body does not include a `version` field.
 ```
 
 Returned when `version` is present but is not a non-negative integer (e.g., a negative number, a float, a string, or `null`).
+
+#### Delete Contract
+**DELETE** `/api/v1/contracts/:id`
+
+Soft deletes a contract by ID. Requires authentication.
 
 ### Client Retry Strategy
 
@@ -304,6 +655,37 @@ Soft deletes a metadata record. The record is marked as deleted but retained in 
 **Error Responses:**
 - `401` - Authentication required
 
+## Reputation API
+Manage freelancer reviews and ratings. Registered dynamically in the OpenAPI registry. All reputation routes require a valid JWT.
+
+**Rate limit:** Reputation routes use a dedicated per-client bucket keyed by `X-API-Key` when present, otherwise client IP. Configure with `RL_REPUTATION_MAX` and `RL_REPUTATION_WINDOW_MS`; exceeded requests return `429` with `Retry-After`.
+
+### Get Reputation Profile
+**GET** `/api/v1/reputation/:id`
+
+**Permissions**: Requires `reviews.read` (Admin, Client, Freelancer).
+
+Retrieves aggregated scores, total ratings, and a list of reviews for the specific freelancer.
+
+### Submit a Reputation Review
+**PUT** `/api/v1/reputation/:id`
+
+(*Also aliased via **POST*** `/api/v1/reputation/:id/rate`)
+
+**Permissions**: Requires `reviews.create`.
+
+Submits a new rating and comment. Duplicate ratings from the same user or self-ratings will trigger a `409 Conflict` or `403 Forbidden` response utilizing the standard Error Envelope.
+
+Request Body:
+
+```JSON
+{
+  "reviewerId": "123e4567-e89b-12d3-a456-426614174000",
+  "rating": 5,
+  "comment": "Excellent freelancer!"
+}
+```
+
 ## Jobs DLQ API
 
 ### Overview
@@ -398,11 +780,12 @@ Rules:
 
 ## Sensitive Data Protection
 
-Metadata marked as `is_sensitive: true` is automatically masked for unauthorized users:
+Metadata marked as `is_sensitive: true` is strictly protected using a **fail-closed** masking policy:
 
-- **Owners** (users who created the metadata) can see the actual value
-- **Admins** can see all sensitive values
-- **Other users** see `***REDACTED***` instead of the actual value
+- **Owners** (users who created the metadata) can see the actual clear-text value
+- **Admins** can see all sensitive clear-text values
+- **Other authenticated users** see `***REDACTED***` instead of the actual value
+- **Unknown/Unauthenticated callers** (or any scenario where user context is missing) ALWAYS see `***REDACTED***` instead of the actual value
 
 ## Validation Rules
 
@@ -422,11 +805,77 @@ Metadata marked as `is_sensitive: true` is automatically masked for unauthorized
 
 ## Pagination
 
-List endpoints support pagination with the following parameters:
-- `page` - Page number (must be > 0)
-- `limit` - Items per page (1-100)
+### Cursor-Based Pagination (Contracts List — recommended)
 
-The response includes pagination metadata:
+The `GET /api/v1/contracts` endpoint uses **cursor-based pagination**.  Unlike
+offset pagination this approach is O(log n) — it does not degrade as the
+dataset grows and it never skips or duplicates rows when records are inserted
+between requests.
+
+#### Query Parameters
+
+| Parameter | Type   | Default | Constraints          | Description                                      |
+|-----------|--------|---------|----------------------|--------------------------------------------------|
+| `limit`   | number | `20`    | 1–100 (inclusive)    | Maximum items to return in one page.             |
+| `cursor`  | string | —       | opaque base-64 token | Pagination cursor from the previous page's `nextCursor`. Omit on the first page. |
+
+#### Response Shape
+
+```json
+{
+  "status": "success",
+  "data": {
+    "data": [
+      {
+        "id": "uuid",
+        "title": "string",
+        "status": "PENDING",
+        "createdAt": "ISO8601"
+      }
+    ],
+    "nextCursor": "eyJjcmVhdGVkQXQiOiIyMDI0LTAxLTAxVDAwOjAwOjAwLjAwMFoiLCJpZCI6InV1aWQifQ",
+    "hasNextPage": true,
+    "limit": 20
+  }
+}
+```
+
+- `nextCursor` is `null` when the current page is the last page.
+- `hasNextPage` is `true` when `nextCursor` is non-null.
+- The cursor is opaque — do not attempt to parse or construct it manually.
+
+#### Traversal Example
+
+```bash
+# First page (no cursor)
+curl "http://localhost:3001/api/v1/contracts?limit=10" \
+  -H "Authorization: Bearer demo-user-token"
+
+# Next page (use nextCursor from previous response)
+curl "http://localhost:3001/api/v1/contracts?limit=10&cursor=<nextCursor>" \
+  -H "Authorization: Bearer demo-user-token"
+```
+
+#### Ordering
+
+Results are ordered by `createdAt DESC`, with `id DESC` as a tie-breaker when
+two contracts share an identical timestamp.  This ordering is stable — adding
+new contracts does not change the position of existing items relative to each
+other.
+
+#### Error Responses
+
+- `400 Bad Request` — `limit` exceeds 100, is non-positive, or `cursor` is malformed.
+
+### Legacy Offset Pagination (Metadata endpoints)
+
+Metadata list endpoints still use offset-based pagination:
+
+| Parameter | Type   | Default | Constraints | Description          |
+|-----------|--------|---------|-------------|----------------------|
+| `page`    | number | `1`     | > 0         | Page number.         |
+| `limit`   | number | `20`    | 1–100       | Items per page.      |
+
 ```json
 {
   "records": [...],
@@ -503,15 +952,35 @@ curl -X DELETE http://localhost:3001/api/v1/contracts/123/metadata/456 \
 
 ## Health Check
 
-**GET** `/health`
+**GET** `/health/live`
 
-Returns the health status of the API service.
+Returns process liveness only. This endpoint should stay up even while dependencies are degraded.
 
 **Response (200):**
 ```json
 {
   "status": "ok",
-  "service": "talenttrust-backend"
+  "service": "talenttrust-backend",
+  "probe": "live"
+}
+```
+
+**GET** `/health/ready`
+
+Returns readiness for traffic. It checks SQLite, the Soroban RPC endpoint, and the queue/Redis dependency with bounded timeouts and returns `503` when any dependency is unavailable.
+
+**Response (200):**
+```json
+{
+  "status": "ready",
+  "service": "talenttrust-backend",
+  "probe": "ready",
+  "activeColor": "blue",
+  "checks": [
+    { "name": "db", "ok": true, "latencyMs": 1 },
+    { "name": "stellar-rpc", "ok": true, "latencyMs": 2 },
+    { "name": "queue", "ok": true, "latencyMs": 3 }
+  ]
 }
 ```
 

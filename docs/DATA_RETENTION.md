@@ -1,450 +1,165 @@
-# Data Retention Controls
+# Data Retention & Lifecycle Management
 
-## Overview
+This document details the data retention, archival, and purge processes within the Talenttrust-Backend repository. The retention engine ensures that our data lifecycle adheres to compliance standards, maintains tamper-evident audit trails, and executes operations safely.
 
-The Data Retention Controls module provides a comprehensive system for managing data lifecycle, compliance, and archival requirements. It enables organizations to implement configurable retention policies, automatic archival, and compliance auditing across all data entities.
+## 1. The Data Lifecycle Model
 
-## Key Features
+The lifecycle of a record strictly follows three primary states: **Active → Archived → Purged**.
 
-- **Configurable Retention Policies**: Define retention periods and archival strategies for different data types
-- **Automatic Data Lifecycle Management**: Automatically archive and delete data based on policies
-- **Compliance Auditing**: Complete audit trail of all retention operations for regulatory compliance
-- **Data Classification**: Apply security controls based on data sensitivity levels
-- **Flexible Storage Architecture**: Support for multiple storage backends (local, cloud, encrypted, cold storage)
-- **GDPR and CCPA Ready**: Built with compliance frameworks in mind
+### Active State
 
-## Architecture
+When data is created, the `RetentionPolicyEngine` (`src/retention/policies.ts`) assigns an expiration date.
+Retention policies are mapped to periods (durations in milliseconds):
 
-The retention system is composed of four main components:
+- **30 Days**: `30 * 24 * 60 * 60 * 1000`
+- **90 Days** (Default fallback): `90 * 24 * 60 * 60 * 1000`
+- **180 Days** (6 Months): `180 * 24 * 60 * 60 * 1000`
+- **365 Days** (1 Year): `365 * 24 * 60 * 60 * 1000`
+- **730 Days** (2 Years): `730 * 24 * 60 * 60 * 1000`
+- **Indefinite**: `Number.MAX_SAFE_INTEGER`
 
-### 1. **RetentionPolicyEngine** (`src/retention/policies.ts`)
-Manages the creation, validation, and enforcement of retention policies. Determines when data should be archived or deleted based on configured rules.
+### Archival Selection
 
-**Key Methods:**
-- `createPolicy()` - Create and register a retention policy
-- `updatePolicy()` - Update existing policies
-- `calculateExpirationDate()` - Compute when data expires
-- `determineRetentionStatus()` - Check current retention status
-- `shouldArchive()` / `shouldPermanentlyDelete()` - Determine action needed
+The system checks if a record has reached its expiration date (`now >= expiresAt`).
+If expired, the `DataArchivalService` (`src/retention/archival.ts`) takes over:
 
-### 2. **StorageManager** (`src/retention/storage.ts`)
-Provides an abstraction layer for data storage with support for multiple backends. Handles data persistence and archival storage operations.
+- It generates an archival path format: `/archive/{storageType}/{entityType}/{year}/{month}/{dataId}`
+- It determines if encryption is required. Data classified as `RESTRICTED` or `CONFIDENTIAL` is unconditionally encrypted, overriding any lax policy configurations.
+- The record is marked as `isArchived: true`, tagged with an `archivedAt` timestamp, and passed to the appropriate storage backend.
 
-**Key Methods:**
-- `store()` - Save data to storage
-- `retrieve()` - Fetch data from storage
-- `moveData()` - Transfer data between storage types
-- `delete()` - Remove data
+### Purge / Deletion Window Enforcement
 
-### 3. **DataArchivalService** (`src/retention/archival.ts`)
-Manages the secure archival of data, including encryption, storage management, and restoration of archived data.
+The purge engine (`src/retention/purge.ts`) evaluates whether archived records have exceeded their post-archival retention window (defaulting to 30 days after `archivedAt`).
+Expired local active records (without policies) or expired cold storage archives are permanently purged using the `StorageManager` API. The purge script tracks processed IDs in a `seenArchiveIds` set to prevent double-counting or double-deleting records that share identical storage providers (e.g., `COLD_STORAGE` and `ENCRYPTED_ARCHIVE`).
 
-**Key Methods:**
-- `archiveData()` - Move data to archival storage
-- `restoreArchivedData()` - Restore data from archive
-- `getArchivedData()` - Retrieve archived data
-- `permanentlyDeleteArchived()` - Securely delete archived data
+## 2. Storage Backends & Compliance Audit Proofs
 
-### 4. **ComplianceAuditLogger** (`src/retention/audit.ts`)
-Maintains an immutable audit trail of all retention-related operations for compliance verification and forensic investigation.
+### Storage Backends
 
-**Key Methods:**
-- `logAction()` - Record retention action
-- `getLogsForEntity()` - Retrieve audit trail for data
-- `queryLogs()` - Search audit logs with filters
-- `getComplianceReport()` - Generate compliance summary
+Our storage abstraction layer (`src/retention/storage.ts`) delegates data to different destinations via the `StorageManager`:
+
+- **Storage Types**: `LOCAL`, `CLOUD`, `COLD_STORAGE`, and `ENCRYPTED_ARCHIVE`.
+- **Implementations**:
+  - `SqliteStorageProvider`: The primary persistent provider. It uses table names like `retention_local` or `retention_archive`. It features SQLite-backed storage that ensures atomicity, survivability across restarts, and paginated reading (capped at `1000` records to avoid memory bloat).
+  - `InMemoryStorageProvider`: Used primarily for isolation during testing and development.
+
+### Compliance Audit Proofs
+
+To guarantee non-repudiation and regulatory accountability, the `ComplianceAuditLogger` (`src/retention/audit.ts`) records all state changes:
+
+- For destructive actions—specifically `DELETE` and `ARCHIVE`—the system constructs a JSON payload containing the entity type, action, actor, timestamp, and details.
+- This payload is signed via SHA-256 HMAC utilizing the environment secret `COMPLIANCE_AUDIT_SECRET`.
+- There is no fallback secret. `COMPLIANCE_AUDIT_SECRET` must be configured and should be generated from a secure random source (minimum 32 characters).
+- The resulting signature serves as a verifiable, tamper-evident cryptographic proof (`proof`) bound to the `ComplianceAuditLog`, allowing independent verification via `verifyProof(log)`.
+
+## 3. Configuration & Safety Guarantees
+
+### Environment Variables & Settings
+
+- `COMPLIANCE_AUDIT_SECRET`: Required string used as the HMAC secret key for generating audit log proofs.
+- `RETENTION_DRY_RUN`: If set to `true` (or run with the flag `--dry-run`), the purge process strictly calculates and outputs candidate counts per table without executing any `DELETE` operations.
+- `RETENTION_OVERRIDES`: Optional JSON string that overrides the default retention period for individual entity types. The value must be a JSON object mapping `DataEntityType` names to `RetentionPeriod` values. Overrides are validated at startup; values below the per-entity legal minimum are rejected. Examples below.
+
+#### RETENTION_OVERRIDES Format
+
+```bash
+# Extend contract retention to 2 years, transaction to 1 year,
+# and audit logs to indefinite.
+RETENTION_OVERRIDES='{"contract":"2y","transaction":"1y","audit_log":"indefinite"}'
+
+# Shorten document retention to 30 days (minimum for document is 90d,
+# so this will be clamped to 90d at startup).
+RETENTION_OVERRIDES='{"document":"30d"}'
+```
+
+**Valid entity types:** `contract`, `user_profile`, `transaction`, `audit_log`, `document`, `message`
+
+**Valid periods:** `30d`, `90d`, `6m`, `1y`, `2y`, `indefinite`
+
+**Legal minimums per entity type:**
+
+| Entity Type | Legal Minimum | Rationale |
+|---|---|---|
+| `contract` | `1y` | Contracts must be retained for at least one year for regulatory compliance. |
+| `transaction` | `1y` | Financial transaction records require a minimum one-year retention. |
+| `audit_log` | `2y` | Audit logs must be retained for at least two years for compliance review. |
+| `user_profile` | `30d` | User profiles have a minimum 30-day retention for account recovery. |
+| `document` | `90d` | Documents require a minimum 90-day retention. |
+| `message` | `30d` | Messages have a minimum 30-day retention. |
+
+If an override value is below the legal minimum, it is clamped to the minimum at startup. The engine logs the effective period for each entity type via `getResolvedPolicies()`.
+
+#### Auditability
+
+The `RetentionPolicyEngine.getResolvedPolicies()` method returns the full set of effective, resolved policies — one per entity type — with the period that would actually be used for expiration calculations and a `source` field indicating whether the period came from an override or the default:
+
+```typescript
+const engine = new RetentionPolicyEngine();
+engine.applyOverrides({ contract: '2y' });
+
+const resolved = engine.getResolvedPolicies();
+// {
+//   contract:     { period: '2y', source: 'override' },
+//   transaction:  { period: '90d', source: 'default' },
+//   audit_log:    { period: '90d', source: 'default' },
+//   user_profile: { period: '90d', source: 'default' },
+//   document:     { period: '90d', source: 'default' },
+//   message:      { period: '90d', source: 'default' },
+// }
+```
+
+### Safety & Idempotency
+
+- **Idempotent Storage**: The SQLite provider utilizes an `INSERT OR REPLACE` strategy. Repeatedly storing a record with the same ID correctly overwrites it rather than throwing uniqueness constraints or creating duplicates. This allows for safe partial re-runs.
+- **Dry-Run Integrity**: The dry-run purge mode shares the _exact same_ logic and database queries as the destructive execution branch. This guarantees that simulated outputs accurately reflect what will actually be deleted.
+- **Redaction**: Purge and audit logs sanitize raw PII objects before logging out. Data payloads are stripped, replaced with `[REDACTED]`, and emails are masked.
+- **Transaction Safety**: Bounded queries (`limit: 1000` per page) and SQLite statement reuse prevents resource exhaustion and out-of-memory errors when processing large backlogs of expired records.
+
+## 4. Workflow Sequence Diagram
+
+The following Mermaid diagram outlines the progression from an active state to eventual deletion, emphasizing the compliance audit tracking checkpoint.
+
+### Relationship with Event Idempotency TTL
+
+The `DataRetentionManager` operates independently from the **Event Idempotency TTL** mechanism (`src/events/idempotency.ts`). While the Data Retention module enforces long-term storage and compliance logic (e.g. archiving old contracts after years), the idempotency store employs short-lived TTLs (e.g. 24 hours) for deduplication tracking.
+
+- The Idempotency TTL only governs the lifespan of duplicate event detection and its corresponding metrics (`event_idempotency_evictions_total`).
+- **No Conflict**: The idempotency key eviction logic does not race against or conflict with the `purge.ts` engine, as idempotency entries are maintained in their own discrete store/table distinct from the local active data and cold storage archives.
 
 ## Usage Examples
 
-### Initialize Data Retention Manager
+    Active->>Policy: Check Expiration (now >= expiresAt)
+    Policy-->>Archival: Trigger Archive (if expired)
 
-```typescript
-import { DataRetentionManager, RetentionConfig } from './retention';
+    rect rgb(240, 248, 255)
+        Note over Archival, ArchiveStore: Archival Selection & Storage
+        Archival->>Archival: Evaluate Encryption (Classification)
+        Archival->>ArchiveStore: store(archivedData)
+    end
 
-const config: RetentionConfig = {
-  enabled: true,
-  storageBasePath: '/data',
-  archiveBasePath: '/archive',
-  checksIntervalMs: 3600000, // 1 hour
-  batchSize: 100,
-  automaticArchival: true,
-  automaticDeletion: false,
-  postArchivalRetentionDays: 30,
-  complianceStandard: 'GDPR',
-  encryptionEnabled: true,
-};
+    Archival->>Audit: logAction(ARCHIVE)
+    Audit->>Audit: Generate SHA-256 HMAC Proof
 
-const manager = new DataRetentionManager(config);
-```
+    Note over ArchiveStore, Purge: Post-Archival Window
+    Purge->>ArchiveStore: Query (archivedAt + postArchivalDays <= now)
 
-### Create Retention Policies
+    rect rgb(255, 240, 245)
+        Note over Purge, Audit: Deletion Enforcement
+        Purge->>ArchiveStore: Delete Record
+        Purge->>Audit: logAction(DELETE)
+        Audit->>Audit: Generate SHA-256 HMAC Proof
+    end
 
-```typescript
-// Create a policy for contracts with 2-year retention
-const contractPolicy = manager.createRetentionPolicy({
-  name: 'Contract Retention',
-  description: 'Retain contracts for legal compliance',
-  entityType: DataEntityType.CONTRACT,
-  period: RetentionPeriod.TWO_YEARS,
-  classification: DataClassification.CONFIDENTIAL,
-  archivalType: ArchivalStorageType.COLD_STORAGE,
-  encryptArchive: true,
-  allowPermanentRetention: false,
-  isActive: true,
-});
+````
 
-// Set as default for contracts
-manager.setDefaultPolicy(DataEntityType.CONTRACT, contractPolicy.id);
-```
+## 5. Repository Integration
 
-### Store Data with Retention
+To integrate this documentation with the root of the project, please add the following snippet to your main `README.md` under the appropriate section:
 
-```typescript
-const { data, policy } = await manager.storeData(
-  {
-    entityType: DataEntityType.CONTRACT,
-    data: contractDetails,
-    classification: DataClassification.CONFIDENTIAL,
-    createdAt: new Date(),
-  },
-  contractPolicy.id,
-  'user@example.com' // Actor for audit trail
-);
+```markdown
+## Data Retention & Compliance
 
-console.log(`Data stored with ID: ${data.id}`);
-console.log(`Expires at: ${data.expiresAt}`);
-```
+This repository enforces automated data lifecycle management—archiving and purging records based on strict retention policies. All destructive actions generate a tamper-evident HMAC compliance proof.
 
-### Check Retention Status
-
-```typescript
-const status = await manager.getRetentionStatus(dataId);
-
-if (status.needsAction) {
-  console.log(`Action required: ${status.actionRequired}`);
-  console.log(`Days until expiry: ${status.daysUntilExpiry}`);
-}
-```
-
-### Archive Expired Data
-
-```typescript
-// Manual archival
-const result = await manager.archiveData(dataId, 'admin');
-
-if (result.success) {
-  console.log(`Data archived at: ${result.archivedAt}`);
-  console.log(`Location: ${result.location}`);
-}
-
-// Or enable automatic archival
-manager.startAutomatedProcessing();
-```
-
-### Compliance Auditing
-
-```typescript
-// Get audit logs for specific data
-const logs = manager.getAuditLogs({ entityId: dataId });
-
-logs.forEach(log => {
-  console.log(`${log.action} by ${log.actor} at ${log.timestamp}`);
-});
-
-// Generate compliance report
-const report = manager.getComplianceReport();
-console.log(`GDPR violations: ${report.GDPR.count}`);
-
-// Export for compliance review
-const auditTrail = manager.exportAuditTrail({
-  compliance: 'GDPR',
-  startDate: new Date('2024-01-01'),
-});
-```
-
-## Configuration Options
-
-### RetentionConfig Interface
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | true | Enable retention controls |
-| `storageBasePath` | string | `/data` | Base path for active data storage |
-| `archiveBasePath` | string | `/archive` | Base path for archived data |
-| `checksIntervalMs` | number | 3600000 | Interval for automated checks (ms) |
-| `batchSize` | number | 100 | Records to process per batch |
-| `automaticArchival` | boolean | true | Auto-archive expired data |
-| `automaticDeletion` | boolean | false | Auto-delete post-archival data |
-| `postArchivalRetentionDays` | number | 30 | Days to keep archived data before deletion |
-| `complianceStandard` | string | `GDPR` | Primary compliance framework |
-| `encryptionEnabled` | boolean | true | Enable encryption for sensitive data |
-
-## Data Classification Levels
-
-```typescript
-enum DataClassification {
-  PUBLIC = 'public',              // No restrictions
-  INTERNAL = 'internal',          // Internal use only
-  CONFIDENTIAL = 'confidential',  // Sensitive business data
-  RESTRICTED = 'restricted',      // Highest sensitivity (PII, etc.)
-}
-```
-
-**Security Controls by Classification:**
-- **PUBLIC**: Minimal controls, local archival
-- **INTERNAL**: Standard controls, cold storage archival
-- **CONFIDENTIAL**: Encryption required for archives
-- **RESTRICTED**: Mandatory encryption, encrypted archive storage
-
-## Retention Periods
-
-```typescript
-enum RetentionPeriod {
-  THIRTY_DAYS = '30d',
-  NINETY_DAYS = '90d',
-  SIX_MONTHS = '6m',
-  ONE_YEAR = '1y',
-  TWO_YEARS = '2y',
-  INDEFINITE = 'indefinite',
-}
-```
-
-## Storage Types
-
-```typescript
-enum ArchivalStorageType {
-  LOCAL = 'local',                        // Local filesystem
-  CLOUD = 'cloud',                        // Cloud storage
-  COLD_STORAGE = 'cold_storage',          // Long-term archive
-  ENCRYPTED_ARCHIVE = 'encrypted_archive', // Encrypted archival
-}
-```
-
-## API Endpoints
-
-### Policy Management
-
-**POST** `/api/v1/retention/policies`
-- Create a new retention policy
-- Request body: Policy configuration
-- Returns: Created policy with ID and timestamps
-
-**GET** `/api/v1/retention/policies`
-- Retrieve all active policies
-- Returns: Array of active policies
-
-### Data Management
-
-**POST** `/api/v1/retention/data`
-- Store data with retention policy
-- Request body: `{ data, policyId?, actor }`
-- Returns: Stored data with expiration information
-
-**GET** `/api/v1/retention/data/:dataId`
-- Retrieve stored data
-- Returns: Data and metadata
-
-**GET** `/api/v1/retention/status/:dataId`
-- Get retention status and action items
-- Returns: Retention status with expiration info
-
-### Compliance
-
-**GET** `/api/v1/retention/audit-logs`
-- Retrieve audit logs
-- Query params: `entityId?`, `action?`, `startDate?`, `endDate?`
-- Returns: Array of audit log entries
-
-**GET** `/api/v1/retention/compliance-report`
-- Generate compliance summary
-- Returns: Report grouped by compliance standard
-
-## Compliance Features
-
-### GDPR Compliance
-
-- **Data Retention**: Configurable period with indefinite retention option
-- **Right to Erasure**: Support for manual deletion and restoration
-- **Audit Trail**: Complete history of all data operations
-- **Data Classification**: Automatic controls based on sensitivity
-
-### CCPA Compliance
-
-- **Data Inventory**: Track all stored personal information
-- **Retention Schedules**: Clear deletion timelines
-- **Access Logs**: Who accessed data and when
-- **Deletion Verification**: Confirm permanent deletion completion
-
-## Security Considerations
-
-### Encryption
-
-- Restricted and confidential data automatically encrypted when archived
-- Encryption enabled by default in `RetentionConfig`
-- All encryption happens at archival, original data remains unencrypted
-
-### Audit Logging
-
-- Every retention action is logged immutably
-- Actor information captured for accountability
-- Timestamp precision for forensic analysis
-- Compliance standard tracking
-
-### Storage Isolation
-
-- Active data and archives stored separately
-- Cold storage for long-term retention
-- Support for dedicated encryption backends
-- Storage type mapping based on data classification
-
-## Testing
-
-### Unit Tests (`src/retention/retention.test.ts`)
-
-Comprehensive coverage of individual components:
-- RetentionPolicyEngine
-- StorageManager
-- DataArchivalService
-- ComplianceAuditLogger
-- DataRetentionManager
-
-**Test Coverage:**
-- Policy creation and validation
-- Expiration calculation
-- Archival workflows
-- Audit logging
-- Error handling
-
-**Run tests:**
-```bash
-npm test src/retention/retention.test.ts
-```
-
-### Integration Tests (`src/retention/integration.test.ts`)
-
-End-to-end workflows:
-- Complete data lifecycle
-- Multiple policies
-- Archival and restoration
-- Compliance reporting
-- Classification-based controls
-- Error scenarios
-
-**Run tests:**
-```bash
-npm test src/retention/integration.test.ts
-```
-
-**Coverage Goal:** 95%+ for retention module
-
-## Performance Considerations
-
-### Batch Processing
-
-- Configure `batchSize` for large datasets
-- Automated checks run at configured `checksIntervalMs`
-- Default: 1 hour interval, 100 records per batch
-
-### Storage Optimization
-
-- Cold storage for archived data reduces active storage costs
-- Post-archival retention (default 30 days) allows safety period
-- Encryption overhead: ~5-10% for archive storage
-
-### Scalability
-
-- In-memory storage suitable for development
-- Production should use persistent storage provider
-- Streaming support for large-scale exports
-
-## Extending the System
-
-### Custom Storage Providers
-
-```typescript
-class CustomStorageProvider implements IStorageProvider {
-  async store(data: RetainedData): Promise<string> {
-    // Implement storage logic
-  }
-
-  async retrieve(id: string): Promise<RetainedData | null> {
-    // Implement retrieval logic
-  }
-
-  // ... implement other methods
-}
-
-const manager = new DataRetentionManager(
-  config,
-  customLocalProvider,
-  customArchiveProvider
-);
-```
-
-### Custom Policies
-
-Subclass `RetentionPolicyEngine` to add custom business logic:
-
-```typescript
-class CustomPolicyEngine extends RetentionPolicyEngine {
-  determineRetentionStatus(data: RetainedData): RetentionStatus {
-    // Custom logic here
-    return super.determineRetentionStatus(data);
-  }
-}
-```
-
-## Maintenance
-
-### Regular Tasks
-
-1. **Monitor archived data**: Track storage usage
-2. **Review audit logs**: Quarterly compliance audits
-3. **Test restoration**: Verify archive integrity
-4. **Update policies**: Adjust retention periods as needed
-
-### Disaster Recovery
-
-- All audit logs are immutable and tamper-proof
-- Archive locations tracked in metadata
-- Retention status snapshots available for recovery
-
-## Troubleshooting
-
-### Data Not Archiving
-
-1. Check expiration date: `getRetentionStatus()`
-2. Verify policy is active
-3. Ensure archival storage is writable
-4. Check encryption configuration
-
-### Audit Logs Not Found
-
-1. Confirm retention is enabled
-2. Check compliance standard matches filter
-3. Verify timestamp filters (UTC)
-4. Use `exportAuditTrail()` for raw export
-
-### Performance Issues
-
-1. Reduce `batchSize` for slower systems
-2. Increase `checksIntervalMs` to reduce frequency
-3. Consider async/worker processing for large datasets
-4. Monitor storage provider performance
-
-## Future Enhancements
-
-- [ ] Direct database integration
-- [ ] Multi-region replication support
-- [ ] Advanced encryption with key rotation
-- [ ] ML-based retention optimization
-- [ ] blockchain-based audit trail immutability
-- [ ] Real-time compliance dashboards
-
-## License
-
-MIT
-
-## Support
-
-For issues, questions, or recommendations, please open an issue in the repository.
+For a complete breakdown of our data lifecycle model, storage backends, and audit generation, please see the [Data Retention Documentation](docs/DATA_RETENTION.md).
+````

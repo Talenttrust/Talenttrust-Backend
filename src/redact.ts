@@ -54,6 +54,8 @@ export function redactHeaders(
 export function redactUrl(rawUrl: string): string {
   let url: URL;
   try {
+    // Reject URLs containing control characters
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(rawUrl)) return MASK;
     // Use a dummy base so relative paths parse correctly
     url = new URL(rawUrl, 'http://localhost');
   } catch {
@@ -81,6 +83,8 @@ export function redactUrl(rawUrl: string): string {
 export function normalizeUrlPath(rawUrl: string): string {
   let pathname: string;
   try {
+    // Reject URLs containing control characters
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(rawUrl)) return MASK;
     pathname = new URL(rawUrl, 'http://localhost').pathname;
   } catch {
     return MASK;
@@ -92,5 +96,10 @@ export function normalizeUrlPath(rawUrl: string): string {
     // Pure numeric segments
     .replace(/\/\d+(?=\/|$)/g, '/:id')
     // Alphanumeric slugs that look like IDs (≥8 chars, mixed alpha+digit)
-    .replace(/\/[a-z0-9]*\d[a-z0-9]{6,}(?=\/|$)/gi, '/:id');
+    // Exclude Stellar public keys (G-prefixed, 56 chars) and Soroban contract IDs (C-prefixed, 56 chars)
+    .replace(/\/([a-z0-9]{8,})(?=\/|$)/gi, (_match, segment) => {
+      if (segment.length > 50 && /^[GC]/i.test(segment)) return _match;
+      if (/[a-z]/i.test(segment) && /\d/.test(segment)) return '/:id';
+      return _match;
+    });
 }

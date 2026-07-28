@@ -270,4 +270,28 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
       expect(successRes.body.data.version).toBe(1);
     });
   });
+
+  // ── Edge cases: non-version field validation ───────────────────────────────
+
+  describe('non-version field validation', () => {
+    const app = createTestApp(async () => {
+      throw new Error('should not be called');
+    });
+
+    it('returns 400 when title is too short but version is valid', async () => {
+      const res = await request(app)
+        .patch(`/api/v1/contracts/${CONTRACT_ID}`)
+        .send({ version: 0, title: 'Hi' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when status is not a valid enum value', async () => {
+      const res = await request(app)
+        .patch(`/api/v1/contracts/${CONTRACT_ID}`)
+        .send({ version: 0, status: 'invalid_status' });
+
+      expect(res.status).toBe(400);
+    });
+  });
 });

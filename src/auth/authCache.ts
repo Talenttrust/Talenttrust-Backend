@@ -10,7 +10,13 @@
  *   - Explicit invalidation on write operations (create, rotate, deactivate, update)
  *   - TTL-based expiration
  *   - LRU eviction when capacity is reached
+ *
+ * Metrics:
+ *   - Cache hits and misses are tracked via Prometheus counters
  */
+
+import { Counter } from 'prom-client';
+import { ApiKeyInfo } from './apiKeys';
 
 export interface AuthCacheOptions {
   ttlMs: number;
@@ -23,16 +29,6 @@ export interface CacheEntry {
   lastAccessed: number;
 }
 
-export interface ApiKeyInfo {
-  id: string;
-  name: string;
-  scope: string[];
-  createdBy: string;
-  createdAt: Date;
-  expiresAt?: Date;
-  isActive: boolean;
-}
-
 /**
  * LRU cache with TTL for auth read responses.
  */
@@ -40,15 +36,33 @@ export class AuthCache {
   private cache: Map<string, CacheEntry>;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
+  private hits: Counter<string>;
+  private misses: Counter<string>;
   private hitCount: number;
   private missCount: number;
 
-  constructor(options: AuthCacheOptions) {
+  constructor(options: AuthCacheOptions, register?: any) {
     this.ttlMs = options.ttlMs;
     this.maxEntries = options.maxEntries;
     this.cache = new Map();
     this.hitCount = 0;
     this.missCount = 0;
+
+    // Initialize metrics
+    const Registry = require('prom-client').Registry;
+    const registry = register && register.constructor && register.constructor.name === 'Registry' ? register : new Registry();
+
+    this.hits = new Counter({
+      name: 'auth_cache_hits_total',
+      help: 'Total number of auth cache hits.',
+      registers: [registry],
+    });
+
+    this.misses = new Counter({
+      name: 'auth_cache_misses_total',
+      help: 'Total number of auth cache misses.',
+      registers: [registry],
+    });
   }
 
   /**
@@ -62,6 +76,7 @@ export class AuthCache {
     const now = Date.now();
 
     if (!entry) {
+      this.misses.inc();
       this.missCount++;
       return null;
     }
@@ -69,12 +84,14 @@ export class AuthCache {
     // Check if entry has expired
     if (now > entry.expiresAt) {
       this.cache.delete(selector);
+      this.misses.inc();
       this.missCount++;
       return null;
     }
 
     // Update last accessed time for LRU eviction
     entry.lastAccessed = now;
+    this.hits.inc();
     this.hitCount++;
     return entry.info;
   }
@@ -122,7 +139,7 @@ export class AuthCache {
         selectorsToDelete.push(selector);
       }
     });
-    selectorsToDelete.forEach((selector) => this.cache.delete(selector));
+    selectorsToDelete.forEach(selector => this.cache.delete(selector));
   }
 
   /**
@@ -162,4 +179,25 @@ export class AuthCache {
     }
   }
 
+  /**
+   * Clean up expired entries (called periodically).
+   */
+  cleanupExpired(): number {
+    const now = Date.now();
+    let cleaned = 0;
+    const selectorsToDelete: string[] = [];
+
+    this.cache.forEach((entry, selector) => {
+      if (now > entry.expiresAt) {
+        selectorsToDelete.push(selector);
+      }
+    });
+
+    selectorsToDelete.forEach(selector => {
+      this.cache.delete(selector);
+      cleaned++;
+    });
+
+    return cleaned;
+  }
 }

@@ -170,7 +170,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm ci
 
       - name: Generate and Validate Spec
         run: npm run test:docs

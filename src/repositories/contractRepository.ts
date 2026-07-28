@@ -1,21 +1,84 @@
-/**
- * ContractRepository — CRUD operations for the `contracts` table.
- *
- * All queries use prepared statements (parameter binding) to prevent SQL
- * injection.  The repository layer is intentionally ignorant of HTTP/Express
- * concerns; it operates purely on domain types defined in ../db/types.ts.
- *
- * Threat model:
- *  - IDs are caller-supplied UUIDs; validated upstream in route handlers.
- *  - Amount is stored as an integer (stroops) to avoid floating-point drift.
- *  - Status transitions are constrained by a DB CHECK constraint as a second
- *    line of defence beyond application-level validation.
- */
-
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { Contract, ContractStatus } from "../db/types";
-import { VersionConflictError } from "../errors/appError";
+import {
+  encodeCursor,
+  decodeCursor,
+  parseLimit,
+} from "../contracts/cursor.repository";
+import type {
+  CursorPage,
+  CursorPaginationInput,
+} from "../contracts/cursor.types";
+import { VersionConflictError, NotFoundError } from "../errors/appError";
+import {
+  isSoftDeleted,
+  isPastRetentionWindow,
+  filterNotDeleted,
+  SoftDeleteRetentionError,
+  DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+} from "../utils/softDelete";
+
+/** Input shape for creating a new contract. */
+export interface CreateContractInput {
+  title: string;
+  clientId: string;
+  freelancerId?: string;
+  amount: number;
+  status?: ContractStatus;
+}
+
+/** Canonical set of valid contract statuses (mirrors the DB CHECK constraint). */
+const VALID_CONTRACT_STATUSES: readonly ContractStatus[] = [
+  "draft",
+  "active",
+  "completed",
+  "disputed",
+  "cancelled",
+];
+
+/**
+ * Reject any status outside the allowed set before it reaches the database.
+ * The `contracts.status` column carries a matching CHECK constraint, but some
+ * SQLite builds (notably the one bundled on CI) do not enforce CHECK on every
+ * write path, so we validate in code to keep the behavior deterministic across
+ * platforms.
+ */
+function assertValidContractStatus(status: ContractStatus): void {
+  if (!VALID_CONTRACT_STATUSES.includes(status)) {
+    throw new Error(`Invalid contract status: ${String(status)}`);
+  }
+}
+
+/**
+ * Repository interface for contracts data access layer.
+ *
+ * All methods are async to allow swapping between synchronous SQLite and
+ * asynchronous backends without changing callers.
+ */
+export interface IContractRepository {
+  create(data: CreateContractInput): Promise<Contract>;
+  findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined>;
+  findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]>;
+  findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]>;
+  findPage(
+    input?: CursorPaginationInput & { includeDeleted?: boolean },
+  ): Promise<CursorPage<Contract>>;
+  updateWithVersion(
+    id: string,
+    fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
+    expectedVersion: number,
+  ): Promise<Contract>;
+  delete(id: string, now?: Date): Promise<boolean>;
+  restore(id: string, now?: Date, retentionDays?: number): Promise<Contract>;
+  purgeExpired(now?: Date, retentionDays?: number): Promise<number>;
+}
 
 /** Row shape as returned from SQLite (snake_case columns). */
 interface ContractRow {
@@ -27,6 +90,7 @@ interface ContractRow {
   status: string;
   version: number;
   created_at: string;
+  deleted_at?: string | null;
 }
 
 /** Maps a raw DB row to the domain Contract interface. */
@@ -40,84 +104,63 @@ function toContract(row: ContractRow): Contract {
     status: row.status as ContractStatus,
     version: row.version,
     createdAt: row.created_at,
+    deletedAt: row.deleted_at ?? null,
   };
 }
 
 /**
- * Repository providing typed CRUD access to the `contracts` table.
+ * SQLite-backed repository providing typed CRUD access to the `contracts` table.
  *
- * Instantiate with an open `Database` instance.  Each method prepares its
+ * Instantiate with an open `Database` instance. Each method prepares its
  * statement lazily on first call and caches it for subsequent calls.
  */
-export class ContractRepository {
+export class ContractRepository implements IContractRepository {
   private db: Database.Database;
 
   constructor(db: Database.Database) {
     this.db = db;
   }
 
-  /**
-   * Returns every contract ordered by creation date descending.
-   *
-   * @returns Array of Contract objects (empty array when none exist).
-   */
-  findAll(): Contract[] {
-    const rows = this.db
-      .prepare<
-        [],
-        ContractRow
-      >("SELECT * FROM contracts ORDER BY created_at DESC")
-      .all();
+  async findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts ORDER BY created_at DESC"
+      : "SELECT * FROM contracts WHERE deleted_at IS NULL ORDER BY created_at DESC";
+    const rows = this.db.prepare<[], ContractRow>(sql).all();
     return rows.map(toContract);
   }
 
-  /**
-   * Finds a single contract by its UUID primary key.
-   *
-   * @param id - The contract UUID.
-   * @returns The matching Contract or `undefined` if not found.
-   */
-  findById(id: string): Contract | undefined {
-    const row = this.db
-      .prepare<[string], ContractRow>("SELECT * FROM contracts WHERE id = ?")
-      .get(id);
+  async findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts WHERE id = ?"
+      : "SELECT * FROM contracts WHERE id = ? AND deleted_at IS NULL";
+    const row = this.db.prepare<[string], ContractRow>(sql).get(id);
     return row ? toContract(row) : undefined;
   }
 
-  /**
-   * Retrieves all contracts associated with a given client user.
-   *
-   * @param clientId - UUID of the client user.
-   */
-  findByClientId(clientId: string): Contract[] {
-    const rows = this.db
-      .prepare<
-        [string],
-        ContractRow
-      >("SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC")
-      .all(clientId);
+  async findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC"
+      : "SELECT * FROM contracts WHERE client_id = ? AND deleted_at IS NULL ORDER BY created_at DESC";
+    const rows = this.db.prepare<[string], ContractRow>(sql).all(clientId);
     return rows.map(toContract);
   }
 
-  /**
-   * Creates a new contract record.
-   *
-   * Generates a UUID and records the current timestamp automatically.
-   *
-   * @param data - Required contract fields (id and createdAt are generated).
-   * @returns The newly created Contract.
-   */
-  create(
-    data: Omit<Contract, "id" | "createdAt" | "status" | "version"> & {
-      status?: ContractStatus;
-    },
-  ): Contract {
+  async create(data: CreateContractInput): Promise<Contract> {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const status: ContractStatus = data.status ?? "draft";
+    assertValidContractStatus(status);
 
     this.db
-      .prepare<[string, string, string, string, number, string, number, string]>(
+      .prepare<
+        [string, string, string, string, number, string, number, string]
+      >(
         `INSERT INTO contracts
            (id, title, client_id, freelancer_id, amount, status, version, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -126,77 +169,340 @@ export class ContractRepository {
         id,
         data.title,
         data.clientId,
-        data.freelancerId,
+        data.freelancerId ?? "",
         data.amount,
         status,
         0,
         createdAt,
       );
 
-    return { id, ...data, status, version: 0, createdAt };
+    return {
+      id,
+      title: data.title,
+      clientId: data.clientId,
+      freelancerId: data.freelancerId ?? "",
+      amount: data.amount,
+      status,
+      createdAt,
+      version: 0,
+      deletedAt: null,
+    };
   }
 
-  /**
-   * Updates the status of an existing contract.
-   *
-   * @param id     - UUID of the contract to update.
-   * @param status - New status value (must satisfy the ContractStatus union).
-   * @returns The updated Contract, or `undefined` if the ID was not found.
-   */
-  updateStatus(id: string, status: ContractStatus): Contract | undefined {
-    this.db
-      .prepare<[string, string]>("UPDATE contracts SET status = ? WHERE id = ?")
-      .run(status, id);
-    return this.findById(id);
-  }
-
-  /**
-   * Atomically updates contract fields only when the stored version matches
-   * `expectedVersion`, then increments the version by 1.
-   *
-   * No SELECT precedes the UPDATE — the WHERE clause makes the check and
-   * increment a single atomic operation within SQLite's serialized write model.
-   *
-   * @param id              - UUID of the contract to update.
-   * @param fields          - Partial set of mutable fields to apply.
-   * @param expectedVersion - The version the caller last read; must match the
-   *                          stored version or the update is rejected.
-   * @returns The updated Contract (with incremented version).
-   * @throws {VersionConflictError} When `result.changes === 0` (id not found
-   *         or version mismatch — both require the client to re-fetch).
-   */
-  updateWithVersion(
+  async updateWithVersion(
     id: string,
     fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
     expectedVersion: number,
-  ): Contract {
+  ): Promise<Contract> {
+    const existing = await this.findById(id);
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+
     const result = this.db
-      .prepare<[string | null, string | null, string, number]>(
+      .prepare<
+        [
+          string | null,
+          string | null,
+          number | null,
+          string | null,
+          string,
+          number,
+        ]
+      >(
         `UPDATE contracts
-         SET title  = COALESCE(?, title),
-             status = COALESCE(?, status),
-             version = version + 1
-         WHERE id = ? AND version = ?`,
+         SET title         = COALESCE(?, title),
+             status        = COALESCE(?, status),
+             amount        = COALESCE(?, amount),
+             freelancer_id = COALESCE(?, freelancer_id),
+             version       = version + 1
+         WHERE id = ? AND version = ? AND deleted_at IS NULL`,
       )
-      .run(fields.title ?? null, fields.status ?? null, id, expectedVersion);
+      .run(
+        fields.title ?? null,
+        fields.status ?? null,
+        fields.amount ?? null,
+        fields.freelancerId ?? null,
+        id,
+        expectedVersion,
+      );
 
     if (result.changes === 0) {
       throw new VersionConflictError();
     }
 
-    return this.findById(id)!;
+    return (await this.findById(id))!;
   }
 
-  /**
-   * Deletes a contract by ID.
-   *
-   * @param id - UUID of the contract to remove.
-   * @returns `true` if a row was deleted, `false` if the ID did not exist.
-   */
-  delete(id: string): boolean {
+  async delete(id: string, now: Date = new Date()): Promise<boolean> {
     const result = this.db
-      .prepare<[string]>("DELETE FROM contracts WHERE id = ?")
-      .run(id);
+      .prepare<[string, string]>(
+        "UPDATE contracts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+      )
+      .run(now.toISOString(), id);
     return result.changes > 0;
+  }
+
+  async restore(
+    id: string,
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<Contract> {
+    const existing = await this.findById(id, { includeDeleted: true });
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+    if (!isSoftDeleted(existing.deletedAt)) {
+      throw new Error(`Contract ${id} is not soft-deleted`);
+    }
+    if (isPastRetentionWindow(existing.deletedAt!, retentionDays, now)) {
+      throw new SoftDeleteRetentionError(
+        `Contract ${id} retention window of ${retentionDays} days has expired`,
+      );
+    }
+
+    this.db
+      .prepare<[string]>("UPDATE contracts SET deleted_at = NULL WHERE id = ?")
+      .run(id);
+
+    return (await this.findById(id, { includeDeleted: true }))!;
+  }
+
+  async purgeExpired(
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<number> {
+    const cutoffIso = new Date(
+      now.getTime() - retentionDays * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const result = this.db
+      .prepare<[string]>(
+        "DELETE FROM contracts WHERE deleted_at IS NOT NULL AND deleted_at <= ?",
+      )
+      .run(cutoffIso);
+    return result.changes;
+  }
+
+  async findPage(
+    input: CursorPaginationInput & { includeDeleted?: boolean } = {},
+  ): Promise<CursorPage<Contract>> {
+    const limit = parseLimit(input.limit);
+    const includeDeleted = input.includeDeleted ?? false;
+
+    let rows: ContractRow[];
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      const sql = includeDeleted
+        ? `SELECT * FROM contracts
+           WHERE (created_at < ? OR (created_at = ? AND id < ?))
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`
+        : `SELECT * FROM contracts
+           WHERE (created_at < ? OR (created_at = ? AND id < ?)) AND deleted_at IS NULL
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`;
+
+      rows = this.db
+        .prepare<[string, string, string, number], ContractRow>(sql)
+        .all(pos.createdAt, pos.createdAt, pos.id, limit + 1);
+    } else {
+      const sql = includeDeleted
+        ? `SELECT * FROM contracts
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`
+        : `SELECT * FROM contracts
+           WHERE deleted_at IS NULL
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`;
+
+      rows = this.db.prepare<[number], ContractRow>(sql).all(limit + 1);
+    }
+
+    const hasNextPage = rows.length > limit;
+    const pageRows = hasNextPage ? rows.slice(0, limit) : rows;
+    const data = pageRows.map(toContract);
+
+    const lastRow = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasNextPage && lastRow
+        ? encodeCursor({ createdAt: lastRow.created_at, id: lastRow.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
+  }
+}
+
+/**
+ * In-memory implementation of IContractRepository for deterministic tests and local development.
+ */
+export class InMemoryContractRepository implements IContractRepository {
+  private contracts: Map<string, Contract> = new Map();
+  /** Monotonic insertion counter used as a deterministic tie-breaker when two
+   * contracts share an identical `createdAt` timestamp. */
+  private insertionSeq = 0;
+  private readonly insertionOrder: Map<string, number> = new Map();
+
+  async create(data: CreateContractInput): Promise<Contract> {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    const status: ContractStatus = data.status ?? "draft";
+    assertValidContractStatus(status);
+
+    const contract: Contract = {
+      id,
+      title: data.title,
+      clientId: data.clientId,
+      freelancerId: data.freelancerId ?? "",
+      amount: data.amount,
+      status,
+      createdAt,
+      version: 0,
+      deletedAt: null,
+    };
+
+    this.contracts.set(id, contract);
+    this.insertionOrder.set(id, this.insertionSeq++);
+    return contract;
+  }
+
+  async findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined> {
+    const record = this.contracts.get(id);
+    if (!record) return undefined;
+    if (!options?.includeDeleted && isSoftDeleted(record.deletedAt)) {
+      return undefined;
+    }
+    return record;
+  }
+
+  async findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]> {
+    const all = Array.from(this.contracts.values()).sort((a, b) => {
+      const cmp = b.createdAt.localeCompare(a.createdAt);
+      if (cmp !== 0) return cmp;
+      return (
+        (this.insertionOrder.get(b.id) ?? 0) -
+        (this.insertionOrder.get(a.id) ?? 0)
+      );
+    });
+    return options?.includeDeleted ? all : filterNotDeleted(all);
+  }
+
+  async findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]> {
+    const all = Array.from(this.contracts.values()).filter(
+      (c) => c.clientId === clientId,
+    );
+    return options?.includeDeleted ? all : filterNotDeleted(all);
+  }
+
+  async findPage(
+    input: CursorPaginationInput & { includeDeleted?: boolean } = {},
+  ): Promise<CursorPage<Contract>> {
+    const limit = parseLimit(input.limit);
+    let sorted = await this.findAll({ includeDeleted: input.includeDeleted });
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+      sorted = sorted.filter(
+        (c) =>
+          c.createdAt < pos.createdAt ||
+          (c.createdAt === pos.createdAt && c.id < pos.id),
+      );
+    }
+
+    const data = sorted.slice(0, limit);
+    const hasNextPage = sorted.length > limit;
+    const lastRow = data[data.length - 1];
+    const nextCursor =
+      hasNextPage && lastRow
+        ? encodeCursor({ createdAt: lastRow.createdAt, id: lastRow.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
+  }
+
+  async updateWithVersion(
+    id: string,
+    fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
+    expectedVersion: number,
+  ): Promise<Contract> {
+    const existing = await this.findById(id);
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+
+    if (existing.version !== expectedVersion) {
+      throw new VersionConflictError();
+    }
+
+    const updated: Contract = {
+      ...existing,
+      ...fields,
+      version: existing.version + 1,
+    };
+
+    this.contracts.set(id, updated);
+    return updated;
+  }
+
+  async delete(id: string, now: Date = new Date()): Promise<boolean> {
+    const record = this.contracts.get(id);
+    if (!record || isSoftDeleted(record.deletedAt)) {
+      return false;
+    }
+    record.deletedAt = now.toISOString();
+    return true;
+  }
+
+  async restore(
+    id: string,
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<Contract> {
+    const record = this.contracts.get(id);
+    if (!record) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+    if (!isSoftDeleted(record.deletedAt)) {
+      throw new Error(`Contract ${id} is not soft-deleted`);
+    }
+    if (isPastRetentionWindow(record.deletedAt!, retentionDays, now)) {
+      throw new SoftDeleteRetentionError(
+        `Contract ${id} retention window of ${retentionDays} days has expired`,
+      );
+    }
+
+    record.deletedAt = null;
+    return { ...record };
+  }
+
+  async purgeExpired(
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<number> {
+    let purged = 0;
+    for (const [id, record] of this.contracts.entries()) {
+      if (
+        isSoftDeleted(record.deletedAt) &&
+        record.deletedAt &&
+        isPastRetentionWindow(record.deletedAt, retentionDays, now)
+      ) {
+        this.contracts.delete(id);
+        this.insertionOrder.delete(id);
+        purged++;
+      }
+    }
+    return purged;
+  }
+
+  clear(): void {
+    this.contracts.clear();
+    this.insertionOrder.clear();
+    this.insertionSeq = 0;
   }
 }

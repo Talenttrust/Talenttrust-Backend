@@ -10,6 +10,7 @@ export interface ContractEvent {
   type:
     | 'CONTRACT_CREATED'
     | 'CONTRACT_FUNDED'
+    | 'MILESTONE_RELEASED'
     | 'CONTRACT_COMPLETED'
     | 'CONTRACT_CANCELLED';
   payload: Record<string, unknown>;

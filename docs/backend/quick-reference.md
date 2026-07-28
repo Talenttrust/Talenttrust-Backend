@@ -60,7 +60,7 @@ npm test -- --coverage --coverageReporters=text-summary
 - `API_BASE_URL` - API base URL
 - `DEBUG` - Enable debug logging (true/false)
 - `DATABASE_URL` - Database connection string
-- `CORS_ORIGINS` - Comma-separated allowed origins
+- `CORS_ALLOWED_ORIGINS` - Comma-separated allowed origins
 - `MAX_REQUEST_SIZE` - Max request body size (default: 10mb)
 
 ## Promotion Paths

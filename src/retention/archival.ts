@@ -257,30 +257,170 @@ export class DataArchivalService {
    * @param {ArchivalStorageType} [storageType] - Filter by storage type
    * @returns {Promise<RetainedData[]>} All archived data
    */
-  async listArchivedData(storageType?: ArchivalStorageType): Promise<RetainedData[]> {
-    // This simplified implementation retrieves from specified storage type
-    // In production, would query index/database
-    if (!storageType) {
-      return [];
+/**
+ * List archived data with optional storage filter and pagination.
+ *
+ * @param {ArchivalStorageType} [storageType] - Filter by storage type.
+ * @param {number} [limit] - Maximum number of records to return. If omitted, returns all.
+ * @param {number} [offset] - Number of records to skip before returning results. Defaults to 0.
+ * @returns {Promise<RetainedData[]>} Archived data matching criteria.
+ */
+async listArchivedData(
+  storageType?: ArchivalStorageType,
+  limit?: number,
+  offset: number = 0,
+): Promise<RetainedData[]> {
+  // Helper to apply pagination
+  const paginate = (items: RetainedData[]): RetainedData[] => {
+    if (limit !== undefined) {
+      return items.slice(offset, offset + limit);
     }
+    return items.slice(offset);
+  };
 
-    // Placeholder for more comprehensive listing
-    // Would iterate through storage locations and filter
-    return [];
+  // If a specific storage type is provided, query the backing provider and keep
+  // only the records that actually belong to that storage type. Several storage
+  // types can share a single physical provider (e.g. COLD_STORAGE and
+  // ENCRYPTED_ARCHIVE both map to the archive provider), so listing the provider
+  // alone would return records from sibling storage types too.
+  if (storageType) {
+    const provider = this.storageManager.getProvider(storageType);
+    const all = await provider.list();
+    const filtered = all.filter(
+      (item) => this.resolveStorageType(item) === storageType,
+    );
+    return paginate(filtered);
   }
+
+  // No storage filter: aggregate a de-duplicated view across all storage types.
+  // Because multiple enum values can resolve to the same provider, iterating the
+  // enum naively would visit shared providers more than once and double-count
+  // their records. De-duplicate by id to return each archived item exactly once.
+  const allTypes = Object.values(ArchivalStorageType) as ArchivalStorageType[];
+  const seen = new Set<string>();
+  const aggregated: RetainedData[] = [];
+  for (const type of allTypes) {
+    const provider = this.storageManager.getProvider(type);
+    const list = await provider.list();
+    for (const item of list) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      aggregated.push(item);
+    }
+  }
+  return paginate(aggregated);
+}
+
+/**
+ * Resolve the archival storage type an item lives in from its archive location.
+ *
+ * Archive locations are shaped like `/archive/{storageType}/...`, so the storage
+ * type is recovered by finding the first path segment that matches a known
+ * {@link ArchivalStorageType} value. Returns `undefined` when the location is
+ * missing or does not encode a recognised storage type.
+ *
+ * @private
+ */
+private resolveStorageType(item: RetainedData): ArchivalStorageType | undefined {
+  const location = item.archivedLocation;
+  if (!location) return undefined;
+  const knownTypes = Object.values(ArchivalStorageType) as ArchivalStorageType[];
+  for (const segment of location.split('/')) {
+    if (!segment) continue;
+    if (knownTypes.includes(segment as ArchivalStorageType)) {
+      return segment as ArchivalStorageType;
+    }
+  }
+  return undefined;
+}
 
   /**
    * Calculate archive statistics
    * 
    * @returns {Promise<{totalArchived: number; byStorageType: Record<string, number>}>}
    */
-  async getArchiveStats(): Promise<{
-    totalArchived: number;
-    byStorageType: Record<string, number>;
-  }> {
-    return {
-      totalArchived: 0,
-      byStorageType: {},
-    };
+/**
+ * Calculate archive statistics across all storage backends.
+ *
+ * @returns {Promise<{ totalArchived: number; byStorageType: Record<string, number> }>}
+ *   Object containing the total number of archived records and a breakdown per storage type.
+ */
+async getArchiveStats(): Promise<{
+  totalArchived: number;
+  byStorageType: Record<string, number>;
+}> {
+  const allTypes = Object.values(ArchivalStorageType) as ArchivalStorageType[];
+
+  // Seed every known storage type with a zero count so callers always see the
+  // full set of buckets, even for storage types that hold no records.
+  const stats: Record<string, number> = {};
+  for (const type of allTypes) {
+    stats[type] = 0;
+  }
+
+  // Providers can be shared across storage types, so de-duplicate by id and
+  // attribute each record to the storage type encoded in its archive location.
+  const seen = new Set<string>();
+  let total = 0;
+  for (const type of allTypes) {
+    const provider = this.storageManager.getProvider(type);
+    const list = await provider.list();
+    for (const item of list) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      const resolved = this.resolveStorageType(item) ?? type;
+      stats[resolved] = (stats[resolved] ?? 0) + 1;
+      total += 1;
+    }
+  }
+  return { totalArchived: total, byStorageType: stats };
+}
+
+  /**
+   * Export data in specified format for compliance
+   * 
+   * @param {string} dataId - Data identifier
+   * @param {'json' | 'csv'} format - Export format
+   * @param {ArchivalStorageType} [fromLocation] - Archival storage type
+   * @returns {Promise<string>} Serialized data
+   */
+  async exportData(
+    dataId: string,
+    format: 'json' | 'csv',
+    fromLocation?: ArchivalStorageType,
+  ): Promise<string> {
+    const data = await this.getArchivedData(dataId, fromLocation);
+    if (!data) {
+      throw new Error(`Data not found for export: ${dataId}`);
+    }
+
+    if (format === 'json') {
+      return JSON.stringify(data, null, 2);
+    } else {
+      // Basic CSV implementation
+      const headers = ['id', 'entityType', 'classification', 'createdAt', 'expiresAt', 'isArchived', 'archivedAt'];
+      const values = [
+        data.id,
+        data.entityType,
+        data.classification,
+        data.createdAt.toISOString(),
+        data.expiresAt.toISOString(),
+        data.isArchived.toString(),
+        data.archivedAt?.toISOString() || '',
+      ];
+
+      // Flatten data payload if it's an object
+      if (typeof data.data === 'object' && data.data !== null) {
+        Object.entries(data.data).forEach(([key, val]) => {
+          headers.push(`data.${key}`);
+          values.push(String(val));
+        });
+      } else {
+        headers.push('data');
+        values.push(String(data.data));
+      }
+
+      return `${headers.join(',')}\n${values.join(',')}`;
+    }
   }
 }

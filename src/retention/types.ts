@@ -155,6 +155,7 @@ export interface ComplianceAuditLog {
   details: Record<string, unknown>;
   compliance: string;
   notes?: string;
+  proof?: string; // Cryptographic proof of the action (e.g., deletion proof)
 }
 
 /**
@@ -207,4 +208,5 @@ export interface RetentionConfig {
   postArchivalRetentionDays: number;
   complianceStandard: string;
   encryptionEnabled: boolean;
+  exportFormat?: 'json' | 'csv';
 }

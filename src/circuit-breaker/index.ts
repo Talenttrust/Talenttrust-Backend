@@ -12,3 +12,5 @@ export type {
   CircuitStats,
 } from "./CircuitBreaker";
 export { CircuitOpenError } from "./errors";
+export { circuitBreakerRegistry } from "./registry";
+export type { BreakerStatus } from "./registry";

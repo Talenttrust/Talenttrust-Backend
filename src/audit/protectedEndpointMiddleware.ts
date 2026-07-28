@@ -56,6 +56,7 @@ import type { AuditAction, AuditSeverity } from './types';
 import type { AuthenticatedRequest } from '../auth/authenticate';
 import { buildAuditMetadata } from './redact';
 import { auditService, AuditService } from './service';
+import { validateEnv } from '../config/env.schema';
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -126,6 +127,15 @@ export function createProtectedEndpointAuditMiddleware(
     res: Response,
     next: NextFunction,
   ): void {
+    const env = validateEnv();
+
+    if (!env.AUDIT_ENABLED) {
+      // Feature flag off — skip the finish listener entirely; no audit entries
+      // are written for protected-endpoint traffic.
+      next();
+      return;
+    }
+
     res.on('finish', () => {
       try {
         // req.user is populated by authenticateMiddleware after this runs

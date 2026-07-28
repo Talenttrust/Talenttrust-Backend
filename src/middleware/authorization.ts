@@ -25,6 +25,10 @@
  *  - Tokens are verified with `JWT_SECRET` using HS256; forged or tampered
  *    tokens are rejected at the HMAC-verification step before any claims
  *    are read.
+ *  - Verification is pinned to the allowlist exported from
+ *    `auth/jwtConfig` (currently `['HS256']`). The library rejects any
+ *    token whose header advertises a different algorithm — including
+ *    `alg: none` and HS/RS confusion attempts — before signature checks.
  *  - `jwt.verify()` also enforces the `exp` claim — expired tokens are
  *    rejected without any additional check.
  *  - Role values are re-validated against the ALL_ROLES allowlist after
@@ -40,10 +44,14 @@ import type { Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { isAuthorized, isValidRole } from "../lib/authorization";
 import type { Action, User, Resource, Role, AuthenticatedRequest } from "../lib/types";
+import { JWT_VERIFY_OPTIONS } from "../auth/jwtConfig";
+import { extractBearerToken, sendUnauthorized, sendForbidden } from "../lib/authHelpers";
 
 // ─── JWT configuration ────────────────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET ?? "";
+// Read lazily at call time so test suites can set process.env.JWT_SECRET before
+// making requests without module-load-order issues.
+const getJwtSecret = () => process.env.JWT_SECRET ?? "";
 
 /**
  * Shape of the decoded JWT payload expected by this platform.
@@ -57,15 +65,7 @@ interface JwtPayload {
   exp?:  number;
 }
 
-// ─── Error response helpers ───────────────────────────────────────────────────
 
-function unauthorized(res: Response, message = "Unauthorized"): void {
-  res.status(401).json({ error: message });
-}
-
-function forbidden(res: Response, message = "Forbidden"): void {
-  res.status(403).json({ error: message });
-}
 
 // ─── requireAuth ─────────────────────────────────────────────────────────────
 
@@ -74,6 +74,12 @@ function forbidden(res: Response, message = "Forbidden"): void {
  *
  * Validates the `Authorization: Bearer <token>` header using `jsonwebtoken`.
  * On success, attaches a typed `User` to `req.user`.
+ *
+ * Security notes:
+ *  - Accepts ONLY HS256-signed JWTs (algorithm pinned via JWT_VERIFY_OPTIONS).
+ *  - Required claims: `sub` (user id), `email`, and `role`.
+ *  - `role` is validated against the platform allowlist (admin, auditor, client, freelancer).
+ *  - `alg: none` and other algorithms are rejected before signature verification.
  *
  * Failure cases (all → HTTP 401):
  *  - Missing or malformed `Authorization` header
@@ -90,28 +96,29 @@ export function requireAuth(
   res: Response,
   next: NextFunction
 ): void {
-  const authHeader = req.headers.authorization;
+  const token = extractBearerToken(req);
 
-  if (!authHeader?.startsWith("Bearer ")) {
-    unauthorized(res, "Missing or malformed Authorization header.");
+  if (!token) {
+    sendUnauthorized(res, "Missing or malformed Authorization header.");
     return;
   }
 
-  const token = authHeader.slice(7); // strip "Bearer "
-
   try {
-    // jwt.verify throws for any invalid token (bad signature, expired, etc.)
-    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    // jwt.verify throws for any invalid token (bad signature, expired,
+    // wrong algorithm, etc.). Passing JWT_VERIFY_OPTIONS pins the
+    // accepted signature algorithms to JWT_ALLOWED_ALGORITHMS so that
+    // alg: none and HS/RS confusion attempts cannot succeed.
+    const decoded = jwt.verify(token, getJwtSecret(), JWT_VERIFY_OPTIONS) as JwtPayload;
 
     // Guard required claims — a well-formed token always carries these.
     if (!decoded.sub || !decoded.email) {
-      unauthorized(res, "Token is missing required claims.");
+      sendUnauthorized(res, "Token is missing required claims.");
       return;
     }
 
     // Re-validate the role claim against the platform allowlist.
     if (!isValidRole(decoded.role)) {
-      unauthorized(res, "Token carries an unrecognised role.");
+      sendUnauthorized(res, "Token carries an unrecognised role.");
       return;
     }
 
@@ -124,11 +131,11 @@ export function requireAuth(
     next();
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      unauthorized(res, "Token has expired.");
+      sendUnauthorized(res, "Token has expired.");
       return;
     }
     // Covers JsonWebTokenError (bad signature, malformed) and NotBeforeError.
-    unauthorized(res, "Invalid token.");
+    sendUnauthorized(res, "Invalid token.");
   }
 }
 
@@ -153,12 +160,12 @@ export function requireRole(...allowedRoles: Role[]) {
     next: NextFunction
   ): void {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
     if (!allowedRoles.includes(req.user.role)) {
-      forbidden(res, "You do not have permission to access this resource.");
+      sendForbidden(res, "You do not have permission to access this resource.");
       return;
     }
 
@@ -209,7 +216,7 @@ export function requirePermission(
     next: NextFunction
   ): Promise<void> {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
@@ -222,7 +229,14 @@ export function requirePermission(
         if (ownerId === null) {
           // Record does not exist — return 404 rather than leaking whether
           // the record exists but is forbidden.
-          res.status(404).json({ error: "Resource not found." });
+          const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+          res.status(404).json({
+            error: {
+              code: 'not_found',
+              message: 'Resource not found.',
+              requestId,
+            },
+          });
           return;
         }
 
@@ -237,14 +251,27 @@ export function requirePermission(
       });
 
       if (!result.granted) {
-        forbidden(res, "You do not have permission to perform this action.");
+        console.log('isAuthorized denied:', JSON.stringify(result), 'Inputs:', JSON.stringify({
+          user: req.user,
+          resource,
+          action,
+          resourceOwnerId,
+        }));
+        sendForbidden(res, "You do not have permission to perform this action.");
         return;
       }
 
       next();
     } catch {
       // Resolver threw — treat as a server error, not an auth failure.
-      res.status(500).json({ error: "Authorization check failed." });
+      const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+      res.status(500).json({
+        error: {
+          code: 'internal_error',
+          message: 'Authorization check failed.',
+          requestId,
+        },
+      });
     }
   };
 }

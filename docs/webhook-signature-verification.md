@@ -1,6 +1,6 @@
 # Webhook Signature Verification
 
-This document explains how to verify webhook signatures sent by the Talenttrust Backend using HMAC-SHA256 signing.
+This document outlines the security assumptions, design principles, and implementation details for the webhook signature verification system in the TalentTrust backend.
 
 ## Overview
 
@@ -267,6 +267,154 @@ post '/webhook' do
   content_type :json
   { received: true }.to_json
 end
+```
+## Delivery-Time Security Guards
+
+Two additional guards run **before every delivery attempt** (including retries) inside `WebhookService.send`.
+
+### SSRF Re-check
+
+The destination URL is validated by `isSafeUrl` (from `src/utils/ssrf.ts`) on each attempt. If the URL resolves to a private or loopback address (including RFC-1918 ranges, `localhost`, and the link-local metadata range `169.254.x.x`) the delivery is **immediately moved to the DLQ** with error code `SSRF_BLOCKED`. No retry is attempted.
+
+This re-check on every attempt guards against DNS rebinding attacks where an initially safe hostname is later made to resolve to an internal IP.
+
+### Per-Host Rate Limiting
+
+A sliding-window counter tracks deliveries per destination hostname. The counter is keyed by hostname (hashed via SHA-256 inside `RateLimitStore`) and shared across all `WebhookService` instances within a process.
+
+If the limit is exceeded the delivery is **immediately moved to the DLQ** with error code `RATE_LIMITED`. No retry is attempted.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `WEBHOOK_HOST_RATE_LIMIT_MAX` | `60` | Maximum deliveries per host per window |
+| `WEBHOOK_HOST_RATE_LIMIT_WINDOW_MS` | `60000` | Window length in milliseconds |
+
+### Error Codes in DLQ
+
+| Code | Cause |
+|---|---|
+| `SSRF_BLOCKED: ...` | Destination URL failed the SSRF safety check |
+| `RATE_LIMITED: host <hostname> exceeded delivery limit` | Per-host delivery cap reached |
+
+---
+
+## Webhook Delivery Retry Policy
+
+The Talenttrust Backend implements exponential backoff with jitter for webhook delivery to handle transient failures gracefully. Failed deliveries are automatically retried before being enqueued to the Dead Letter Queue (DLQ).
+
+### Transient vs. Non-Transient Failures
+
+**Transient failures (automatically retried):**
+- HTTP 5xx Server Errors (500, 502, 503, etc.)
+- Network timeouts (ETIMEDOUT)
+- Connection resets (ECONNRESET, ECONNABORTED)
+- DNS resolution failures (ENOTFOUND)
+- Connection refused errors (ECONNREFUSED)
+
+**Non-transient failures (not retried, immediate failure):**
+- HTTP 4xx Client Errors (400, 401, 404, etc.)
+- Invalid HMAC signatures
+- Validation errors
+
+### Retry Behavior
+
+When a webhook delivery fails due to a transient error:
+
+1. The backend waits for a delay calculated using exponential backoff with jitter
+2. The webhook is retried with the **original signature and timestamp** (signature is not re-signed)
+3. If the retry succeeds, the delivery is recorded and no further action is taken
+4. If all retries are exhausted, the webhook is enqueued to the DLQ for manual inspection and replay
+
+### Configuration
+
+Webhook retry behavior is configured via environment variables:
+
+| Variable | Default | Min | Max | Description |
+|----------|---------|-----|-----|-------------|
+| `WEBHOOK_RETRY_MAX_ATTEMPTS` | `5` | `1` | `20` | Maximum number of delivery attempts (including initial attempt) |
+| `WEBHOOK_RETRY_INITIAL_DELAY_MS` | `1000` | `100` | `60000` | Initial retry delay in milliseconds |
+| `WEBHOOK_RETRY_MAX_DELAY_MS` | `30000` | `1000` | `600000` | Maximum retry delay in milliseconds (caps exponential backoff) |
+| `WEBHOOK_RETRY_MULTIPLIER` | `2` | `1` | `10` | Exponential backoff multiplier (e.g., 2 = double each retry) |
+| `WEBHOOK_RETRY_JITTER_FACTOR` | `0.1` | `0` | `1` | Jitter factor as fraction of delay (e.g., 0.1 = ±10%) |
+
+### Example Retry Schedule
+
+With default configuration (5 attempts, 1s initial delay, 2x multiplier, 0.1 jitter):
+
+```
+Attempt 1: Initial (no delay)
+Attempt 2: ~1000ms ± 100ms
+Attempt 3: ~2000ms ± 200ms
+Attempt 4: ~4000ms ± 400ms
+Attempt 5: ~8000ms ± 800ms
+
+Total time: ~15-18 seconds
+```
+
+### Jitter Explanation
+
+Jitter prevents the "thundering herd" problem where many webhooks retry simultaneously after an outage. Instead of all retries happening at the same time, they're spread out randomly within the calculated delay window.
+
+Formula: `delay = baseDelay * (multiplier ^ attemptNumber) ± (delay * jitterFactor * random())`
+
+### Metrics
+
+The backend emits the following metrics related to webhook retry:
+
+- `webhook_delivery_retries_total{provider,reason}` - Total number of delivery retries by provider and failure reason
+- `webhook_delivery_attempts_total{status,provider,reason}` - Total delivery attempts (initial + retries)
+- `webhook_delivery_latency_seconds{status,provider}` - Delivery latency histogram
+
+### HMAC Signature Preservation During Retries
+
+**Important:** When a webhook is retried, the original HMAC signature and timestamp headers are preserved exactly as signed. The webhook is not re-signed with a new timestamp. This ensures:
+
+1. Signature verification remains valid across all retry attempts
+2. Timestamp validation windows are consistent
+3. No security gaps or signature mismatches occur
+
+If you implement timestamp validation on the receiving end, allow a sufficiently large window (e.g., 5-10 minutes) to account for retries that may occur after initial delivery failure.
+
+### DLQ Behavior
+
+When webhook delivery exhausts all retries:
+
+1. The webhook entry is enqueued to the DLQ (Dead Letter Queue)
+2. The final failure reason is recorded for investigation
+3. Operators can inspect and manually replay failed webhooks
+4. Each DLQ entry includes the original payload, provider, URL, and error context
+
+For details on DLQ operations, see [WEBHOOK-DLQ.md](./WEBHOOK-DLQ.md).
+
+## Backend verification API
+
+Inbound verification is implemented in `src/utils/webhook-signing.util.ts` and re-exported from `src/webhookDelivery.ts` for route handlers that already depend on the delivery module.
+
+| Function | Purpose |
+|----------|---------|
+| `verifyWebhookSignature(payload, signature, timestamp, secret, options?)` | Structured result with safe error codes/messages |
+| `verifySignature(...)` | Boolean convenience wrapper |
+| `normalizeSignatureHeader(signature)` | Strips `sha256=` and validates hex |
+| `constantTimeCompareHex(a, b)` | `crypto.timingSafeEqual` on decoded digests |
+
+Failure messages are passed through `src/errors/safeErrors.ts` so stack traces, file paths, and secrets never reach clients. Signature mismatch uses the `invalid_webhook_signature` code.
+
+### Adversarial / property tests
+
+CI runs a deterministic fuzz suite (`FUZZ_SEED = 0x277a11ce`, 400 iterations) in `src/webhookDelivery.signature.property.test.ts`. Generated inputs include:
+
+- Random and truncated hex digests
+- Wrong-length HMACs and `sha256=` prefix variants
+- Base64 and non-hex encodings
+- Expired timestamps and tampered payloads
+
+**Acceptance criteria:** zero forgeries accepted; no unhandled throws; constant-time comparison exercised via `crypto.timingSafeEqual`.
+
+Run locally:
+
+```bash
+npm test -- webhook-signing.util.test.ts webhookDelivery.signature.property.test.ts
+npm run test:ci -- --collectCoverageFrom='src/utils/webhook-signing.util.ts'
 ```
 
 ## Testing

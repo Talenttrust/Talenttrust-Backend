@@ -123,6 +123,7 @@ Retrieve paginated metadata records for a contract.
 - `400`: Invalid query parameters
 - `401`: Authentication required
 - `403`: Access denied to this contract
+- `304`: Not Modified (when `If-None-Match` matches current representation)
 
 ---
 
@@ -157,6 +158,25 @@ Retrieve a specific metadata record.
 - `401`: Authentication required
 - `403`: Access denied to this contract
 - `404`: Metadata not found
+- `304`: Not Modified (when `If-None-Match` matches current representation)
+
+---
+
+## HTTP Caching with ETag
+
+Read-heavy metadata endpoints return an `ETag` header:
+
+- `GET /contracts/{contractId}/metadata`
+- `GET /contracts/{contractId}/metadata/{id}`
+
+Clients can send `If-None-Match` with a previously received ETag. If unchanged,
+the API returns `304 Not Modified` with no response body.
+
+Security notes:
+
+- ETags are generated from a SHA-256 hash of the response representation and a scoped resource key.
+- Sensitive values are masked before hashing for unauthorized users, preventing raw sensitive data exposure through cache validators.
+- ETag generation does not include direct plaintext metadata secrets.
 
 ---
 
@@ -243,6 +263,29 @@ When `is_sensitive` is set to `true`:
 }
 ```
 
+## Hash Verification
+
+When `fetchAndVerify` is called with an `expectedHash`, the module performs a
+**constant-time, length-guarded** comparison before allowing any downstream
+settlement or processing to proceed.
+
+### Verification rules
+
+| Rule | Behaviour |
+|------|-----------|
+| Hashes are normalised to lowercase before comparison | Both the observed and expected hashes are lowercased so comparisons are case-insensitive. |
+| **Length guard fires first** | If `Buffer.byteLength(observed) !== Buffer.byteLength(expected)`, the comparison short-circuits to `false` immediately — `crypto.timingSafeEqual` is **never** called with unequal-length buffers. |
+| Length mismatch → controlled rejection | A length difference results in `ContractMetadataMismatchError` — never a `RangeError` or any other unhandled exception. |
+| Equal-length comparison is constant-time | When lengths match, `crypto.timingSafeEqual` performs the comparison, preventing timing-based hash-oracle attacks. |
+| Fail-closed by design | Any mismatch (content or length) immediately throws `ContractMetadataMismatchError`; no contract data reaches settlement/processing logic. |
+| No raw hashes in logs | Log records emitted on mismatch include only length metadata (not the hash values themselves) to prevent inadvertent credential leakage in log streams. |
+| Mismatch counter incremented | The `contract_metadata_mismatch_total` Prometheus counter is incremented on every rejection so operators can alert on anomalous patterns. |
+
+### Implementation reference
+
+See `src/contractMetadata.ts` — `timingSafeHashEqual()` for the guarded
+comparator and `fetchAndVerify()` for the full verification flow.
+
 ## Security Considerations
 
 ### Threat Mitigations
@@ -252,6 +295,7 @@ When `is_sensitive` is set to `true`:
 3. **Injection Attacks**: All inputs are validated and sanitized using strict schemas
 4. **Rate Limiting**: Metadata creation is rate-limited per contract (implementation recommended)
 5. **Audit Trail**: All operations are logged with user IDs and timestamps
+6. **Hash Length Attack**: `timingSafeHashEqual` guards against `RangeError` from `crypto.timingSafeEqual` when buffers differ in length; a swapped contract with a differently-sized hash is rejected cleanly rather than triggering an unhandled exception.
 
 ### Best Practices
 

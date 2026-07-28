@@ -1,0 +1,52 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`milestones error-response snapshots 400 validation error shape 1`] = `
+{
+  "error": {
+    "code": "validation_error",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": [
+          "milestones",
+          "0",
+          "amount",
+        ],
+      },
+    ],
+    "message": "Request validation failed",
+    "requestId": "req-m-001",
+  },
+}
+`;
+
+exports[`milestones error-response snapshots 404 not-found error shape 1`] = `
+{
+  "error": {
+    "code": "not_found",
+    "message": "Milestone not found",
+    "requestId": "req-m-002",
+  },
+}
+`;
+
+exports[`milestones error-response snapshots 409 conflict error shape 1`] = `
+{
+  "error": {
+    "code": "conflict",
+    "message": "Milestone already approved and cannot be modified",
+    "requestId": "req-m-003",
+  },
+}
+`;
+
+exports[`milestones error-response snapshots 500 internal-server-error shape 1`] = `
+{
+  "error": {
+    "code": "internal_error",
+    "message": "An unexpected error occurred",
+    "requestId": "req-m-004",
+  },
+}
+`;

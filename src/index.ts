@@ -6,35 +6,59 @@
  * when this file is the program entry and Jest is not running.
  */
 
-import type { Request, Response, NextFunction } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { createApp, attachTerminalHandlers } from './app';
+import { AppError } from './errors/appError';
 import { JobType, JobPayload, QueueManager } from './queue';
-import { authMiddleware, AuthenticatedRequest } from './middleware/auth';
 import { auditService } from './audit/service';
-import { validateEnvironment } from './config/validate';
-import { createRateLimiter, rateLimitConfig, shutdownRateLimitStore } from './middleware/rateLimiter';
-import { EventIngestionService, EventIngestionConfig } from './events/eventIngestionService';
-import { InMemoryEventAuditRepository, EventAuditService } from './repository/eventAuditRepository';
-
-// Validate environment at startup
-validateEnvironment();
+import { createAuditRouter } from './audit/router';
+import { createRateLimiter } from './middleware/rateLimiter';
+import { rateLimitConfig } from './config/rateLimit';
+import { requireAuth, requireRole } from './middleware/authorization';
+import { authMiddleware, type AuthenticatedRequest } from './middleware/auth';
+import { adminAuthGuard } from './middleware/adminAuthGuard';
+import { registerShutdownHandlers } from './shutdown';
+import { validateEnv } from './config/env.schema';
 
 const queueManager = QueueManager.getInstance();
 
 const app = createApp({ includeTerminalHandlers: false });
 
-// Initialize Event Ingestion Services
-const auditRepository = new InMemoryEventAuditRepository();
-const eventAuditService = new EventAuditService(auditRepository);
+function auditActorKeyFn(prefix: string) {
+  return (req: Request) => {
+    const authReq = req as typeof req & { user?: { id?: string } };
+    const actor = authReq.user?.id ?? 'anonymous';
+    return `${prefix}:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
+  };
+}
 
-const eventConfig: EventIngestionConfig = {
-  enableStrictValidation: process.env.ENABLE_STRICT_VALIDATION === 'true',
-  enablePayloadIntegrityCheck: process.env.ENABLE_PAYLOAD_INTEGRITY_CHECK !== 'false',
-  maxEventAgeMs: parseInt(process.env.MAX_EVENT_AGE_MS || '86400000'), // 24 hours default
-  batchSize: parseInt(process.env.EVENT_BATCH_SIZE || '100')
-};
+const auditExportLimiter = createRateLimiter({
+  ...rateLimitConfig.auditExport,
+  keyFn: auditActorKeyFn('audit-export'),
+});
 
-const eventIngestionService = new EventIngestionService(eventAuditService, eventConfig);
+const auditQueryLimiter = createRateLimiter({
+  ...rateLimitConfig.audit,
+  keyFn: auditActorKeyFn('audit'),
+});
+
+const auditIntegrityLimiter = createRateLimiter({
+  ...rateLimitConfig.auditIntegrity,
+  keyFn: auditActorKeyFn('audit-integrity'),
+});
+
+// Mount the audit router only when the AUDIT_ENABLED feature flag is on.
+// When disabled, all /api/v1/audit/* requests fall through to the 404 handler.
+if (validateEnv().AUDIT_ENABLED) {
+  app.use(
+    '/api/v1/audit',
+    createAuditRouter({
+      accessMiddleware: [requireAuth, requireRole('admin', 'auditor'), auditQueryLimiter],
+      exportMiddleware: [auditExportLimiter],
+      integrityMiddleware: [auditIntegrityLimiter],
+    }),
+  );
+}
 
 const DLQ_DEFAULT_LIMIT = 50;
 const DLQ_MAX_LIMIT = 100;
@@ -61,99 +85,115 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
   next();
 }
 
-const strictLimiter = createRateLimiter(rateLimitConfig.strict);
+app.get(
+  '/api/v1/jobs/dlq',
+  adminAuthGuard,
+  async (req: Request & { user?: { id: string } }, res: Response) => {
+    try {
+      const typeQuery = (req as any).query['type'];
+      const limitQuery = (req as any).query['limit'];
+      const offsetQuery = (req as any).query['offset'];
 
-// Event ingestion endpoints
-app.post('/api/v1/events', strictLimiter, async (req: Request, res: Response) => {
-  try {
-    const { events, contractType } = req.body;
-
-    if (!events || !Array.isArray(events)) {
-      return res.status(400).json({
-        error: 'Invalid request: events array is required'
-      });
-    }
-
-    if (!contractType || typeof contractType !== 'string') {
-      return res.status(400).json({
-        error: 'Invalid request: contractType is required'
-      });
-    }
-
-    const results = await eventIngestionService.processBatch(events, contractType);
-
-    res.json({
-      processed: results.length,
-      results,
-      summary: {
-        accepted: results.filter(r => r.status === 'accepted').length,
-        rejected: results.filter(r => r.status === 'rejected').length,
-        duplicates: results.filter(r => r.status === 'duplicate').length
+      const jobType = typeof typeQuery === 'string' ? typeQuery : undefined;
+      if (jobType && !Object.values(JobType).includes(jobType as JobType)) {
+        return res.status(400).json({ error: `Invalid job type: ${jobType}` });
       }
-    });
 
-  } catch (error) {
-    console.error('Error processing events:', error);
-    res.status(500).json({
-      error: 'Internal server error during event processing'
-    });
-  }
-});
+      const limit = Math.min(
+        Math.max(parsePositiveInt(limitQuery, DLQ_DEFAULT_LIMIT), 1),
+        DLQ_MAX_LIMIT,
+      );
+      const offset = Math.max(parsePositiveInt(offsetQuery, 0), 0);
 
-// Single event validation endpoint (dry run)
-app.post('/api/v1/events/validate', strictLimiter, async (req: Request, res: Response) => {
-  try {
-    const { event, contractType } = req.body;
-
-    if (!event || !contractType) {
-      return res.status(400).json({
-        error: 'Invalid request: event and contractType are required'
+      const entries = await queueManager.getFailedJobs({
+        jobType: jobType as JobType | undefined,
+        limit,
+        offset,
       });
+
+      auditService.log({
+        action: 'ADMIN_ACTION',
+        severity: 'INFO',
+        actor: req.user!.id,
+        resource: 'jobs-dlq',
+        resourceId: jobType ?? 'all',
+        metadata: {
+          operation: 'view',
+          count: entries.length,
+          limit,
+          offset,
+        },
+        ipAddress: (req as any).ip,
+        correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
+      });
+
+      return res.status(200).json({ entries, limit, offset, count: entries.length });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return res.status(500).json({ error: `Failed to get DLQ entries: ${message}` });
     }
+  },
+);
 
-    const validationResult = eventIngestionService.validateEvent(event, contractType);
+app.post(
+  '/api/v1/jobs/dlq/reprocess',
+  adminAuthGuard,
+  async (req: Request & { user?: { id: string } }, res: Response) => {
+    try {
+      const { type, jobId, reason } = (req as any).body as {
+        type?: string;
+        jobId?: string;
+        reason?: string;
+      };
 
-    res.json({
-      isValid: validationResult.isValid,
-      errors: validationResult.errors
-    });
+      if (!type || !jobId || !reason || typeof reason !== 'string' || reason.trim().length < 5) {
+        return res.status(400).json({
+          error: 'type, jobId, and reason (min 5 chars) are required',
+        });
+      }
 
-  } catch (error) {
-    console.error('Error validating event:', error);
-    res.status(500).json({
-      error: 'Internal server error during event validation'
-    });
-  }
-});
+      if (!Object.values(JobType).includes(type as JobType)) {
+        return res.status(400).json({ error: `Invalid job type: ${type}` });
+      }
 
-// Event statistics endpoint
-app.get('/api/v1/events/stats', strictLimiter, async (req: Request, res: Response) => {
-  try {
-    const stats = await eventIngestionService.getStatistics();
-    res.json(stats);
-  } catch (error) {
-    console.error('Error fetching statistics:', error);
-    res.status(500).json({
-      error: 'Internal server error fetching statistics'
-    });
-  }
-});
+      const replayResult = await queueManager.reprocessFailedJob(type as JobType, jobId);
 
-// Contract history endpoint
-app.get('/api/v1/contracts/:contractId/history', strictLimiter, async (req: Request, res: Response) => {
-  try {
-    const { contractId } = req.params;
-    const history = await eventIngestionService.getContractHistory(contractId);
-    res.json(history);
-  } catch (error) {
-    console.error('Error fetching contract history:', error);
-    res.status(500).json({
-      error: 'Internal server error fetching contract history'
-    });
-  }
-});
+      auditService.log({
+        action: 'ADMIN_ACTION',
+        severity: 'WARNING',
+        actor: req.user!.id,
+        resource: 'jobs-dlq',
+        resourceId: jobId,
+        metadata: {
+          operation: 'reprocess',
+          reason: reason.trim(),
+          jobType: type,
+          replayJobId: replayResult.replayJobId,
+          deduplicated: replayResult.deduplicated,
+        },
+        ipAddress: (req as any).ip,
+        correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
+      });
 
-app.post('/api/v1/jobs', strictLimiter, async (req: Request, res: Response) => {
+      const statusCode = replayResult.deduplicated ? 200 : 202;
+      return res.status(statusCode).json(replayResult);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+
+      if (message.startsWith('Failed job not found')) {
+        return res.status(404).json({ error: message });
+      }
+
+      if (message.includes('not in failed state')) {
+        return res.status(409).json({ error: message });
+      }
+
+      return res.status(500).json({ error: `Failed to reprocess DLQ job: ${message}` });
+    }
+  },
+);
+
+app.post('/api/v1/jobs', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { type, payload, options } = req.body as {
       type?: string;
@@ -166,128 +206,142 @@ app.post('/api/v1/jobs', strictLimiter, async (req: Request, res: Response) => {
     }
 
     if (!Object.values(JobType).includes(type as JobType)) {
-      return res.status(400).json({ error: `Invalid job type: ${type}` });
+      return res.status(400).json({ error: 'Invalid job type' });
     }
 
-    const result = await queueManager.addJob(
-      type as JobType,
-      payload as JobPayload,
-      options,
-    );
-    const httpStatus = result.deduplicated ? 200 : 201;
-    return res.status(httpStatus).json({ jobId: result.jobId, type, status: 'queued', deduplicated: result.deduplicated });
+    const result = await queueManager.addJob(type as JobType, payload as JobPayload, options);
+    const httpStatus = (result as any).deduplicated ? 200 : 201;
+    return res.status(httpStatus).json({
+      jobId: (result as any).jobId,
+      type,
+      status: 'queued',
+      deduplicated: (result as any).deduplicated,
+    });
   } catch (error) {
-    console.error('Failed to enqueue job', error);
-    return res.status(500).json({ error: 'An unexpected error occurred' });
+    next(error);
+    return;
   }
 });
 
-app.get('/api/v1/jobs/dlq', authMiddleware, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const typeQuery = req.query['type'];
-    const limitQuery = req.query['limit'];
-    const offsetQuery = req.query['offset'];
+app.get(
+  '/api/v1/jobs/dlq',
+  authMiddleware,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const typeQuery = (req as any).query['type'];
+      const limitQuery = (req as any).query['limit'];
+      const offsetQuery = (req as any).query['offset'];
 
-    const jobType = typeof typeQuery === 'string' ? typeQuery : undefined;
-    if (jobType && !Object.values(JobType).includes(jobType as JobType)) {
-      return res.status(400).json({ error: `Invalid job type: ${jobType}` });
-    }
+      const jobType = typeof typeQuery === 'string' ? typeQuery : undefined;
+      if (jobType && !Object.values(JobType).includes(jobType as JobType)) {
+        return res.status(400).json({ error: 'Invalid job type' });
+      }
 
-    const limit = Math.min(
-      Math.max(parsePositiveInt(limitQuery, DLQ_DEFAULT_LIMIT), 1),
-      DLQ_MAX_LIMIT,
-    );
-    const offset = Math.max(parsePositiveInt(offsetQuery, 0), 0);
+      const limit = Math.min(
+        Math.max(parsePositiveInt(limitQuery, DLQ_DEFAULT_LIMIT), 1),
+        DLQ_MAX_LIMIT,
+      );
+      const offset = Math.max(parsePositiveInt(offsetQuery, 0), 0);
 
-    const entries = await queueManager.getFailedJobs({
-      jobType: jobType as JobType | undefined,
-      limit,
-      offset,
-    });
-
-    auditService.log({
-      action: 'ADMIN_ACTION',
-      severity: 'INFO',
-      actor: req.user!.id,
-      resource: 'jobs-dlq',
-      resourceId: jobType ?? 'all',
-      metadata: {
-        operation: 'view',
-        count: entries.length,
+      const entries = await queueManager.getFailedJobs({
+        jobType: jobType as JobType | undefined,
         limit,
         offset,
-      },
-      ipAddress: (req as any).ip,
-      correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
-    });
-
-    return res.status(200).json({ entries, limit, offset, count: entries.length });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return res.status(500).json({ error: `Failed to get DLQ entries: ${message}` });
-  }
-});
-
-app.post('/api/v1/jobs/dlq/reprocess', authMiddleware, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { type, jobId, reason } = req.body as {
-      type?: string;
-      jobId?: string;
-      reason?: string;
-    };
-
-    if (!type || !jobId || !reason || typeof reason !== 'string' || reason.trim().length < 5) {
-      return res.status(400).json({
-        error: 'type, jobId, and reason (min 5 chars) are required',
       });
+
+      auditService.log({
+        action: 'ADMIN_ACTION',
+        severity: 'INFO',
+        actor: req.user!.id,
+        resource: 'jobs-dlq',
+        resourceId: jobType ?? 'all',
+        metadata: {
+          operation: 'view',
+          count: entries.length,
+          limit,
+          offset,
+        },
+        ipAddress: (req as any).ip,
+        correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
+      });
+
+      return res.status(200).json({ entries, limit, offset, count: entries.length });
+    } catch (error) {
+      next(error);
+      return;
     }
+  },
+);
 
-    if (!Object.values(JobType).includes(type as JobType)) {
-      return res.status(400).json({ error: `Invalid job type: ${type}` });
+app.post(
+  '/api/v1/jobs/dlq/reprocess',
+  authMiddleware,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const { type, jobId, reason } = (req as any).body as {
+        type?: string;
+        jobId?: string;
+        reason?: string;
+      };
+
+      if (!type || !jobId || !reason || typeof reason !== 'string' || reason.trim().length < 5) {
+        return res.status(400).json({
+          error: 'type, jobId, and reason (min 5 chars) are required',
+        });
+      }
+
+      if (!Object.values(JobType).includes(type as JobType)) {
+        return res.status(400).json({ error: 'Invalid job type' });
+      }
+
+      const replayResult = await queueManager.reprocessFailedJob(type as JobType, jobId);
+
+      auditService.log({
+        action: 'ADMIN_ACTION',
+        severity: 'WARNING',
+        actor: req.user!.id,
+        resource: 'jobs-dlq',
+        resourceId: jobId,
+        metadata: {
+          operation: 'reprocess',
+          reason: reason.trim(),
+          jobType: type,
+          replayJobId: replayResult.replayJobId,
+          deduplicated: replayResult.deduplicated,
+        },
+        ipAddress: (req as any).ip,
+        correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
+      });
+
+      const statusCode = replayResult.deduplicated ? 200 : 202;
+      return res.status(statusCode).json(replayResult);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+
+      if (message.startsWith('Failed job not found')) {
+        next(new AppError(404, 'not_found', 'The requested resource was not found'));
+        return;
+      }
+
+      if (message.includes('not in failed state')) {
+        next(new AppError(409, 'conflict', 'The request conflicts with the current state'));
+        return;
+      }
+
+      next(error);
+      return;
     }
+  },
+);
 
-    const replayResult = await queueManager.reprocessFailedJob(type as JobType, jobId);
-
-    auditService.log({
-      action: 'ADMIN_ACTION',
-      severity: 'WARNING',
-      actor: req.user!.id,
-      resource: 'jobs-dlq',
-      resourceId: jobId,
-      metadata: {
-        operation: 'reprocess',
-        reason: reason.trim(),
-        jobType: type,
-        replayJobId: replayResult.replayJobId,
-        deduplicated: replayResult.deduplicated,
-      },
-      ipAddress: (req as any).ip,
-      correlationId: (req as any).headers['x-correlation-id'] as string | undefined,
-    });
-
-    const statusCode = replayResult.deduplicated ? 200 : 202;
-    return res.status(statusCode).json(replayResult);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-
-    if (message.startsWith('Failed job not found')) {
-      return res.status(404).json({ error: message });
-    }
-
-    if (message.includes('not in failed state')) {
-      return res.status(409).json({ error: message });
-    }
-
-    return res.status(500).json({ error: `Failed to reprocess DLQ job: ${message}` });
-  }
-});
-
-app.get('/api/v1/jobs/:type/:jobId', async (req: Request, res: Response) => {
+app.get('/api/v1/jobs/:type/:jobId', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { type, jobId } = req.params;
 
     if (!Object.values(JobType).includes(type as JobType)) {
-      return res.status(400).json({ error: `Invalid job type: ${type}` });
+      return res.status(400).json({ error: 'Invalid job type' });
     }
 
     const status = await queueManager.getJobStatus(type as JobType, jobId);
@@ -298,8 +352,8 @@ app.get('/api/v1/jobs/:type/:jobId', async (req: Request, res: Response) => {
 
     return res.json(status);
   } catch (error) {
-    console.error('Failed to get job status', error);
-    return res.status(500).json({ error: 'An unexpected error occurred' });
+    next(error);
+    return;
   }
 });
 
@@ -308,9 +362,7 @@ attachTerminalHandlers(app);
 export { app };
 export default app;
 
-const isMainModule =
-  typeof require !== 'undefined' &&
-  (require as NodeRequire).main === module;
+const isMainModule = false;
 const isJest = Boolean(process.env.JEST_WORKER_ID);
 const shouldBootstrapServer = (isMainModule && !isJest) || process.env.FORCE_START_INDEX === '1';
 
@@ -323,14 +375,6 @@ async function initializeQueues(): Promise<void> {
   }
 }
 
-async function gracefulShutdown(): Promise<void> {
-  if (!isJest) {
-    await queueManager.shutdown();
-    shutdownRateLimitStore();
-  }
-  process.exit(0);
-}
-
 async function startServer(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3001;
   if (!isJest) {
@@ -338,22 +382,19 @@ async function startServer(): Promise<void> {
   }
 
   if (!isJest) {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`TalentTrust API listening on http://localhost:${PORT}`);
-      console.log(`Event Ingestion Configuration: ${JSON.stringify(eventConfig, null, 2)}`);
+    });
+
+    registerShutdownHandlers(server, [], [], {
+      shutdownDrainHandlers: [queueManager],
+      shutdownDrainTimeoutMs: Number(process.env['SHUTDOWN_DRAIN_TIMEOUT_MS'] ?? 30_000),
     });
   }
 }
 
 if (isJest) {
   // Tests import `app` only; do not start listeners or Redis-backed queues here.
-} else {
-  process.on('SIGTERM', () => {
-    void gracefulShutdown();
-  });
-  process.on('SIGINT', () => {
-    void gracefulShutdown();
-  });
 }
 
 if (shouldBootstrapServer) {

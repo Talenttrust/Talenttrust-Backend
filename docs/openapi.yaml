@@ -5,98 +5,12 @@ info:
   description: TalentTrust API Gateway and services documentation
 servers:
   - url: /api/v1
-components:
-  schemas:
-    CreateContract:
-      type: object
-      properties:
-        title:
-          type: string
-          minLength: 5
-          maxLength: 100
-          example: DeFi Bridge Integration
-        description:
-          type: string
-          minLength: 10
-          example: Integrate the Stellar bridge with our DeFi protocol
-        freelancerId:
-          type: string
-          format: uuid
-          example: 123e4567-e89b-12d3-a456-426614174000
-        budget:
-          type: number
-          minimum: 0
-          exclusiveMinimum: true
-          example: 500
-      required:
-        - title
-        - description
-        - budget
-    CreateContractMetadata:
-      type: object
-      properties:
-        key:
-          type: string
-          minLength: 1
-          maxLength: 255
-          pattern: ^[a-zA-Z0-9_-]+$
-          example: payment_status
-        value:
-          type: string
-          minLength: 1
-          maxLength: 10000
-          example: pending
-        data_type:
-          type: string
-          enum:
-            - string
-            - number
-            - boolean
-            - json
-          default: string
-          example: string
-        is_sensitive:
-          type: boolean
-          default: false
-          example: false
-      required:
-        - key
-        - value
-    UpdateContractMetadata:
-      type: object
-      properties:
-        value:
-          type: string
-          minLength: 1
-          maxLength: 10000
-          example: completed
-        is_sensitive:
-          type: boolean
-          example: false
-      additionalProperties: false
-    UpdateReputation:
-      type: object
-      properties:
-        reviewerId:
-          type: string
-          format: uuid
-          example: 123e4567-e89b-12d3-a456-426614174000
-        rating:
-          type: number
-          minimum: 1
-          maximum: 5
-          example: 5
-        comment:
-          type: string
-          example: Excellent freelancer!
-      required:
-        - reviewerId
-        - rating
-  parameters: {}
 paths:
   /contracts:
     get:
       summary: List contracts
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: List of contracts
@@ -105,9 +19,15 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/CreateContract"
+                  $ref: "#/components/schemas/Contract"
+        "401":
+          description: Unauthorized — missing or invalid JWT
+        "403":
+          description: Forbidden — insufficient permissions
     post:
       summary: Create a contract
+      security:
+        - bearerAuth: []
       requestBody:
         content:
           application/json:
@@ -119,10 +39,244 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CreateContract"
+                $ref: "#/components/schemas/Contract"
+        "400":
+          description: Validation error
+        "401":
+          description: Unauthorized — missing or invalid JWT
+        "403":
+          description: Forbidden — role does not have contracts:create permission
+
+  /contracts/{id}:
+    get:
+      summary: Get a single contract by ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Contract found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contract"
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden — caller does not own this contract
+        "404":
+          description: Contract not found
+    patch:
+      summary: Update an existing contract (owner or admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContract"
+      responses:
+        "200":
+          description: Contract updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contract"
+        "400":
+          description: Validation error
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden — non-owner or insufficient role
+        "404":
+          description: Contract not found
+        "409":
+          description: Version conflict (OCC)
+    delete:
+      summary: Delete a contract (admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Contract deleted
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden — admin role required
+        "404":
+          description: Contract not found
+
+  /contracts/{contractId}/metadata:
+    parameters:
+      - name: contractId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Create metadata
+      description: Creates a new metadata record for a contract.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContractMetadata'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '400':
+          $ref: "#/components/responses/ValidationError"
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+        '409':
+          $ref: "#/components/responses/ConflictError"
+    get:
+      summary: List metadata
+      description: Retrieves paginated metadata records for a contract.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: key
+          in: query
+          schema:
+            type: string
+        - name: data_type
+          in: query
+          schema:
+            type: string
+            enum: [string, number, boolean, json]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ContractMetadata'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+
+  /contracts/{contractId}/metadata/{id}:
+    parameters:
+      - name: contractId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get single metadata
+      description: Retrieves a specific metadata record by ID.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+        '404':
+          $ref: "#/components/responses/NotFoundError"
+    patch:
+      summary: Update metadata
+      description: Updates an existing metadata record.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateContractMetadata'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractMetadata'
+        '400':
+          $ref: "#/components/responses/ValidationError"
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+        '404':
+          $ref: "#/components/responses/NotFoundError"
+    delete:
+      summary: Delete metadata
+      description: Soft deletes a metadata record.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: No Content
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+        '404':
+          $ref: "#/components/responses/NotFoundError"
+
   /reputation/{id}:
     get:
       summary: Get freelancer reputation
+      security:
+        - bearerAuth: []
       parameters:
         - name: id
           in: path
@@ -150,8 +304,14 @@ paths:
                         type: number
                       reviewCount:
                         type: number
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
     put:
       summary: Update freelancer reputation
+      security:
+        - bearerAuth: []
       parameters:
         - name: id
           in: path
@@ -159,6 +319,13 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional retry key. Exact retries replay the original response.
+          schema:
+            type: string
+            maxLength: 255
       requestBody:
         content:
           application/json:
@@ -175,9 +342,221 @@ paths:
                   status:
                     type: string
                     example: success
-  /health:
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /reputation/{id}/rate:
+    post:
+      summary: Create reputation rating
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional retry key. Exact retries replay the original response.
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateReputation"
+      responses:
+        "201":
+          description: Rating created successfully
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+
+  /dependency-scan:
     get:
-      summary: Health check
+      summary: Get dependency scan report
+      description: Admin-only. Returns production dependency scan status and remediation guidance.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Scan report retrieved
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /admin/queue-health:
+    get:
+      summary: Get queue health
+      description: Returns queue health and recent failures.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Queue health retrieved
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /admin/circuit-breakers:
+    get:
+      summary: Get circuit breakers status
+      description: Returns the current state and counters for all registered circuit breakers.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Circuit breakers state retrieved
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /admin/deploy/status:
+    get:
+      summary: Get deployment status
+      description: Returns the current deployment state without modifying it.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Deployment state retrieved
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /admin/deploy/switch-green:
+    post:
+      summary: Promote green instance
+      description: Promotes the green instance to active.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Switched to green successfully
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "502":
+          description: Green instance not healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/deploy/rollback:
+    post:
+      summary: Rollback to blue
+      description: Rolls back to the previous (blue) instance.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Rolled back to blue successfully
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+
+  /audit/export:
+    get:
+      summary: Export audit logs
+      description: Streams a filtered NDJSON audit export as a downloadable attachment for compliance workflows.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [INFO, WARNING, CRITICAL]
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: resource
+          in: query
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: NDJSON export stream
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: "#/components/responses/UnauthorizedError"
+        '403':
+          $ref: "#/components/responses/ForbiddenError"
+        '429':
+          description: Rate limited
+
+  /config:
+    servers:
+      - url: /api
+    get:
+      summary: Get application configuration
+      description: Returns application configuration including allowed assets.
+      responses:
+        "200":
+          description: Configuration retrieved
+    post:
+      summary: Configuration status check
+      responses:
+        "200":
+          description: Status ok
+
+  /health/live:
+    servers:
+      - url: /
+    get:
+      summary: Health check liveness
       responses:
         "200":
           description: Service is healthy
@@ -192,3 +571,229 @@ paths:
                   service:
                     type: string
                     example: talenttrust-backend
+
+  /health/ready:
+    servers:
+      - url: /
+    get:
+      summary: Health check readiness
+      responses:
+        "200":
+          description: Service is ready
+        "503":
+          description: Dependency unavailable
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            requestId:
+              type: string
+    Contract:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        budget:
+          type: number
+        version:
+          type: integer
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateContract:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 5
+          maxLength: 100
+          example: DeFi Bridge Integration
+        description:
+          type: string
+          minLength: 10
+          example: Integrate the Stellar bridge with our DeFi protocol
+        freelancerId:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        budget:
+          type: number
+          minimum: 0
+          exclusiveMinimum: true
+          example: 500
+      required:
+        - title
+        - description
+        - budget
+
+    ContractMetadata:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        contract_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+        value:
+          type: string
+        data_type:
+          type: string
+          enum: [string, number, boolean, json]
+        is_sensitive:
+          type: boolean
+        created_by:
+          type: string
+          format: uuid
+        updated_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateContractMetadata:
+      type: object
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[a-zA-Z0-9_-]+$
+          example: payment_status
+        value:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          example: pending
+        data_type:
+          type: string
+          enum: [string, number, boolean, json]
+          default: string
+          example: string
+        is_sensitive:
+          type: boolean
+          default: false
+          example: false
+      required:
+        - key
+        - value
+
+    UpdateContractMetadata:
+      type: object
+      properties:
+        value:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          example: completed
+        is_sensitive:
+          type: boolean
+          example: false
+      additionalProperties: false
+
+    UpdateContract:
+      type: object
+      required:
+        - version
+      properties:
+        version:
+          type: integer
+          minimum: 0
+          description: OCC version — must match the current stored version
+          example: 0
+        title:
+          type: string
+          minLength: 5
+          maxLength: 100
+          example: Updated Contract Title
+        status:
+          type: string
+          enum: [draft, active, completed, cancelled, disputed]
+          example: active
+
+    UpdateReputation:
+      type: object
+      properties:
+        reviewerId:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        rating:
+          type: number
+          minimum: 1
+          maximum: 5
+          example: 5
+        comment:
+          type: string
+          example: Excellent freelancer!
+      required:
+        - reviewerId
+        - rating
+  responses:
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UnauthorizedError:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ForbiddenError:
+      description: Permission denied
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ConflictError:
+      description: Resource conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

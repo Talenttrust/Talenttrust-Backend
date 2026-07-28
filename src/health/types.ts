@@ -3,12 +3,17 @@
  * @description Shared types for the health check subsystem.
  */
 
+/** Status of a probe: up = healthy, degraded = slow/warning, down = failure. */
+export type ProbeStatus = "up" | "degraded" | "down";
+
 /** Result of a single dependency probe. */
 export interface ProbeResult {
   /** Human-readable name of the dependency. */
   name: string;
-  /** Whether the probe succeeded. */
-  ok: boolean;
+  /** Probe status: up, degraded, or down. Kept for backward compatibility. */
+  ok?: boolean;
+  /** Probe health status. */
+  status?: ProbeStatus;
   /** Optional detail message (error text or latency note). */
   detail?: string;
   /** Round-trip latency in milliseconds. */
@@ -26,6 +31,22 @@ export interface HealthResponse {
   uptimeSeconds: number;
   /** Individual dependency probe results. */
   probes: ProbeResult[];
+}
+
+/**
+ * Paginated health response payload.
+ *
+ * Extends {@link HealthResponse} with cursor-pagination metadata.
+ * The `probes` array is bounded to the requested page size.
+ */
+export interface PaginatedHealthResponse extends HealthResponse {
+  /**
+   * Opaque cursor to pass as `?cursor=` on the next request.
+   * `null` when this is the last (or only) page.
+   */
+  nextCursor: string | null;
+  /** Effective page size used for this response (after clamping). */
+  limit: number;
 }
 
 /** A probe is any async function returning a ProbeResult. */

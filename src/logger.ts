@@ -19,6 +19,9 @@
  * stack is included to aid debugging.
  */
 
+
+import { getRequestContext } from './middleware/requestContext';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 /** Fields that every log record must carry. */
@@ -49,7 +52,7 @@ const SERVICE_NAME = 'talenttrust-backend';
  */
 function serializeError(err: Error): Record<string, unknown> {
   const obj: Record<string, unknown> = {
-    name: err.name,
+    type: err.name,
     message: err.message,
   };
   if (process.env.NODE_ENV !== 'production' && err.stack) {
@@ -63,14 +66,37 @@ function serializeError(err: Error): Record<string, unknown> {
  * Extend this list as the domain grows.
  */
 const SENSITIVE_KEYS = new Set([
-  'password',
-  'secret',
-  'token',
   'authorization',
   'cookie',
+  'set-cookie',
+  'x-api-key',
+  'x-api-secret',
+  'x-auth-token',
+  'x-access-token',
+  'proxy-authorization',
+  'password',
+  'passwd',
+  'secret',
+  'token',
+  'access_token',
+  'refresh_token',
+  'api_key',
+  'apikey',
+  'credential',
+  'private',
+  'ssn',
+  'credit_card',
+  'webhooksecret',
+  'webhook_secret',
   'privatekey',
   'mnemonic',
   'seed',
+  'email',
+]);
+
+const redactionPaths = Array.from(SENSITIVE_KEYS).flatMap(key => [
+  key,
+  `*.${key}`,
 ]);
 
 function sanitize(obj: Record<string, unknown>): Record<string, unknown> {
@@ -88,13 +114,22 @@ function sanitize(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** Core write function – separated so tests can spy on it. */
-export function writeRecord(record: LogRecord): void {
+let writeRecordImpl: (record: LogRecord) => void = (record: LogRecord): void => {
   const line = JSON.stringify(record);
   if (record.level === 'error') {
     process.stderr.write(line + '\n');
   } else {
     process.stdout.write(line + '\n');
   }
+};
+
+export function writeRecord(record: LogRecord): void {
+  writeRecordImpl(record);
+}
+
+/** Test helper to override the write implementation */
+export function setWriteRecordImpl(impl: (record: LogRecord) => void): void {
+  writeRecordImpl = impl;
 }
 
 /**
@@ -128,6 +163,11 @@ export class Logger {
   ): void {
     const { requestId, correlationId, ...rest } = this.context;
 
+    // Retrieve active request context from AsyncLocalStorage if not explicitly bound
+    const store = getRequestContext();
+    const resolvedRequestId = requestId ?? store?.requestId;
+    const resolvedCorrelationId = correlationId ?? store?.correlationId;
+
     // Merge context + caller extras, then sanitise the whole thing.
     const merged = sanitize({ ...rest, ...extra });
 
@@ -136,10 +176,17 @@ export class Logger {
       level,
       message,
       service: SERVICE_NAME,
-      ...(requestId !== undefined && { requestId }),
-      ...(correlationId !== undefined && { correlationId }),
+      ...(resolvedRequestId !== undefined && { requestId: resolvedRequestId }),
+      ...(resolvedCorrelationId !== undefined && { correlationId: resolvedCorrelationId }),
       ...merged,
     };
+
+    // Remove undefined properties to match expected behavior
+    Object.keys(record).forEach(key => {
+      if (record[key as keyof LogRecord] === undefined) {
+        delete record[key as keyof LogRecord];
+      }
+    });
 
     writeRecord(record);
   }
@@ -175,4 +222,12 @@ export const logger = new Logger();
 /** Factory for creating named loggers with pre-bound context. */
 export function createLogger(context: LogContext = {}): Logger {
   return new Logger(context);
+}
+
+/**
+ * Utility function to create a request-scoped logger with correlation IDs.
+ * This is typically used in middleware.
+ */
+export function createRequestLogger(requestId: string, correlationId?: string): Logger {
+  return createLogger({ requestId, correlationId });
 }

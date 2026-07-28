@@ -1,10 +1,17 @@
 import { EventIndexerService, EventType, SmartContractEvent } from './indexer';
+import { closeDb } from '../db/database';
 
 describe('EventIndexerService', () => {
   let indexer: EventIndexerService;
 
   beforeEach(() => {
+    process.env.DB_PATH = ':memory:';
+    closeDb(); // ensure fresh in-memory DB
     indexer = new EventIndexerService();
+  });
+
+  afterEach(() => {
+    closeDb();
   });
 
   const sampleEvent: SmartContractEvent = {

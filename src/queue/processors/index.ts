@@ -9,12 +9,20 @@ import { JobType, JobPayload, JobResult } from '../types';
 import { processEmailNotification } from './email-processor';
 import { processContractProcessing } from './contract-processor';
 import { processReputationUpdate } from './reputation-processor';
+import { processReputationRecompute } from './reputation-recompute-processor';
 import { processBlockchainSync } from './blockchain-processor';
 
 /**
  * Type-safe processor function signature
  */
-export type JobProcessor = (payload: JobPayload) => Promise<JobResult>;
+export interface JobProcessorContext {
+  signal: AbortSignal;
+}
+
+export type JobProcessor = (
+  payload: JobPayload,
+  context?: JobProcessorContext,
+) => Promise<JobResult>;
 
 /**
  * Map of job types to their processor functions
@@ -24,5 +32,6 @@ export const jobProcessors: Record<JobType, JobProcessor> = {
   [JobType.EMAIL_NOTIFICATION]: processEmailNotification as JobProcessor,
   [JobType.CONTRACT_PROCESSING]: processContractProcessing as JobProcessor,
   [JobType.REPUTATION_UPDATE]: processReputationUpdate as JobProcessor,
+  [JobType.REPUTATION_RECOMPUTE]: processReputationRecompute as unknown as JobProcessor,
   [JobType.BLOCKCHAIN_SYNC]: processBlockchainSync as JobProcessor,
 };

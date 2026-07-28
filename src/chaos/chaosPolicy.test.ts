@@ -22,18 +22,6 @@ describe('ChaosPolicy', () => {
     expect(policy.decide('payments')).toBe('none');
   });
 
-  it('uses random mode probability', () => {
-    const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.2);
-    const policy = new ChaosPolicy({
-      chaosMode: 'random',
-      chaosTargets: ['contracts'],
-      chaosProbability: 0.5,
-    });
-
-    expect(policy.decide('contracts')).toBe('error');
-    randomSpy.mockRestore();
-  });
-
   describe('target matching', () => {
     it('targets all dependencies when chaosTargets is empty', () => {
       const policy = new ChaosPolicy({
@@ -123,92 +111,201 @@ describe('ChaosPolicy', () => {
 
       expect(policy.decide('contracts')).toBe('none');
     });
+
+    it('returns none for an unknown mode, falling back to default', () => {
+      const policy = new ChaosPolicy({
+        chaosMode: 'invalid_mode' as any,
+        chaosTargets: ['contracts'],
+        chaosProbability: 1,
+      });
+
+      expect(policy.decide('contracts')).toBe('none');
+    });
   });
 
   describe('probability logic in random mode', () => {
     it('always returns error when probability is 1', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0.9999);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 1,
-      });
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 1,
+        },
+        () => 0.9999,
+      );
 
       expect(policy.decide('contracts')).toBe('error');
-      jest.restoreAllMocks();
     });
 
     it('always returns none when probability is 0', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 0,
-      });
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0,
+        },
+        () => 0.5,
+      );
 
       expect(policy.decide('contracts')).toBe('none');
-      jest.restoreAllMocks();
     });
 
-    it('returns none when Math.random equals chaosProbability (strict less-than boundary)', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0.5);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 0.5,
-      });
+    it('always returns none when probability is negative', () => {
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: -0.1,
+        },
+        () => 0.5,
+      );
 
       expect(policy.decide('contracts')).toBe('none');
-      jest.restoreAllMocks();
     });
 
-    it('returns error when Math.random is just below chaosProbability', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0.4999);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 0.5,
-      });
+    it('always returns error when probability is greater than 1', () => {
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 1.5,
+        },
+        () => 0.5,
+      );
 
       expect(policy.decide('contracts')).toBe('error');
-      jest.restoreAllMocks();
     });
 
-    it('returns none when Math.random is above chaosProbability', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0.8);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 0.5,
-      });
+    it('returns none when random equals chaosProbability (strict less-than boundary)', () => {
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0.5,
+        },
+        () => 0.5,
+      );
 
       expect(policy.decide('contracts')).toBe('none');
-      jest.restoreAllMocks();
+    });
+
+    it('returns error when random is just below chaosProbability', () => {
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0.5,
+        },
+        () => 0.4999,
+      );
+
+      expect(policy.decide('contracts')).toBe('error');
+    });
+
+    it('returns none when random is above chaosProbability', () => {
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0.5,
+        },
+        () => 0.8,
+      );
+
+      expect(policy.decide('contracts')).toBe('none');
     });
 
     it('returns none for a non-targeted dependency regardless of probability', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: ['contracts'],
-        chaosProbability: 1,
-      });
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 1,
+        },
+        () => 0.5,
+      );
 
       expect(policy.decide('payments')).toBe('none');
-      jest.restoreAllMocks();
     });
 
     it('targets all dependencies in random mode when chaosTargets is empty', () => {
-      jest.spyOn(Math, 'random').mockReturnValue(0.1);
-      const policy = new ChaosPolicy({
-        chaosMode: 'random',
-        chaosTargets: [],
-        chaosProbability: 0.5,
-      });
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: [],
+          chaosProbability: 0.5,
+        },
+        () => 0.1,
+      );
 
       expect(policy.decide('contracts')).toBe('error');
       expect(policy.decide('payments')).toBe('error');
-      jest.restoreAllMocks();
+    });
+
+    it('uses injected random function for deterministic decision sequences', () => {
+      // Deterministic sequence: first call returns error, second returns none
+      const rngSequence = jest
+        .fn()
+        .mockReturnValueOnce(0.2)
+        .mockReturnValueOnce(0.8);
+
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0.5,
+        },
+        rngSequence,
+      );
+
+      expect(policy.decide('contracts')).toBe('error');
+      expect(policy.decide('contracts')).toBe('none');
+      expect(rngSequence).toHaveBeenCalledTimes(2);
+    });
+
+    it('produces reproducible exact decision sequences with seeded RNG', () => {
+      // Simulate a seeded RNG that returns specific values in sequence
+      const seededValues = [0, 0.25, 0.5, 0.75, 1];
+      let callIndex = 0;
+      const seededRng = () => seededValues[callIndex++] as number;
+
+      const policy = new ChaosPolicy(
+        {
+          chaosMode: 'random',
+          chaosTargets: ['contracts'],
+          chaosProbability: 0.5,
+        },
+        seededRng,
+      );
+
+      // 0 < 0.5 → error
+      expect(policy.decide('contracts')).toBe('error');
+      // 0.25 < 0.5 → error
+      expect(policy.decide('contracts')).toBe('error');
+      // 0.5 is NOT < 0.5 → none
+      expect(policy.decide('contracts')).toBe('none');
+      // 0.75 >= 0.5 → none
+      expect(policy.decide('contracts')).toBe('none');
+      // 1 >= 0.5 → none
+      expect(policy.decide('contracts')).toBe('none');
+    });
+  });
+
+  describe('default random behavior (production)', () => {
+    it('uses Math.random by default in production', () => {
+      // Verify the injected function defaults correctly without mocking Math.random
+      const policy = new ChaosPolicy({
+        chaosMode: 'random',
+        chaosTargets: ['contracts'],
+        chaosProbability: 0.5,
+      });
+
+      // Call multiple times - not testing exact values, just that it uses the default
+      const results = [0, 0, 0].map(() => policy.decide('contracts'));
+      const hasValidResults = results.every(
+        (r) => r === 'error' || r === 'none',
+      );
+      expect(hasValidResults).toBe(true);
     });
   });
 });

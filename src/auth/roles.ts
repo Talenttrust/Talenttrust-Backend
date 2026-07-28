@@ -9,15 +9,15 @@
  *   - guest:      Read-only access to public endpoints (health, public listings).
  *
  * Resources:
- *   contracts, users, reputation, disputes, health
+ *   contracts, users, reputation, disputes, health, api-keys
  *
  * Actions:
  *   create, read, update, delete
  */
 
-export type Role = 'admin' | 'freelancer' | 'client' | 'guest';
+export type Role = 'admin' | 'auditor' | 'freelancer' | 'client' | 'guest';
 
-export type Resource = 'contracts' | 'users' | 'reputation' | 'disputes' | 'health';
+export type Resource = 'contracts' | 'users' | 'reputation' | 'disputes' | 'health' | 'api-keys';
 
 export type Action = 'create' | 'read' | 'update' | 'delete';
 
@@ -32,20 +32,26 @@ export const ACCESS_CONTROL_MATRIX: Record<Role, Partial<Record<Resource, Action
     reputation: ['read', 'update'],
     disputes: ['create', 'read', 'update', 'delete'],
     health: ['read'],
+    'api-keys': ['create', 'read', 'update', 'delete'],
+  },
+  auditor: {
+    health: ['read'],
   },
   freelancer: {
     contracts: ['create', 'read'],
     users: ['read'],
-    reputation: ['read'],
+    reputation: ['read', 'update'], // Can rate clients after contract completion
     disputes: ['create', 'read'],
     health: ['read'],
+    'api-keys': ['create', 'read', 'update', 'delete'],
   },
   client: {
     contracts: ['create', 'read', 'update'],
     users: ['read'],
-    reputation: ['read'],
+    reputation: ['read', 'update'], // Can rate freelancers after contract completion
     disputes: ['create', 'read'],
     health: ['read'],
+    'api-keys': ['create', 'read', 'update', 'delete'],
   },
   guest: {
     health: ['read'],
@@ -53,4 +59,4 @@ export const ACCESS_CONTROL_MATRIX: Record<Role, Partial<Record<Resource, Action
 };
 
 /** All valid roles in the system. */
-export const VALID_ROLES: readonly Role[] = ['admin', 'freelancer', 'client', 'guest'] as const;
+export const VALID_ROLES: readonly Role[] = ['admin', 'auditor', 'freelancer', 'client', 'guest'] as const;
