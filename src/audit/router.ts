@@ -1,98 +1,221 @@
 /**
  * @module audit/router
- * @description REST endpoints for querying the audit log.
+ * @description REST endpoints for querying and writing the audit log.
  *
  * Routes:
  *   GET  /api/v1/audit          - Query audit entries with optional filters
- *   GET  /api/v1/audit/:id      - Retrieve a single entry by ID
+ *   GET  /api/v1/audit/export   - Stream an NDJSON export for compliance
  *   GET  /api/v1/audit/integrity - Verify the hash chain integrity
+ *   POST /api/v1/audit          - Write a single audit entry
+ *   POST /api/v1/audit/bulk     - Write a bounded batch of audit entries
  *
  * Security notes:
  * - In production these routes MUST be protected by authentication and
  *   role-based authorisation (admin/auditor roles only).
  * - Query parameters are validated and clamped to prevent abuse.
- * - The integrity endpoint should be rate-limited to prevent DoS on large logs.
+ * - All routes are rate-limited per client (issue #746): `accessMiddleware`
+ *   carries the general `audit` tier, `/export` additionally gets the
+ *   `auditExport` tier via `exportMiddleware`, `/integrity` additionally
+ *   gets the stricter `auditIntegrity` tier via `integrityMiddleware`, and
+ *   `/bulk` additionally gets the `auditBulk` tier via `bulkMiddleware` —
+ *   see `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
-import { Router, Request, Response } from 'express';
-import { auditService } from './service';
-import type { AuditAction, AuditQuery, AuditSeverity } from './types';
+import { Router, Request, Response, type RequestHandler } from 'express';
+import type { ZodError } from 'zod';
+import { pipeline } from 'stream/promises';
+import compression from 'compression';
+import { auditService, AuditService } from './service';
+import { auditExportService, AuditExportService, type AuditExportResult } from './exportService';
+import { createAuditEntryBodySchema } from './schemas';
+import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
+import { idempotencyMiddleware } from '../middleware/idempotency';
+import { toAuditEntryResponseDto } from './dto/audit.dto';
+import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
 
-export const auditRouter = Router();
+export interface AuditRouterOptions {
+  service?: AuditService;
+  exportService?: AuditExportService;
+  accessMiddleware?: RequestHandler[];
+  exportMiddleware?: RequestHandler[];
+  /**
+   * Middleware applied only to `GET /integrity`, in addition to
+   * `accessMiddleware`. Verifying the hash chain walks the entire audit
+   * log, so this endpoint gets its own (tighter) rate limiter — see
+   * `rateLimitConfig.auditIntegrity` in `src/config/rateLimit.ts`.
+   */
+  integrityMiddleware?: RequestHandler[];
+  bulkMiddleware?: RequestHandler[];
+}
 
-const VALID_ACTIONS = new Set<AuditAction>([
-  'CONTRACT_CREATED', 'CONTRACT_UPDATED', 'CONTRACT_CANCELLED', 'CONTRACT_COMPLETED',
-  'PAYMENT_INITIATED', 'PAYMENT_RELEASED', 'PAYMENT_DISPUTED',
-  'REPUTATION_UPDATED',
-  'USER_CREATED', 'USER_UPDATED', 'USER_DELETED',
-  'AUTH_LOGIN', 'AUTH_LOGOUT', 'AUTH_FAILED',
-  'ADMIN_ACTION',
-  'ENDPOINT_ACCESS', 'ENDPOINT_MUTATION',
-]);
-
-const VALID_SEVERITIES = new Set<AuditSeverity>(['INFO', 'WARNING', 'CRITICAL']);
-
-/**
- * GET /api/v1/audit
- * Query audit log entries with optional filters and pagination.
- *
- * Query params:
- *   action, severity, actor, resource, resourceId, from, to, limit, offset
- */
-auditRouter.get('/', (req: Request, res: Response): void => {
-  const {
-    action, severity, actor, resource, resourceId, from, to,
-  } = req.query as Record<string, string | undefined>;
-
-  const limit = Math.min(parseInt(req.query['limit'] as string ?? '100', 10) || 100, 1000);
-  const offset = Math.max(parseInt(req.query['offset'] as string ?? '0', 10) || 0, 0);
-
-  // Validate enum fields
-  if (action && !VALID_ACTIONS.has(action as AuditAction)) {
-    res.status(400).json({ error: `Invalid action: ${action}` });
-    return;
-  }
-  if (severity && !VALID_SEVERITIES.has(severity as AuditSeverity)) {
-    res.status(400).json({ error: `Invalid severity: ${severity}` });
-    return;
-  }
-
-  const query: AuditQuery = {
-    ...(action && { action: action as AuditAction }),
-    ...(severity && { severity: severity as AuditSeverity }),
-    ...(actor && { actor }),
-    ...(resource && { resource }),
-    ...(resourceId && { resourceId }),
-    ...(from && { from }),
-    ...(to && { to }),
-    limit,
-    offset,
+function buildValidationErrorResponse(requestId: string, correlationId: string | undefined, error: ZodError): ValidationErrorResponse {
+  return {
+    error: {
+      code: 'validation_error',
+      message: 'Request validation failed',
+      requestId,
+      ...(correlationId !== undefined && { correlationId }),
+      details: mapZodErrorToDetails(error),
+    },
   };
+}
 
-  const entries = auditService.query(query);
-  res.json({ entries, count: entries.length, limit, offset });
-});
+export function createAuditRouter(options: AuditRouterOptions = {}): Router {
+  const router = Router();
+  const service = options.service ?? auditService;
+  const exportService = options.exportService ?? auditExportService;
+  const accessMiddleware = options.accessMiddleware ?? [];
+  const exportMiddleware = options.exportMiddleware ?? [];
+  const integrityMiddleware = options.integrityMiddleware ?? [];
+  /**
+   * POST /api/v1/audit
+   *
+   * Write an audit entry with idempotency support.
+   * Accepts an Idempotency-Key header to prevent duplicate entries.
+   */
+  router.post(
+    '/',
+    idempotencyMiddleware,
+    ...accessMiddleware,
+    (req: Request, res: Response): void => {
+      try {
+        const parseResult = createAuditEntryBodySchema.safeParse(req.body);
 
-/**
- * GET /api/v1/audit/integrity
- * Verify the tamper-evident hash chain.
- * Returns 200 if valid, 409 if corruption is detected.
- */
-auditRouter.get('/integrity', (_req: Request, res: Response): void => {
-  const report = auditService.verifyIntegrity();
-  const status = report.valid ? 200 : 409;
-  res.status(status).json(report);
-});
+        if (!parseResult.success) {
+          const requestId = getRequestIdFromUtils(res);
+          const correlationId = getCorrelationId(res);
+          res.status(400).json(buildValidationErrorResponse(requestId, correlationId, parseResult.error));
+          return;
+        }
 
-/**
- * GET /api/v1/audit/:id
- * Retrieve a single audit entry by its UUID.
- */
-auditRouter.get('/:id', (req: Request, res: Response): void => {
-  const entry = auditService.getById(req.params['id'] ?? '');
-  if (!entry) {
-    res.status(404).json({ error: 'Audit entry not found' });
-    return;
-  }
-  res.json(entry);
-});
+        // Propagate correlation ID from request context to audit entry
+        const correlationId = getCorrelationId(res);
+        const entryData = parseResult.data;
+        if (correlationId && !entryData.correlationId) {
+          entryData.correlationId = correlationId;
+        }
+
+        const entry = service.log(entryData);
+        res.status(201).json(entry);
+      } catch (error) {
+        const message = (error as Error).message;
+        const status = message.startsWith('Missing required fields:') ? 400 : 500;
+        const requestId = getRequestIdFromUtils(res);
+        const correlationId = getCorrelationId(res);
+        res.status(status).json({ 
+          error: message,
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /api/v1/audit
+   * Query audit entries with optional filters and pagination.
+   */
+  router.get(
+    '/',
+    ...accessMiddleware,
+    compression({ threshold: 1024 }),
+    (req: Request, res: Response): void => {
+    try {
+      const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.json({
+        ...result,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
+    } catch (error) {
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(400).json({ 
+        error: (error as Error).message,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
+    }
+  });
+
+  /**
+   * GET /api/v1/audit/export
+   * Streams a file-backed NDJSON export for compliance downloads.
+   */
+  router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response): Promise<void> => {
+    let exportResult: AuditExportResult | undefined;
+
+    try {
+      const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
+      const correlationId = getCorrelationId(res);
+
+      exportResult = await service.exportAuditLogs(
+        req.query as Record<string, unknown>,
+        { actor, ipAddress: req.ip, correlationId },
+        exportService,
+      );
+
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${exportResult.fileName}"`);
+      res.setHeader('X-Audit-Export-Records', String(exportResult.recordCount));
+
+      await pipeline(exportResult.openReadStream(), res);
+    } catch (error) {
+      if (!res.headersSent) {
+        const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
+        const requestId = getRequestIdFromUtils(res);
+        const correlationId = getCorrelationId(res);
+        res.status(status).json({ 
+          error: [(error as Error).message],
+          requestId,
+          ...(correlationId !== undefined && { correlationId }),
+        });
+      }
+    } finally {
+      if (exportResult) {
+        await exportResult.cleanup();
+      }
+    }
+  });
+
+  /**
+   * GET /api/v1/audit/integrity
+   * Verify the tamper-evident hash chain.
+   * Returns 200 if valid, 409 if corruption is detected.
+   */
+  router.get('/integrity', ...accessMiddleware, ...integrityMiddleware, (_req: Request, res: Response): void => {
+    const { report, status } = service.checkIntegrity();
+    const requestId = getRequestIdFromUtils(res);
+    const correlationId = getCorrelationId(res);
+    res.status(status).json({
+      ...report,
+      requestId,
+      ...(correlationId !== undefined && { correlationId }),
+    });
+  });
+
+  /**
+   * GET /api/v1/audit/:id
+   * Retrieve a single audit entry by its UUID.
+   */
+  router.get('/:id', ...accessMiddleware, (req: Request, res: Response): void => {
+    const entry = service.getEntry(req.params['id'] ?? '');
+    if (!entry) {
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(404).json({ 
+        error: 'Audit entry not found',
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
+      return;
+    }
+    res.json(toAuditEntryResponseDto(entry));
+  });
+
+  return router;
+}
+
+export const auditRouter = createAuditRouter();
