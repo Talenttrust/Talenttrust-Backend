@@ -99,6 +99,37 @@ describe('Correlation ID propagation integration', () => {
   });
 
   /**
+   * Tests that X-Correlation-Id is generated when absent on webhook requests,
+   * echoed in the response, and returned in the error payload.
+   */
+  it('should generate X-Correlation-Id when absent on webhook requests and return in response/error payload', async () => {
+    const app = createApp();
+    const server = app.listen(0);
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      // Trigger a validation error on a webhook-like path
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/webhook-subscriptions`, { 
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({}) // Empty body to trigger validation error
+      });
+
+      expect(response.status).toBe(422); // Validation error
+      
+      const correlationIdHeader = response.headers.get(CORRELATION_ID_HEADER);
+      expect(correlationIdHeader).toBeTruthy();
+      
+      const body = await response.json();
+      expect(body.error.correlationId).toBe(correlationIdHeader);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err?: Error) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
+
+  /**
    * Tests that X-Request-Id header is always generated and echoed back.
    */
   it('should always generate and echo back X-Request-Id header', async () => {
