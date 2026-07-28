@@ -1,33 +1,35 @@
-import { Router, Request, Response, NextFunction } from 'express';
-import compression from 'compression';
+import { Router, Request, Response, NextFunction } from "express";
+import compression from "compression";
 
-import { createContractsController } from '../controllers/contracts.controller';
-import { createContractsBulkController } from '../controllers/contracts-bulk.controller';
-import { createMilestonesSoftDeleteController } from '../controllers/milestones.softdelete.controller';
-import { ContractsService } from '../services/contracts.service';
-import { ContractCacheService, DEFAULT_CACHE_TTL_MS, DEFAULT_CACHE_SWR_MS, DEFAULT_CACHE_MAX_ENTRIES } from '../services/contractCache.service';
-import { ContractRepository } from '../repositories/contractRepository';
-import { getDb } from '../db/database';
-import { validateSchema } from '../middleware/validate.middleware';
-import { createRateLimiter } from '../middleware/rateLimiter';
-import { rateLimitConfig } from '../config/rateLimit';
+import { createContractsController } from "../controllers/contracts.controller";
+import { createContractsBulkController } from "../controllers/contracts-bulk.controller";
+import { createMilestonesSoftDeleteController } from "../controllers/milestones.softdelete.controller";
+import { ContractsService } from "../services/contracts.service";
+import { ContractRepository } from "../repositories/contractRepository";
+import { getDb } from "../db/database";
+import { validateSchema } from "../middleware/validate.middleware";
+import { createRateLimiter } from "../middleware/rateLimiter";
+import { rateLimitConfig } from "../config/rateLimit";
 import {
   createContractSchema,
   contractIdParamSchema,
   contractQuerySchema,
-  bulkMilestonesSchema,
-} from '../modules/contracts/dto/contract.dto';
-import { bulkCreateContractsSchema } from '../modules/contracts/dto/bulk-operations.dto';
+} from "../modules/contracts/dto/contract.dto";
+import { bulkCreateContractsSchema } from "../modules/contracts/dto/bulk-operations.dto";
 import {
   createMilestoneSchema,
   milestoneIdParamSchema,
   milestonesQuerySchema,
-} from '../modules/contracts/dto/milestones.dto';
-import { validateUpdateContract } from '../modules/contracts/validation.middleware';
-import { contractCreateIdempotencyMiddleware } from '../middleware/contractIdempotency';
-import { requireAuth, requirePermission } from '../middleware/authorization';
-import { validateRequest, validateParams, validateQuery } from '../middleware/validate.middleware';
-import type { MetricsServiceLike } from '../observability/metrics-service';
+} from "../modules/contracts/dto/milestones.dto";
+import { validateUpdateContract } from "../modules/contracts/validation.middleware";
+import { contractCreateIdempotencyMiddleware } from "../middleware/contractIdempotency";
+import { requireAuth, requirePermission } from "../middleware/authorization";
+import {
+  validateRequest,
+  validateParams,
+  validateQuery,
+} from "../middleware/validate.middleware";
+import type { MetricsServiceLike } from "../observability/metrics-service";
 
 // ─── Inline route-param validator ────────────────────────────────────────────
 
@@ -41,15 +43,21 @@ import type { MetricsServiceLike } from '../observability/metrics-service';
  * This guard runs before any DB query so oversized or clearly-invalid IDs
  * never reach the repository layer.
  */
-function validateContractId(req: Request, res: Response, next: NextFunction): void {
+function validateContractId(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
   const result = contractIdParamSchema.safeParse(req.params);
   if (!result.success) {
     const requestId =
-      typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+      typeof res.locals.requestId === "string"
+        ? res.locals.requestId
+        : "unknown";
     res.status(400).json({
       error: {
-        code: 'validation_error',
-        message: 'Request validation failed',
+        code: "validation_error",
+        message: "Request validation failed",
         requestId,
         details: result.error.issues.map((issue) => ({
           path: issue.path.map(String),
@@ -63,7 +71,7 @@ function validateContractId(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
-  // ─── Inline query-param validator ────────────────────────────────────────────
+// ─── Inline query-param validator ────────────────────────────────────────────
 
 /**
  * Validates query parameters on GET /api/v1/contracts against contractQuerySchema.
@@ -79,15 +87,21 @@ function validateContractId(req: Request, res: Response, next: NextFunction): vo
  * (unknown keys are stripped), preserving string types so the controller's
  * own parsers (e.g. parsePaginationQuery) continue to work correctly.
  */
-function validateContractQuery(req: Request, res: Response, next: NextFunction): void {
+function validateContractQuery(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
   const result = contractQuerySchema.safeParse(req.query);
   if (!result.success) {
     const requestId =
-      typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+      typeof res.locals.requestId === "string"
+        ? res.locals.requestId
+        : "unknown";
     res.status(400).json({
       error: {
-        code: 'validation_error',
-        message: 'Request validation failed',
+        code: "validation_error",
+        message: "Request validation failed",
         requestId,
         details: result.error.issues.map((issue) => ({
           path: issue.path.map(String),
@@ -125,18 +139,22 @@ function validateContractQuery(req: Request, res: Response, next: NextFunction):
  *   operation counters and durations. When omitted the controller operates
  *   without metrics instrumentation (e.g. in unit tests).
  */
-function createContractsRouter(metricsService?: MetricsServiceLike): Router {
+function createContractsRouter(
+  metricsService?: MetricsServiceLike,
+  customDb?: any,
+): Router {
   const router = Router();
 
   // Enable compression for large payloads (e.g. milestones arrays)
   // The threshold is 1KB by default, but we set it explicitly here.
   router.use(compression({ threshold: 1024 }));
 
-  const db = getDb();
+  const db = customDb ?? getDb();
   const repo = new ContractRepository(db);
-  const controller = createContractsController(new ContractsService(repo), metricsService);
+  const service = new ContractsService(repo);
+  const controller = createContractsController(service, metricsService);
   const milestonesSoftDelete = createMilestonesSoftDeleteController();
-  const bulkController = createContractsBulkController(new ContractsService(repo));
+  const bulkController = createContractsBulkController(service);
 
   /**
    * Resolves the owner (clientId) of a contract from the DB.
@@ -144,7 +162,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
    * Returns null when the contract does not exist (triggers 404).
    */
   const getContractOwnerId = async (req: any): Promise<string | null> => {
-    const contract = await repo.findById(req.params?.id ?? '');
+    const contract = await repo.findById(req.params?.id ?? "");
     return contract ? contract.clientId : null;
   };
 
@@ -154,35 +172,47 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   const milestonesLimiter = createRateLimiter({
     ...rateLimitConfig.milestones,
     keyFn: (req) => {
-      const apiKey = req.headers['x-api-key'];
+      const apiKey = req.headers["x-api-key"];
       if (apiKey) {
         const key = Array.isArray(apiKey) ? apiKey[0] : apiKey;
         return `milestones:apikey:${key}`;
       }
-      const xff = req.headers['x-forwarded-for'];
+      const xff = req.headers["x-forwarded-for"];
       if (xff) {
-        const first = Array.isArray(xff) ? xff[0] : (xff as string).split(',')[0];
+        const first = Array.isArray(xff)
+          ? xff[0]
+          : (xff as string).split(",")[0];
         return `milestones:ip:${first.trim()}`;
       }
-      return `milestones:ip:${req.ip ?? req.socket?.remoteAddress ?? 'unknown'}`;
+      return `milestones:ip:${req.ip ?? req.socket?.remoteAddress ?? "unknown"}`;
     },
   });
   router.use(milestonesLimiter);
 
   // GET /bounds — public-facing bounds, still requires auth
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
-  router.get('/bounds', requireAuth, requirePermission('contracts', 'read'), controller.getBounds);
+  router.get(
+    "/bounds",
+    requireAuth,
+    requirePermission("contracts", "read"),
+    controller.getBounds,
+  );
 
   // GET /stats — aggregate statistics
   /** @permission contracts:list — admin, client (ownOnly), freelancer (ownOnly) */
-  router.get('/stats', requireAuth, requirePermission('contracts', 'list'), controller.getContractStats);
+  router.get(
+    "/stats",
+    requireAuth,
+    requirePermission("contracts", "list"),
+    controller.getContractStats,
+  );
 
   // GET / — list all contracts (with query-param validation)
   /** @permission contracts:list — admin, client (ownOnly), freelancer (ownOnly) */
   router.get(
-    '/',
+    "/",
     requireAuth,
-    requirePermission('contracts', 'list'),
+    requirePermission("contracts", "list"),
     validateContractQuery,
     controller.getContracts,
   );
@@ -194,54 +224,54 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   // GET /:id — fetch single contract (param validation before auth to reject clearly invalid IDs)
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
   router.get(
-    '/:id',
+    "/:id",
     validateContractId,
     requireAuth,
-    requirePermission('contracts', 'read', getContractOwnerId),
+    requirePermission("contracts", "read", getContractOwnerId),
     controller.getContractById,
   );
 
   // GET /:id/milestones — list milestones (soft-deleted excluded by default)
   /** @permission contracts:read — admin, client (ownOnly), freelancer (ownOnly) */
   router.get(
-    '/:id/milestones',
+    "/:id/milestones",
     validateContractId,
     validateQuery(milestonesQuerySchema),
     requireAuth,
-    requirePermission('contracts', 'read', getContractOwnerId),
+    requirePermission("contracts", "read", getContractOwnerId),
     milestonesSoftDelete.list.bind(milestonesSoftDelete),
   );
 
   // POST /:id/milestones — create a milestone record (active)
   /** @permission contracts:update (ownOnly) — admin, client, freelancer */
   router.post(
-    '/:id/milestones',
+    "/:id/milestones",
     validateContractId,
     validateRequest(createMilestoneSchema),
     requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
+    requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.create.bind(milestonesSoftDelete),
   );
 
   // POST /:id/milestones/:milestoneId/restore — restore within retention window
   /** @permission contracts:update (ownOnly) — admin, client, freelancer */
   router.post(
-    '/:id/milestones/:milestoneId/restore',
+    "/:id/milestones/:milestoneId/restore",
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
+    requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.restore.bind(milestonesSoftDelete),
   );
 
   // DELETE /:id/milestones/:milestoneId — soft-delete (mark deleted_at, do not purge)
   /** @permission contracts:update (ownOnly) — admin, client, freelancer */
   router.delete(
-    '/:id/milestones/:milestoneId',
+    "/:id/milestones/:milestoneId",
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
+    requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
   );
 
@@ -263,9 +293,9 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
    * Supports Idempotency-Key to safely retry contract creation without creating duplicates.
    */
   router.post(
-    '/',
+    "/",
     requireAuth,
-    requirePermission('contracts', 'create'),
+    requirePermission("contracts", "create"),
     contractCreateIdempotencyMiddleware(),
     validateSchema(createContractSchema),
     controller.createContract,
@@ -274,19 +304,19 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   /**
    * POST /api/v1/contracts/bulk
    * Bulk create contracts endpoint.
-   * 
+   *
    * Request: Array of contract creation payloads (each validated separately)
    * Response: Per-item results with summary (always 200, check per-item status for failures)
-   * 
+   *
    * - Each item is validated and processed independently
    * - One item's failure does not affect other items
    * - Batch size is capped at BULK_OPERATION_MAX_BATCH_SIZE (100)
    * - Empty batch is rejected as a validation error
    */
   router.post(
-    '/bulk',
+    "/bulk",
     requireAuth,
-    requirePermission('contracts', 'create'),
+    requirePermission("contracts", "create"),
     validateSchema(bulkCreateContractsSchema),
     bulkController.bulkCreateContracts,
   );
@@ -296,23 +326,33 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
   // Idempotency-Key support added for milestones write safety.
   /** @permission contracts:update (ownOnly for client/freelancer) — admin, client, freelancer */
   router.patch(
-    '/:id',
+    "/:id",
     validateContractId,
     requireAuth,
-    requirePermission('contracts', 'update', getContractOwnerId),
+    requirePermission("contracts", "update", getContractOwnerId),
     contractCreateIdempotencyMiddleware(),
     validateUpdateContract,
     controller.updateContract,
+  );
+
+  // POST /:id/restore — restore a soft-deleted contract within retention window
+  /** @permission contracts:update (ownOnly for client/freelancer) — admin, client, freelancer */
+  router.post(
+    "/:id/restore",
+    validateContractId,
+    requireAuth,
+    requirePermission("contracts", "update", getContractOwnerId),
+    controller.restoreContract,
   );
 
   // DELETE /:id — delete a contract (admin only per PERMISSION_MATRIX)
   // validateContractId runs before auth to reject clearly invalid :id params early.
   /** @permission contracts:delete — admin only */
   router.delete(
-    '/:id',
+    "/:id",
     validateContractId,
     requireAuth,
-    requirePermission('contracts', 'delete', getContractOwnerId),
+    requirePermission("contracts", "delete", getContractOwnerId),
     controller.deleteContract,
   );
 

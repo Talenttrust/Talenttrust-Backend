@@ -8,8 +8,8 @@
  * - Response includes per-item success/error results, allowing client to retry failures
  */
 
-import { z } from 'zod';
-import { createContractSchema, QUERY_LIMIT_MAX } from './contract.dto';
+import { z } from "zod";
+import { createContractSchema, QUERY_LIMIT_MAX } from "./contract.dto";
 
 /**
  * Maximum number of items in a single bulk operation batch.
@@ -20,38 +20,46 @@ export const BULK_OPERATION_MAX_BATCH_SIZE = 100;
 
 /**
  * Schema for bulk create contracts request.
- * 
+ *
  * Array of items, each shaped exactly like a single POST /contracts request body.
  * Must have between 1 and BULK_OPERATION_MAX_BATCH_SIZE items.
  * Empty array is rejected (almost certainly a client bug).
  */
 export const bulkCreateContractsSchema = z.object({
-  body: z.array(
-    // Extract the inner body schema from createContractSchema
-    createContractSchema.shape.body,
-    {
-      invalid_type_error: 'items must be an array',
-      required_error: 'items array is required',
-    }
-  )
-    .min(1, 'items array must not be empty (at least 1 item required)')
-    .max(
-      BULK_OPERATION_MAX_BATCH_SIZE,
-      `items array must not exceed ${BULK_OPERATION_MAX_BATCH_SIZE} items`
-    ),
+  body: z.union([
+    z
+      .array(z.record(z.unknown()))
+      .min(1, "items array must not be empty (at least 1 item required)")
+      .max(
+        BULK_OPERATION_MAX_BATCH_SIZE,
+        `items array must not exceed ${BULK_OPERATION_MAX_BATCH_SIZE} items`,
+      ),
+    z.object({
+      operations: z
+        .array(z.record(z.unknown()))
+        .min(1, "operations array must not be empty")
+        .max(BULK_OPERATION_MAX_BATCH_SIZE),
+    }),
+    z.object({
+      items: z
+        .array(z.record(z.unknown()))
+        .min(1, "items array must not be empty")
+        .max(BULK_OPERATION_MAX_BATCH_SIZE),
+    }),
+  ]),
 });
 
 /**
  * Per-item result in a bulk response: either a success (with the created contract) or an error.
  */
 export interface BulkItemSuccessResult<T> {
-  status: 'success';
+  status: "success";
   code: number; // HTTP status code (e.g., 201 for created)
   data: T;
 }
 
 export interface BulkItemErrorResult {
-  status: 'error';
+  status: "error";
   code: number; // HTTP status code (e.g., 400, 422, 403)
   error: {
     code: string; // Error code (e.g., 'validation_error', 'unauthorized')

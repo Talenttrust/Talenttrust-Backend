@@ -1,6 +1,6 @@
-import { z, ZodTypeAny } from 'zod';
-import { registry } from '../../../docs/openapi-registry';
-import { ResponseContractError } from '../../../errors/appError';
+import { z, ZodTypeAny } from "zod";
+import { registry } from "../../../docs/openapi-registry";
+import { ResponseContractError } from "../../../errors/appError";
 
 // ─── Response schemas ──────────────────────────────────────────────────────
 //
@@ -12,11 +12,11 @@ import { ResponseContractError } from '../../../errors/appError';
 // than silently changing the API's public surface.
 
 const contractStatusEnum = z.enum([
-  'draft',
-  'active',
-  'completed',
-  'cancelled',
-  'disputed',
+  "draft",
+  "active",
+  "completed",
+  "cancelled",
+  "disputed",
 ]);
 
 /** Response shape for a single contract, as returned by create/update/get. */
@@ -30,6 +30,7 @@ export const contractResponseSchema = z
     status: contractStatusEnum,
     createdAt: z.string(),
     version: z.number().int(),
+    deletedAt: z.string().nullable().optional(),
   })
   .strict();
 
@@ -60,12 +61,16 @@ export const deleteContractResponseSchema = z
   })
   .strict();
 
-registry.register('ContractResponse', contractResponseSchema);
+registry.register("ContractResponse", contractResponseSchema);
 
 export type ContractResponse = z.infer<typeof contractResponseSchema>;
 export type ContractStatsResponse = z.infer<typeof contractStatsResponseSchema>;
-export type ContractBoundsResponse = z.infer<typeof contractBoundsResponseSchema>;
-export type DeleteContractResponse = z.infer<typeof deleteContractResponseSchema>;
+export type ContractBoundsResponse = z.infer<
+  typeof contractBoundsResponseSchema
+>;
+export type DeleteContractResponse = z.infer<
+  typeof deleteContractResponseSchema
+>;
 
 // ─── Boundary assertion helper ─────────────────────────────────────────────
 
@@ -85,8 +90,8 @@ export function assertResponseSchema<T>(
   const result = schema.safeParse(data);
   if (!result.success) {
     const detail = result.error.issues
-      .map((issue) => `${issue.path.join('.') || '<root>'} ${issue.message}`)
-      .join('; ');
+      .map((issue) => `${issue.path.join(".") || "<root>"} ${issue.message}`)
+      .join("; ");
     throw new ResponseContractError(
       `${context} response failed schema validation: ${detail}`,
     );

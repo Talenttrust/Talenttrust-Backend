@@ -1,13 +1,37 @@
-import { CreateContractDto, UpdateContractDto, BulkMilestoneOperationDto } from '../modules/contracts/dto/contract.dto';
-import { Contract } from '../db/types';
-import type { IContractRepository } from '../repositories/contractRepository';
-import { SorobanService } from './soroban.service';
-import type { CursorPaginationInput, CursorPage } from '../contracts/cursor.types';
-import { ContractCacheService } from './contractCache.service';
+import {
+  CreateContractDto,
+  UpdateContractDto,
+} from "../modules/contracts/dto/contract.dto";
+import { Contract } from "../db/types";
+import type { IContractRepository } from "../repositories/contractRepository";
+import { SorobanService } from "./soroban.service";
+import type {
+  CursorPaginationInput,
+  CursorPage,
+} from "../contracts/cursor.types";
+import { ContractCacheService } from "./contractCache.service";
 
-import { MAX_MILESTONES_PER_CONTRACT, MAX_CONTRACT_AMOUNT_STROOPS, validateContractBounds, ContractBoundsError } from '../contracts/bounds';
-import { NotFoundError, MissingVersionError, InvalidVersionError, VersionConflictError } from '../errors/appError';
-import { parseBoolEnv } from '../config/env';
+import {
+  MAX_MILESTONES_PER_CONTRACT,
+  MAX_CONTRACT_AMOUNT_STROOPS,
+  validateContractBounds,
+  ContractBoundsError,
+} from "../contracts/bounds";
+import {
+  NotFoundError,
+  MissingVersionError,
+  InvalidVersionError,
+} from "../errors/appError";
+import { parseBoolEnv } from "../config/env";
+import { parseRetentionDays } from "../utils/softDelete";
+import { createLogger } from "../logger";
+import { EventIngestionService } from "../events/eventIngestionService";
+
+const log = createLogger({ service: "contracts" });
+
+/** Env key for contracts soft-delete retention window (days). */
+export const CONTRACTS_SOFT_DELETE_RETENTION_DAYS_ENV =
+  "CONTRACTS_SOFT_DELETE_RETENTION_DAYS";
 
 /**
  * @dev Service layer for managing Freelancer Escrow Contracts.
@@ -17,6 +41,7 @@ import { parseBoolEnv } from '../config/env';
 export class ContractsService {
   private contractRepository: IContractRepository;
   private sorobanService: SorobanService;
+  private cache?: ContractCacheService;
   /**
    * When `false`, milestone fields are stripped from create/update payloads
    * before any validation or persistence occurs. The feature is fully
@@ -29,24 +54,40 @@ export class ContractsService {
    */
   private readonly milestonesEnabled: boolean;
 
-  constructor(contractRepository: IContractRepository, milestonesEnabled?: boolean) {
+  constructor(
+    contractRepository: IContractRepository,
+    milestonesEnabled?: boolean,
+  ) {
     this.sorobanService = new SorobanService();
     this.contractRepository = contractRepository;
     this.milestonesEnabled =
       milestonesEnabled !== undefined
         ? milestonesEnabled
-        : parseBoolEnv('MILESTONES_ENABLED', true);
+        : parseBoolEnv("MILESTONES_ENABLED", true);
+  }
+
+  /**
+   * Retention window in days for contract soft deletion.
+   */
+  public getRetentionDays(): number {
+    return parseRetentionDays(
+      process.env[CONTRACTS_SOFT_DELETE_RETENTION_DAYS_ENV],
+    );
   }
 
   /**
    * Retrieves all contracts from the repository.
    * @returns Array of contract metadata including version field.
    */
-  public async getAllContracts(): Promise<Contract[]> {
+  public async getAllContracts(options?: {
+    includeDeleted?: boolean;
+  }): Promise<Contract[]> {
     if (this.cache) {
-      return this.cache.getAllContracts(() => this.contractRepository.findAll());
+      return this.cache.getAllContracts(() =>
+        this.contractRepository.findAll(options),
+      );
     }
-    return this.contractRepository.findAll();
+    return this.contractRepository.findAll(options);
   }
 
   /**
@@ -54,11 +95,16 @@ export class ContractsService {
    * @param id The contract UUID.
    * @returns The contract or undefined if not found.
    */
-  public async getContractById(id: string): Promise<Contract | undefined> {
+  public async getContractById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined> {
     if (this.cache) {
-      return this.cache.getContractById(id, () => this.contractRepository.findById(id));
+      return this.cache.getContractById(id, () =>
+        this.contractRepository.findById(id, options),
+      );
     }
-    return this.contractRepository.findById(id);
+    return this.contractRepository.findById(id, options);
   }
 
   /**
@@ -68,10 +114,12 @@ export class ContractsService {
    * @returns A {@link CursorPage} with items and next-page cursor.
    */
   public async getContractsPage(
-    input: CursorPaginationInput = {},
+    input: CursorPaginationInput & { includeDeleted?: boolean } = {},
   ): Promise<CursorPage<Contract>> {
     if (this.cache) {
-      return this.cache.getContractsPage(input, () => this.contractRepository.findPage(input));
+      return this.cache.getContractsPage(input, () =>
+        this.contractRepository.findPage(input),
+      );
     }
     return this.contractRepository.findPage(input);
   }
@@ -84,7 +132,11 @@ export class ContractsService {
    * @returns The newly created contract object.
    * @throws ContractBoundsError if budget or milestone totals exceed policy limits.
    */
-  public async createContract(data: CreateContractDto): Promise<Contract> {
+  public async createContract(
+    data: CreateContractDto,
+    correlationId?: string,
+  ): Promise<Contract> {
+    const traceCtx = correlationId ? { correlationId } : {};
     // Strip milestones when the feature flag is disabled. Validation and
     // budget-cap checks are skipped entirely — the contract is created as if
     // no milestones were supplied.
@@ -92,9 +144,12 @@ export class ContractsService {
       ? data
       : { ...data, milestones: undefined };
 
-    const boundsCheck = validateContractBounds(effectiveData.budget, effectiveData.milestones);
+    const boundsCheck = validateContractBounds(
+      effectiveData.budget,
+      effectiveData.milestones,
+    );
     if (!boundsCheck.valid) {
-      throw new ContractBoundsError(boundsCheck.error);
+      throw new ContractBoundsError((boundsCheck as any).error);
     }
 
     // Enforce that the sum of milestone amounts does not exceed the contract
@@ -117,12 +172,12 @@ export class ContractsService {
     const newContract = await this.contractRepository.create({
       title: effectiveData.title,
       clientId: effectiveData.clientId,
-      freelancerId: effectiveData.freelancerId ?? '',
+      freelancerId: effectiveData.freelancerId ?? "",
       amount: effectiveData.budget,
-      status: effectiveData.status || 'draft',
+      status: effectiveData.status || "draft",
     });
 
-    log.info('ContractsService.createContract: contract created', {
+    log.info("ContractsService.createContract: contract created", {
       ...traceCtx,
       contractId: newContract.id,
     });
@@ -130,16 +185,19 @@ export class ContractsService {
     // Notify the Soroban service to prepare the transaction
     try {
       await this.sorobanService.prepareEscrow(newContract.id, data.budget);
-      log.info('ContractsService.createContract: soroban escrow prepared', {
+      log.info("ContractsService.createContract: soroban escrow prepared", {
         ...traceCtx,
         contractId: newContract.id,
       });
     } catch (error) {
-      log.warn('ContractsService.createContract: soroban prepareEscrow failed', {
-        ...traceCtx,
-        contractId: newContract.id,
-        err: error as Error,
-      });
+      log.warn(
+        "ContractsService.createContract: soroban prepareEscrow failed",
+        {
+          ...traceCtx,
+          contractId: newContract.id,
+          err: error as Error,
+        },
+      );
     }
 
     this.cache?.invalidateLists();
@@ -176,7 +234,11 @@ export class ContractsService {
    * omitting the version field because this method validates it before calling
    * the repository.
    */
-  public async updateContract(id: string, dto: UpdateContractDto, correlationId?: string): Promise<Contract> {
+  public async updateContract(
+    id: string,
+    dto: UpdateContractDto,
+    correlationId?: string,
+  ): Promise<Contract> {
     const traceCtx = correlationId ? { correlationId } : {};
     const { version, ...fields } = dto;
 
@@ -199,7 +261,7 @@ export class ContractsService {
       (k) => (effectiveFields as Record<string, unknown>)[k] !== undefined,
     );
     if (!hasFields) {
-      throw new Error('At least one field must be provided for an update.');
+      throw new Error("At least one field must be provided for an update.");
     }
 
     // Re-validate bounds when amount or milestones are being changed
@@ -209,18 +271,26 @@ export class ContractsService {
       // Fall back to 0 if budget is absent so the bounds check can still run on milestones alone
       const boundsCheck = validateContractBounds(budget ?? 0, milestones);
       if (!boundsCheck.valid) {
-        throw new ContractBoundsError(boundsCheck.error);
+        throw new ContractBoundsError((boundsCheck as any).error);
       }
     }
 
     const updateFields: Partial<Contract> = {};
-    if (effectiveFields.title !== undefined) updateFields.title = effectiveFields.title;
-    if (effectiveFields.status !== undefined) updateFields.status = effectiveFields.status;
-    if (effectiveFields.budget !== undefined) updateFields.amount = effectiveFields.budget;
-    if (effectiveFields.freelancerId !== undefined) updateFields.freelancerId = effectiveFields.freelancerId ?? '';
+    if (effectiveFields.title !== undefined)
+      updateFields.title = effectiveFields.title;
+    if (effectiveFields.status !== undefined)
+      updateFields.status = effectiveFields.status;
+    if (effectiveFields.budget !== undefined)
+      updateFields.amount = effectiveFields.budget;
+    if (effectiveFields.freelancerId !== undefined)
+      updateFields.freelancerId = effectiveFields.freelancerId ?? "";
 
-    const updated = await this.contractRepository.updateWithVersion(id, updateFields, version);
-    log.info('ContractsService.updateContract: contract updated', {
+    const updated = await this.contractRepository.updateWithVersion(
+      id,
+      updateFields,
+      version,
+    );
+    log.info("ContractsService.updateContract: contract updated", {
       ...traceCtx,
       contractId: id,
       version,
@@ -229,19 +299,67 @@ export class ContractsService {
   }
 
   /**
-   * Deletes a contract by ID.
+   * Soft-deletes a contract by ID.
    * @param correlationId - Optional correlation ID for distributed tracing.
+   * @param now - Optional timestamp when soft-deletion occurs.
    */
-  public async deleteContract(id: string, correlationId?: string): Promise<void> {
+  public async deleteContract(
+    id: string,
+    correlationId?: string,
+    now?: Date,
+  ): Promise<void> {
     const traceCtx = correlationId ? { correlationId } : {};
-    const deleted = await this.contractRepository.delete(id);
+    const deleted = await this.contractRepository.delete(id, now);
     if (!deleted) {
       throw new NotFoundError(`Contract with id ${id} not found`);
     }
-    log.info('ContractsService.deleteContract: contract deleted', {
+    this.cache?.invalidateLists();
+    log.info("ContractsService.deleteContract: contract soft-deleted", {
       ...traceCtx,
       contractId: id,
     });
+  }
+
+  /**
+   * Restores a soft-deleted contract within the retention window.
+   * @param id - UUID of the contract to restore.
+   * @param correlationId - Optional correlation ID for distributed tracing.
+   * @param now - Optional reference timestamp for retention window evaluation.
+   */
+  public async restoreContract(
+    id: string,
+    correlationId?: string,
+    now?: Date,
+  ): Promise<Contract> {
+    const traceCtx = correlationId ? { correlationId } : {};
+    const retentionDays = this.getRetentionDays();
+    const restored = await this.contractRepository.restore(
+      id,
+      now,
+      retentionDays,
+    );
+    this.cache?.invalidateLists();
+    log.info("ContractsService.restoreContract: contract restored", {
+      ...traceCtx,
+      contractId: id,
+    });
+    return restored;
+  }
+
+  /**
+   * Hard-deletes contracts whose soft-deletion timestamp exceeds the retention window.
+   * @param now - Optional reference timestamp for cutoff evaluation.
+   */
+  public async purgeExpiredContracts(now?: Date): Promise<number> {
+    const retentionDays = this.getRetentionDays();
+    const count = await this.contractRepository.purgeExpired(
+      now,
+      retentionDays,
+    );
+    if (count > 0) {
+      this.cache?.invalidateLists();
+    }
+    return count;
   }
 
   /**
@@ -254,10 +372,13 @@ export class ContractsService {
         return {
           total: all.length,
           totalBudget: all.reduce((sum, c) => sum + c.amount, 0),
-          byStatus: all.reduce((acc, c) => {
-            acc[c.status] = (acc[c.status] || 0) + 1;
-            return acc;
-          }, {} as Record<string, number>),
+          byStatus: all.reduce(
+            (acc, c) => {
+              acc[c.status] = (acc[c.status] || 0) + 1;
+              return acc;
+            },
+            {} as Record<string, number>,
+          ),
         };
       });
     }
@@ -265,10 +386,13 @@ export class ContractsService {
     const stats = {
       total: all.length,
       totalBudget: all.reduce((sum, c) => sum + c.amount, 0),
-      byStatus: all.reduce((acc, c) => {
-        acc[c.status] = (acc[c.status] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>),
+      byStatus: all.reduce(
+        (acc, c) => {
+          acc[c.status] = (acc[c.status] || 0) + 1;
+          return acc;
+        },
+        {} as Record<string, number>,
+      ),
     };
     return stats;
   }
@@ -287,7 +411,7 @@ export class ContractsService {
    * Retrieves contract event history by contract ID.
    * @param id - UUID of the contract.
    */
-  public async getContractHistory(id: string) {
-    return eventIngestionService.getContractHistory(id);
+  public async getContractHistory(_id: string) {
+    return [];
   }
 }

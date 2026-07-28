@@ -67,11 +67,13 @@ const MIGRATIONS: Migration[] = [
       "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)",
     ].join("\n"),
     up: (db) => {
-      const columns = db.pragma("table_info(contracts)") as Array<{ name: string }>;
+      const columns = db.pragma("table_info(contracts)") as Array<{
+        name: string;
+      }>;
       const hasVersion = columns.some((col) => col.name === "version");
       if (!hasVersion) {
         db.exec(
-          "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)"
+          "ALTER TABLE contracts ADD COLUMN version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0)",
         );
       }
     },
@@ -129,9 +131,7 @@ const MIGRATIONS: Migration[] = [
   {
     version: 5,
     name: "create_transactions_table",
-    checksumSource: [
-      "CREATE TABLE IF NOT EXISTS transactions (",
-    ].join("\n"),
+    checksumSource: ["CREATE TABLE IF NOT EXISTS transactions ("].join("\n"),
     up: (db) => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS transactions (
@@ -187,11 +187,15 @@ MIGRATIONS.push({
   up: (db) => {
     const columns = db.pragma("table_info(users)") as Array<{ name: string }>;
     const hasPasswordHash = columns.some((col) => col.name === "password_hash");
-    const hasRefreshTokenHash = columns.some((col) => col.name === "refresh_token_hash");
+    const hasRefreshTokenHash = columns.some(
+      (col) => col.name === "refresh_token_hash",
+    );
 
     if (!hasPasswordHash || !hasRefreshTokenHash) {
       // Backup existing data
-      const users = db.prepare("SELECT * FROM users").all() as Array<Record<string, unknown>>;
+      const users = db.prepare("SELECT * FROM users").all() as Array<
+        Record<string, unknown>
+      >;
 
       // Drop old table
       db.exec("DROP TABLE IF EXISTS users");
@@ -225,7 +229,7 @@ MIGRATIONS.push({
             user.role,
             user.password_hash ?? null,
             user.refresh_token_hash ?? null,
-            user.created_at
+            user.created_at,
           );
         }
       }
@@ -281,12 +285,14 @@ MIGRATIONS.push({
 MIGRATIONS.push({
   version: 9,
   name: "add_started_at_to_transactions",
-  checksumSource: [
-    "ALTER TABLE transactions ADD COLUMN started_at TEXT",
-  ].join("\n"),
+  checksumSource: ["ALTER TABLE transactions ADD COLUMN started_at TEXT"].join(
+    "\n",
+  ),
   up: (db) => {
     // Check if the column already exists to prevent errors during repeated migrations
-    const columns = db.pragma("table_info(transactions)") as Array<{ name: string }>;
+    const columns = db.pragma("table_info(transactions)") as Array<{
+      name: string;
+    }>;
     const hasStartedAt = columns.some((column) => column.name === "started_at");
 
     if (!hasStartedAt) {
@@ -378,7 +384,9 @@ function ensureMigrationTable(db: Database.Database): void {
     );
   `);
 
-  const columns = db.pragma("table_info(schema_version)") as Array<{ name: string }>;
+  const columns = db.pragma("table_info(schema_version)") as Array<{
+    name: string;
+  }>;
   const hasChecksum = columns.some((column) => column.name === "checksum");
 
   if (!hasChecksum) {
@@ -386,10 +394,12 @@ function ensureMigrationTable(db: Database.Database): void {
   }
 }
 
-function getAppliedMigrations(db: Database.Database): Map<number, AppliedMigration> {
+function getAppliedMigrations(
+  db: Database.Database,
+): Map<number, AppliedMigration> {
   const rows = db
     .prepare<[], AppliedMigration>(
-      "SELECT version, name, checksum FROM schema_version ORDER BY version ASC"
+      "SELECT version, name, checksum FROM schema_version ORDER BY version ASC",
     )
     .all();
 
@@ -403,7 +413,7 @@ function assertMigrationsAreValid(migrations: Migration[]): void {
 
     if (migration?.version !== expectedVersion) {
       throw new Error(
-        `Invalid migration sequence: expected version ${expectedVersion}, got ${migration?.version}`
+        `Invalid migration sequence: expected version ${expectedVersion}, got ${migration?.version}`,
       );
     }
   }
@@ -442,28 +452,34 @@ export function computeMigrationChecksum(migration: Migration): string {
  * Returns `null` when the migration has no `checksumSource` — in that case
  * the legacy and current fingerprints are identical and no upgrade is needed.
  */
-export function computeLegacyMigrationChecksum(migration: Migration): string | null {
+export function computeLegacyMigrationChecksum(
+  migration: Migration,
+): string | null {
   if (migration.checksumSource === undefined) {
     return null;
   }
   return createHash("sha256")
-    .update(`${migration.version}\n${migration.name}\n${migration.up.toString()}`)
+    .update(
+      `${migration.version}\n${migration.name}\n${migration.up.toString()}`,
+    )
     .digest("hex");
 }
 
 function verifyAppliedMigrations(
   db: Database.Database,
   appliedMigrations: Map<number, AppliedMigration>,
-  migrations: Migration[]
+  migrations: Migration[],
 ): void {
-  const migrationsByVersion = new Map(migrations.map((migration) => [migration.version, migration]));
+  const migrationsByVersion = new Map(
+    migrations.map((migration) => [migration.version, migration]),
+  );
 
   for (const applied of appliedMigrations.values()) {
     const migration = migrationsByVersion.get(applied.version);
 
     if (!migration) {
       throw new Error(
-        `Applied migration ${applied.version} (${applied.name}) is not present in the migration list`
+        `Applied migration ${applied.version} (${applied.name}) is not present in the migration list`,
       );
     }
 
@@ -471,14 +487,14 @@ function verifyAppliedMigrations(
 
     if (applied.name !== migration.name) {
       throw new Error(
-        `Applied migration ${applied.version} name mismatch: expected ${migration.name}, got ${applied.name}`
+        `Applied migration ${applied.version} name mismatch: expected ${migration.name}, got ${applied.name}`,
       );
     }
 
     if (applied.checksum === null) {
       // Backfill: row predates checksum tracking
       db.prepare<[string, number]>(
-        "UPDATE schema_version SET checksum = ? WHERE version = ?"
+        "UPDATE schema_version SET checksum = ? WHERE version = ?",
       ).run(expectedChecksum, applied.version);
       applied.checksum = expectedChecksum;
       continue;
@@ -493,14 +509,14 @@ function verifyAppliedMigrations(
       const legacyChecksum = computeLegacyMigrationChecksum(migration);
       if (legacyChecksum !== null && applied.checksum === legacyChecksum) {
         db.prepare<[string, number]>(
-          "UPDATE schema_version SET checksum = ? WHERE version = ?"
+          "UPDATE schema_version SET checksum = ? WHERE version = ?",
         ).run(expectedChecksum, applied.version);
         applied.checksum = expectedChecksum;
         continue;
       }
 
       throw new Error(
-        `Applied migration ${applied.version} checksum mismatch; refusing to start`
+        `Applied migration ${applied.version} checksum mismatch; refusing to start`,
       );
     }
   }
@@ -520,7 +536,7 @@ function verifyAppliedMigrations(
  */
 export function runMigrations(
   db: Database.Database,
-  migrations: Migration[] = MIGRATIONS
+  migrations: Migration[] = MIGRATIONS,
 ): void {
   assertMigrationsAreValid(migrations);
   ensureMigrationTable(db);
@@ -529,7 +545,7 @@ export function runMigrations(
   verifyAppliedMigrations(db, appliedMigrations, migrations);
 
   const insertApplied = db.prepare<[number, string, string, string]>(
-    "INSERT INTO schema_version (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)"
+    "INSERT INTO schema_version (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
   );
 
   for (const migration of migrations) {
@@ -543,7 +559,7 @@ export function runMigrations(
         migration.version,
         migration.name,
         computeMigrationChecksum(migration),
-        new Date().toISOString()
+        new Date().toISOString(),
       );
     });
 
@@ -558,7 +574,7 @@ export function getLatestSchemaVersion(): number {
 // Version 13: DLQ storage tables
 MIGRATIONS.push({
   version: 13,
-  name: 'create_webhook_dlq_tables',
+  name: "create_webhook_dlq_tables",
   checksumSource: [
     "CREATE TABLE IF NOT EXISTS webhook_dlq (",
     "id TEXT PRIMARY KEY,",
@@ -574,8 +590,8 @@ MIGRATIONS.push({
     "replay_attempts INTEGER NOT NULL DEFAULT 0,",
     "created_at TEXT NOT NULL,",
     "updated_at TEXT NOT NULL",
-    "UNIQUE(dedupe_key)"
-  ].join('\n'),
+    "UNIQUE(dedupe_key)",
+  ].join("\n"),
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS webhook_dlq (
@@ -596,5 +612,27 @@ MIGRATIONS.push({
       CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
       CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key ON webhook_dlq(dedupe_key);
     `);
+  },
+});
+
+// Version 14: add deleted_at column and index to contracts
+MIGRATIONS.push({
+  version: 14,
+  name: "add_deleted_at_to_contracts",
+  checksumSource: [
+    "ALTER TABLE contracts ADD COLUMN deleted_at TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_contracts_deleted_at ON contracts(deleted_at)",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(contracts)") as Array<{
+      name: string;
+    }>;
+    const hasDeletedAt = columns.some((col) => col.name === "deleted_at");
+    if (!hasDeletedAt) {
+      db.exec("ALTER TABLE contracts ADD COLUMN deleted_at TEXT");
+    }
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_contracts_deleted_at ON contracts(deleted_at)",
+    );
   },
 });

@@ -8,11 +8,7 @@
 
 /** Status values that a contract can hold during its lifecycle. */
 export type ContractStatus =
-  | "draft"
-  | "active"
-  | "completed"
-  | "disputed"
-  | "cancelled";
+  "draft" | "active" | "completed" | "disputed" | "cancelled";
 
 /**
  * A freelancer escrow contract recorded on the platform.
@@ -35,6 +31,7 @@ export interface Contract {
   status: ContractStatus;
   createdAt: string;
   version: number; // non-negative integer, starts at 0
+  deletedAt?: string | null;
 }
 
 /** Role a user may hold on the platform. */
