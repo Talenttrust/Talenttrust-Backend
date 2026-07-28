@@ -17,7 +17,6 @@
  *   carries the general `audit` tier, `/export` additionally gets the
  *   `auditExport` tier via `exportMiddleware`, `/integrity` additionally
  *   gets the stricter `auditIntegrity` tier via `integrityMiddleware`, and
- *   `/bulk` additionally gets the `auditBulk` tier via `bulkMiddleware` —
  *   see `rateLimitConfig` in `src/config/rateLimit.ts`.
  */
 
@@ -67,6 +66,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const accessMiddleware = options.accessMiddleware ?? [];
   const exportMiddleware = options.exportMiddleware ?? [];
   const integrityMiddleware = options.integrityMiddleware ?? [];
+
   /**
    * POST /api/v1/audit
    *
