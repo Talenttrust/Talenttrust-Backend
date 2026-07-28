@@ -8,7 +8,8 @@ import {
   deactivateApiKey,
   computeKeySelector,
   resetAuthCache,
-  getAuthCache
+  getAuthCache,
+  isValidSaltHashFormat
 } from '../apiKeys';
 import { database } from '../../database';
 
@@ -78,6 +79,57 @@ describe('API Key Utilities', () => {
       
       const isValid = verifyApiKey(apiKey, wrongSalt, hash);
       expect(isValid).toBe(false);
+    });
+
+    it('should return false when salt or hash parameter in verifyApiKey is invalid', () => {
+      expect(verifyApiKey('key', 'shortsalt', 'hash')).toBe(false);
+      expect(verifyApiKey('key', '0123456789abcdef0123456789abcdef', 'shorthash')).toBe(false);
+      expect(verifyApiKey('key', null as any, 'hash')).toBe(false);
+    });
+  });
+
+  describe('isValidSaltHashFormat', () => {
+    it('should return true for a valid salt:hash format', () => {
+      const validSalt = '0123456789abcdef0123456789abcdef'; // 32 hex chars
+      const validHash = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; // 128 hex chars
+      expect(isValidSaltHashFormat(`${validSalt}:${validHash}`)).toBe(true);
+    });
+
+    it('should return false for non-string inputs', () => {
+      expect(isValidSaltHashFormat(null as any)).toBe(false);
+      expect(isValidSaltHashFormat(undefined as any)).toBe(false);
+      expect(isValidSaltHashFormat(123 as any)).toBe(false);
+    });
+
+    it('should return false for empty or whitespace-only string', () => {
+      expect(isValidSaltHashFormat('')).toBe(false);
+      expect(isValidSaltHashFormat('   ')).toBe(false);
+    });
+
+    it('should return false if missing colon separator', () => {
+      expect(isValidSaltHashFormat('0123456789abcdef0123456789abcdef0123456789abcdef')).toBe(false);
+    });
+
+    it('should return false if extra colons exist', () => {
+      expect(isValidSaltHashFormat('salt:hash:extra')).toBe(false);
+    });
+
+    it('should return false if salt length is not 32 hex chars', () => {
+      const shortSalt = '0123456789abcdef';
+      const validHash = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      expect(isValidSaltHashFormat(`${shortSalt}:${validHash}`)).toBe(false);
+    });
+
+    it('should return false if hash length is not 128 hex chars', () => {
+      const validSalt = '0123456789abcdef0123456789abcdef';
+      const shortHash = '0123456789abcdef';
+      expect(isValidSaltHashFormat(`${validSalt}:${shortHash}`)).toBe(false);
+    });
+
+    it('should return false if salt or hash contains non-hex characters', () => {
+      const invalidSalt = '0123456789abcdef0123456789abcdeg'; // 'g' is non-hex
+      const validHash = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      expect(isValidSaltHashFormat(`${invalidSalt}:${validHash}`)).toBe(false);
     });
   });
 
@@ -353,6 +405,27 @@ describe('API Key Utilities', () => {
       for (const k of otherKeys) {
         expect(k.key_selector).toBeUndefined();
       }
+    });
+
+    it('should return null if no legacy key matches the provided plain key', async () => {
+      const db = await (database as any).loadDatabase();
+      const legacyKeyPlain = generateApiKey();
+      const { salt, hash } = hashApiKey(legacyKeyPlain);
+
+      db.api_keys.push({
+        id: require('crypto').randomUUID(),
+        name: 'Non Matching Legacy Key',
+        key_hash: `${salt}:${hash}`,
+        scope: ['legacy:read'],
+        created_by: 'user123',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+      });
+      await (database as any).saveDatabase();
+
+      const result = await validateApiKey('completely-different-key');
+      expect(result).toBeNull();
     });
   });
 
