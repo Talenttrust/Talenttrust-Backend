@@ -97,8 +97,6 @@ describe.each([
       .get(`${path}?action=NOT_REAL`)
       .set('x-request-id', 'test-req-123')
       .expect(400);
-    // requestId is only populated when upstream middleware sets res.locals.requestId;
-    // here there's none wired in this minimal test app, so it falls back to 'unknown'.
     expect(typeof res.body.error.requestId).toBe('string');
   });
 
@@ -273,13 +271,11 @@ describe('GET /export error classification (non-validation failures)', () => {
 
     app.use('/api/v1/audit', router);
 
-    // 4-arg Express error handler — prevents rejected async promises from
-    // destroying the Supertest TCP socket (TCPSERVERWRAP / serverAddress crash).
     app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       const message = (err as Error)?.message || 'Export error';
       const status = message.startsWith('Invalid ') ? 400 : 500;
       if (!res.headersSent) {
-        res.status(status).json({ error: message });
+        res.status(status).json({ error: [message] });
       }
     });
 
