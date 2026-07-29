@@ -88,12 +88,17 @@ export function hashApiKey(apiKey: string): { salt: string; hash: string } {
  * Verifies an API key against a stored hash.
  *
  * @param apiKey - The plain API key to verify.
- * @param salt - The salt used when hashing.
- * @param hash - The stored hash to verify against.
+ * @param salt - The salt used when hashing (32 hex characters).
+ * @param hash - The stored hash to verify against (128 hex characters).
  * @returns True if the key is valid, false otherwise.
  */
-
 export function verifyApiKey(apiKey: string, salt: string, hash: string): boolean {
+  if (typeof apiKey !== 'string' || typeof salt !== 'string' || typeof hash !== 'string') {
+    return false;
+  }
+  if (!/^[a-f0-9]{32}$/i.test(salt) || !/^[a-f0-9]{128}$/i.test(hash)) {
+    return false;
+  }
   try {
     const verifyHash = crypto.pbkdf2Sync(apiKey, salt, 10000, 64, 'sha256').toString('hex');
     const hashBuffer = Buffer.from(hash, 'hex');
@@ -179,8 +184,7 @@ export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: st
  * @param storedCredential - The stored credential to validate.
  * @returns True if the format is valid, false otherwise.
  */
-
-function isValidSaltHashFormat(storedCredential: string): boolean {
+export function isValidSaltHashFormat(storedCredential: string): boolean {
   if (typeof storedCredential !== 'string') return false;
 
   const trimmed = storedCredential.trim();

@@ -39,6 +39,7 @@ export interface UpdateReputationPayload {
   rating: number;
   comment?: string;
   jobCompleted?: boolean;
+  contextId?: string;
 }
 
 // ── Request DTOs ────────────────────────────────────────────────────────────
@@ -118,5 +119,6 @@ export function createRatingBodyToPayload(dto: CreateRatingBodyDTO): UpdateReput
     reviewerId: dto.reviewerId,
     rating: dto.rating,
     comment: dto.comment,
+    contextId: dto.contextId,
   };
 }

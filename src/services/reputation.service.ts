@@ -1,4 +1,4 @@
-import { ReputationProfile, PaginatedReputationProfile } from '../types/reputation';
+import { ReputationProfile, PaginatedReputationProfile, UpdateReputationPayload } from '../types/reputation';
 import type { CursorPaginationInput } from '../contracts/cursor.types';
 import { ReputationRepository, ReputationEntry } from '../repositories/reputationRepository';
 import { auditService } from '../audit/service';
@@ -12,6 +12,18 @@ import type BetterSqlite3 from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { validateEnv } from '../config/env.schema';
 import { getReputationWebhookService } from '../modules/reputation/webhook/reputation-webhook.service';
+
+/**
+ * Check if the reputation system feature flag is enabled.
+ */
+function isReputationEnabled(): boolean {
+  try {
+    const config = validateEnv(process.env);
+    return config.REPUTATION_ENABLED;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Defense-in-depth runtime validation predicate for a reputation rating payload.
@@ -168,7 +180,8 @@ export class ReputationService {
     targetId: string,
     rating: number,
     contextId: string,
-    comment?: string
+    comment?: string,
+    correlationId?: string
   ): ReputationEntry {
     // Feature flag check - reputation must be enabled
     if (!isReputationEnabled()) {
@@ -286,6 +299,7 @@ export class ReputationService {
             comment: comment ? this.hashComment(comment) : undefined,
           },
         },
+        correlationId,
       });
     } catch (auditError) {
       // If audit logging fails, we should not silently continue
@@ -351,7 +365,7 @@ export class ReputationService {
    * @throws `ValidationError`    - comment fails the policy (length / spam).
    * @throws `Error`              - audit logging failed (existing behaviour).
    */
-  public static updateProfile(targetId: string, payload: unknown): ReputationProfile {
+  public static updateProfile(targetId: string, payload: unknown, correlationId?: string): ReputationProfile {
     // Ensure repository is initialized
     if (!this.repository) {
       throw new Error('ReputationService not initialized. Call initialize() first.');
@@ -382,7 +396,8 @@ export class ReputationService {
       // would have caught earlier. If absent, the DB layer will surface a
       // clear error rather than this service silently fabricating one.
       typeof validPayload.contextId === 'string' ? validPayload.contextId : '',
-      validPayload.comment
+      validPayload.comment,
+      correlationId
     );
 
     return this.getProfile(targetId);
@@ -559,7 +574,8 @@ export class ReputationService {
    * @returns Array of per-item results with index, success flag, and data/error.
    */
   public static createBulkRatings(
-    items: Array<{ reviewerId: string; targetId: string; rating: number; contextId: string; comment?: string }>
+    items: Array<{ reviewerId: string; targetId: string; rating: number; contextId: string; comment?: string }>,
+    correlationId?: string
   ): Array<{ index: number; success: boolean; data?: ReputationEntry; error?: { code: string; message: string } }> {
     if (!this.repository) {
       throw new Error('ReputationService not initialized. Call initialize() first.');
@@ -575,7 +591,8 @@ export class ReputationService {
           item.targetId,
           item.rating,
           item.contextId,
-          item.comment
+          item.comment,
+          correlationId
         );
         results.push({ index: i, success: true, data: entry });
       } catch (error: unknown) {

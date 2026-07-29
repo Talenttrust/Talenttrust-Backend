@@ -13,6 +13,8 @@ import { rateLimitConfig } from '../config/rateLimit';
 import { authRateLimitKeyFn } from '../auth/rateLimitKey';
 import { z } from 'zod';
 import { reputationIdempotencyMiddleware } from '../middleware/reputationIdempotency';
+import { randomUUID } from 'crypto';
+import { requestContextStore } from '../middleware/requestContext';
 
 const router = Router();
 const reputationLimiter = createRateLimiter({
@@ -22,6 +24,27 @@ const reputationLimiter = createRateLimiter({
 
 // Dedicated per-client limiter. Keys are namespaced because the store is shared.
 router.use(reputationLimiter);
+
+// Local middleware to accept/generate correlation ID for all reputation requests
+router.use((req, res, next) => {
+  if (!res.locals.correlationId) {
+    const generatedId = `rep-${randomUUID()}`;
+    res.locals.correlationId = generatedId;
+    res.setHeader('x-correlation-id', generatedId);
+
+    // Update ALS store context if it is active
+    const store = requestContextStore.getStore();
+    if (store) {
+      store.correlationId = generatedId;
+    }
+
+    // Re-bind res.locals.log with the new correlation ID context
+    if (res.locals.log && typeof res.locals.log.child === 'function') {
+      res.locals.log = res.locals.log.child({ correlationId: generatedId });
+    }
+  }
+  next();
+});
 
 // ── Authentication guard — all reputation routes require a valid JWT ──────────
 router.use(requireAuth);

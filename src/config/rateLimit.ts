@@ -298,6 +298,20 @@ export const rateLimitConfig = {
   } satisfies RateLimiterConfig,
 
   /**
+   * Reputation tier: rate limits on reputation queries and mutations.
+   */
+  reputation: {
+    maxRequests: toCount(process.env.RL_REPUTATION_MAX, 100),
+    windowMs: toMs(process.env.RL_REPUTATION_WINDOW_MS, 60_000),
+    abuseThreshold: toCount(process.env.RL_REPUTATION_ABUSE_THRESHOLD, 5),
+    blockWindowMs: toMs(process.env.RL_BLOCK_WINDOW_MS, 300_000),
+    blockDurationMs: toMs(process.env.RL_BLOCK_DURATION_MS, 600_000),
+    maxBlockDurationMs: toMs(process.env.RL_MAX_BLOCK_MS, 86_400_000),
+    sendHeaders: true,
+    ...sharedStore,
+  } satisfies RateLimiterConfig,
+
+  /**
    * Webhook token bucket configuration for rate limiting outbound webhook deliveries.
    */
   webhook: {

@@ -140,6 +140,7 @@ describe('createRatingBodyToPayload', () => {
       reviewerId: 'reviewer-1',
       rating: 4,
       comment: 'Solid work',
+      contextId: '550e8400-e29b-41d4-a716-446655440000',
     });
   });
 
@@ -156,10 +157,11 @@ describe('createRatingBodyToPayload', () => {
     expect(result).toEqual({
       reviewerId: 'reviewer-1',
       rating: 5,
+      contextId: '550e8400-e29b-41d4-a716-446655440000',
     });
   });
 
-  it('does not include contextId in the payload', () => {
+  it('includes contextId in the payload', () => {
     const dto: CreateRatingBodyDTO = {
       reviewerId: 'reviewer-1',
       contextId: '550e8400-e29b-41d4-a716-446655440000',
@@ -168,7 +170,7 @@ describe('createRatingBodyToPayload', () => {
 
     const result = createRatingBodyToPayload(dto);
 
-    expect(result).not.toHaveProperty('contextId');
+    expect(result.contextId).toBe('550e8400-e29b-41d4-a716-446655440000');
     expect(result).not.toHaveProperty('jobCompleted');
   });
 });

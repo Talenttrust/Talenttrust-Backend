@@ -22,7 +22,7 @@ const adminToken = jwt.sign(
 // Contract keys — tests fail on unexpected extra or missing fields
 // ---------------------------------------------------------------------------
 
-const SUCCESS_ENVELOPE_KEYS = ['status', 'data'] as const;
+const SUCCESS_ENVELOPE_KEYS = ['status', 'data', 'correlationId'] as const;
 
 const PROFILE_KEYS = [
   'freelancerId',
@@ -41,11 +41,13 @@ const REVIEW_KEYS_NO_COMMENT = ['reviewerId', 'rating', 'createdAt'] as const;
 
 const ERROR_ENVELOPE_KEYS = ['error'] as const;
 
-const ERROR_BODY_KEYS = ['code', 'message', 'requestId'] as const;
+const ERROR_BODY_KEYS = ['code', 'message', 'requestId', 'correlationId'] as const;
 
 const VALIDATION_ERROR_DETAIL_KEYS = ['path', 'message', 'code'] as const;
 
 const STATUS_ERROR_KEYS = ['status', 'message'] as const;
+
+const mockNext = jest.fn();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -307,6 +309,10 @@ describe('Reputation response contract — PUT /:id success envelope', () => {
     `);
   });
 
+  beforeEach(() => {
+    db.exec('DELETE FROM reputation_entries');
+  });
+
   it('PUT success returns envelope with exactly { status, data }', async () => {
     const res = await request(app)
       .put(`/api/v1/reputation/${putTarget}`)
@@ -456,7 +462,10 @@ describe('Reputation response contract — controller error shapes', () => {
     const statusMock = jest.fn().mockReturnValue({ json: jsonMock });
     const res = {
       status: statusMock,
-      locals: { requestId: 'contract-test-req-id' },
+      locals: {
+        requestId: 'contract-test-req-id',
+        correlationId: 'contract-test-corr-id',
+      },
     } as unknown as Response;
     return { res, statusMock, jsonMock };
   }
@@ -470,7 +479,7 @@ describe('Reputation response contract — controller error shapes', () => {
       const { res, statusMock, jsonMock } = makeRes();
       await ReputationController.getProfile(
         { params: { id: 'x' } } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(500);
@@ -494,7 +503,7 @@ describe('Reputation response contract — controller error shapes', () => {
       const { res, statusMock, jsonMock } = makeRes();
       await ReputationController.getProfile(
         { params: { id: '' } } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(400);
@@ -516,7 +525,7 @@ describe('Reputation response contract — controller error shapes', () => {
           params: { id: 'x' },
           body: { rating: 'invalid' },
         } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(400);
@@ -528,8 +537,8 @@ describe('Reputation response contract — controller error shapes', () => {
   });
 
   describe('createRating — 403 ForbiddenError', () => {
-    it('returns { status, message } with no extra fields', async () => {
-      jest.spyOn(ReputationService, 'getProfile').mockImplementation(() => {
+    it('returns { error: { code, message, requestId } } with no extra fields', async () => {
+      jest.spyOn(ReputationService as any, 'updateProfile').mockImplementation(() => {
         throw new ForbiddenError('Users cannot rate themselves');
       });
 
@@ -539,22 +548,23 @@ describe('Reputation response contract — controller error shapes', () => {
           params: { id: 'x' },
           body: { reviewerId: 'r1', rating: 3, contextId: 'ctx' },
         } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(403);
       const body = jsonMock.mock.calls[0][0];
-      expectExactKeys(body, [...STATUS_ERROR_KEYS]);
-      expect(body.status).toBe('error');
-      expect(body.message).toBe('Users cannot rate themselves');
+      expectExactKeys(body, [...ERROR_ENVELOPE_KEYS]);
+      expectExactKeys(body.error, [...ERROR_BODY_KEYS]);
+      expect(body.error.code).toBe('forbidden');
+      expect(body.error.message).toBe('Users cannot rate themselves');
 
       jest.restoreAllMocks();
     });
   });
 
   describe('createRating — 409 ConflictError', () => {
-    it('returns { status, message } with no extra fields', async () => {
-      jest.spyOn(ReputationService, 'getProfile').mockImplementation(() => {
+    it('returns { error: { code, message, requestId } } with no extra fields', async () => {
+      jest.spyOn(ReputationService as any, 'updateProfile').mockImplementation(() => {
         throw new ConflictError('Rating already exists');
       });
 
@@ -564,22 +574,23 @@ describe('Reputation response contract — controller error shapes', () => {
           params: { id: 'x' },
           body: { reviewerId: 'r1', rating: 3, contextId: 'ctx' },
         } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(409);
       const body = jsonMock.mock.calls[0][0];
-      expectExactKeys(body, [...STATUS_ERROR_KEYS]);
-      expect(body.status).toBe('error');
-      expect(body.message).toBe('Rating already exists');
+      expectExactKeys(body, [...ERROR_ENVELOPE_KEYS]);
+      expectExactKeys(body.error, [...ERROR_BODY_KEYS]);
+      expect(body.error.code).toBe('conflict');
+      expect(body.error.message).toBe('Rating already exists');
 
       jest.restoreAllMocks();
     });
   });
 
   describe('createRating — 422 ValidationError', () => {
-    it('returns { status, message } with no extra fields', async () => {
-      jest.spyOn(ReputationService, 'getProfile').mockImplementation(() => {
+    it('returns { error: { code, message, requestId } } with no extra fields', async () => {
+      jest.spyOn(ReputationService as any, 'updateProfile').mockImplementation(() => {
         throw new ValidationError('Comment contains spam');
       });
 
@@ -589,22 +600,23 @@ describe('Reputation response contract — controller error shapes', () => {
           params: { id: 'x' },
           body: { reviewerId: 'r1', rating: 3, contextId: 'ctx' },
         } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(422);
       const body = jsonMock.mock.calls[0][0];
-      expectExactKeys(body, [...STATUS_ERROR_KEYS]);
-      expect(body.status).toBe('error');
-      expect(body.message).toBe('Comment contains spam');
+      expectExactKeys(body, [...ERROR_ENVELOPE_KEYS]);
+      expectExactKeys(body.error, [...ERROR_BODY_KEYS]);
+      expect(body.error.code).toBe('validation_error');
+      expect(body.error.message).toBe('Comment contains spam');
 
       jest.restoreAllMocks();
     });
   });
 
   describe('createRating — 500 unknown error', () => {
-    it('returns { status, message } with no extra fields', async () => {
-      jest.spyOn(ReputationService, 'getProfile').mockImplementation(() => {
+    it('returns { error: { code, message, requestId } } with no extra fields', async () => {
+      jest.spyOn(ReputationService as any, 'updateProfile').mockImplementation(() => {
         throw new Error('Unexpected failure');
       });
 
@@ -614,14 +626,15 @@ describe('Reputation response contract — controller error shapes', () => {
           params: { id: 'x' },
           body: { reviewerId: 'r1', rating: 3, contextId: 'ctx' },
         } as unknown as Request,
-        res,
+        res
       );
 
       expect(statusMock).toHaveBeenCalledWith(500);
       const body = jsonMock.mock.calls[0][0];
-      expectExactKeys(body, [...STATUS_ERROR_KEYS]);
-      expect(body.status).toBe('error');
-      expect(body.message).toBe('Internal server error');
+      expectExactKeys(body, [...ERROR_ENVELOPE_KEYS]);
+      expectExactKeys(body.error, [...ERROR_BODY_KEYS]);
+      expect(body.error.code).toBe('internal_error');
+      expect(body.error.message).toBe('An unexpected error occurred');
 
       jest.restoreAllMocks();
     });

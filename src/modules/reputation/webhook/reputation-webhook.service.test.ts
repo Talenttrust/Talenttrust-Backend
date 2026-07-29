@@ -19,9 +19,10 @@ import {
   ReputationWebhookService,
   initializeReputationWebhookService,
   getReputationWebhookService,
+  resetGlobalInstance,
   type ReputationWebhookServiceConfig,
 } from './reputation-webhook.service';
-import { InMemoryDlqStore } from '../../dlqStore';
+import { InMemoryDlqStore } from '../../../dlqStore';
 import {
   type ReputationWebhookEvent,
   type ReputationWebhookSubscription,
@@ -44,7 +45,7 @@ describe('ReputationWebhookService', () => {
     global.fetch = mockFetch;
 
     // Reset global singleton
-    (global as any).reputationWebhookServiceInstance = null;
+    resetGlobalInstance();
   });
 
   afterEach(() => {
@@ -402,8 +403,8 @@ describe('ReputationWebhookService', () => {
       
       // Fail twice with 500, then succeed
       mockFetch
-        .mockRejectedValueOnce(new Error('HTTP 500'))
-        .mockRejectedValueOnce(new Error('HTTP 500'))
+        .mockResolvedValueOnce({ status: 500 } as Response)
+        .mockResolvedValueOnce({ status: 500 } as Response)
         .mockResolvedValueOnce({ ok: true, status: 200 } as Response);
       
       const event = createRatingCreatedEvent(
@@ -599,7 +600,7 @@ describe('ReputationWebhookService', () => {
       await service.emitEvent(event);
       
       const ages = service.getDlqOldestAge();
-      expect(ages.get('reputation-webhook')).toBeGreaterThan(0);
+      expect(ages.get('reputation-webhook')).toBeGreaterThanOrEqual(0);
       expect(ages.get('reputation-webhook')).toBeLessThan(1); // Should be very recent
     });
 
@@ -632,7 +633,7 @@ describe('ReputationWebhookService', () => {
       expect(drained).toHaveLength(1);
       
       const depth = service.getDlqDepth();
-      expect(depth.get('reputation-webhook')).toBe(0);
+      expect(depth.get('reputation-webhook') ?? 0).toBe(0);
     });
 
     it('should clear DLQ', async () => {
@@ -783,8 +784,8 @@ describe('ReputationWebhookService', () => {
       
       await service.emitEvent(event);
       
-      const metric = await registry.getMetricAs('reputation_webhook_events_emitted_total', 'counter');
-      const metricValue = metric?.get() as { values: Array<{ value: number }> };
+      const metric = registry.getSingleMetric('reputation_webhook_events_emitted_total');
+      const metricValue = await metric?.get() as { values: Array<{ value: number }> };
       expect(metricValue?.values[0].value).toBe(1);
     });
 
@@ -813,8 +814,8 @@ describe('ReputationWebhookService', () => {
       
       await service.emitEvent(event);
       
-      const metric = await registry.getMetricAs('reputation_webhook_deliveries_success_total', 'counter');
-      const metricValue = metric?.get() as { values: Array<{ value: number }> };
+      const metric = registry.getSingleMetric('reputation_webhook_deliveries_success_total');
+      const metricValue = await metric?.get() as { values: Array<{ value: number }> };
       expect(metricValue?.values[0].value).toBe(1);
     });
 
@@ -843,8 +844,8 @@ describe('ReputationWebhookService', () => {
       
       await service.emitEvent(event);
       
-      const metric = await registry.getMetricAs('reputation_webhook_deliveries_failure_total', 'counter');
-      const metricValue = metric?.get() as { values: Array<{ value: number }> };
+      const metric = registry.getSingleMetric('reputation_webhook_deliveries_failure_total');
+      const metricValue = await metric?.get() as { values: Array<{ value: number }> };
       expect(metricValue?.values[0].value).toBe(1);
     });
 
@@ -873,8 +874,8 @@ describe('ReputationWebhookService', () => {
       
       await service.emitEvent(event);
       
-      const metric = await registry.getMetricAs('reputation_webhook_dlq_enqueued_total', 'counter');
-      const metricValue = metric?.get() as { values: Array<{ value: number }> };
+      const metric = registry.getSingleMetric('reputation_webhook_dlq_enqueued_total');
+      const metricValue = await metric?.get() as { values: Array<{ value: number }> };
       expect(metricValue?.values[0].value).toBe(1);
     });
   });

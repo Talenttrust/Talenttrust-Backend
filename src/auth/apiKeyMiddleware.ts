@@ -26,9 +26,23 @@ export interface ApiKeyAuthenticatedRequest extends Request {
 }
 
 /**
- * Express middleware that extracts and validates the API key.
- * On success, attaches `req.apiKey` with the key info.
- * On failure, responds with 401.
+ * Express middleware that extracts and validates the API key from the
+ * `X-API-Key` request header.
+ *
+ * On success, attaches `req.apiKey` with the resolved {@link ApiKeyInfo} and
+ * delegates to `next()`.
+ *
+ * Error paths (never leak internal detail):
+ * - **401** — `X-API-Key` header is absent.
+ * - **401** — Header is present but `validateApiKey` returns `null`
+ *   (unknown key, wrong hash, expired, or deactivated).
+ * - **500** — `validateApiKey` rejects unexpectedly (e.g. database error).
+ *   The raw error is written to `console.error` only; the response body
+ *   contains only `{ error: 'Internal server error' }`.
+ *
+ * @param req  - Express request (extended with optional `apiKey` field).
+ * @param res  - Express response.
+ * @param next - Express next function; called only on successful validation.
  */
 export function authenticateApiKey(
   req: ApiKeyAuthenticatedRequest,
@@ -62,8 +76,20 @@ export function authenticateApiKey(
 /**
  * Factory that returns Express middleware enforcing a specific API key scope.
  *
- * @param resource - The resource being accessed.
- * @param action   - The action being performed.
+ * Scope matching rules (evaluated in order):
+ * 1. **Exact match** — e.g. `contracts:read` satisfies `contracts:read`.
+ * 2. **Wildcard action** — e.g. `contracts:*` satisfies `contracts:read`.
+ * 3. **Wildcard resource** — e.g. `*:read` satisfies `contracts:read`.
+ * 4. **Full wildcard** — `*` satisfies any scope.
+ *
+ * Error paths:
+ * - **401** — `req.apiKey` is not set (caller skipped `authenticateApiKey`).
+ * - **403** — Key is present but none of its scopes match the requirement.
+ *   The response includes `required` and `provided` for debugging by the
+ *   key owner; no internal implementation detail is exposed.
+ *
+ * @param resource - The resource being accessed (e.g. `'contracts'`).
+ * @param action   - The action being performed (e.g. `'read'`).
  * @returns Express middleware function.
  */
 export function requireApiKeyScope(resource: string, action: string) {
@@ -104,8 +130,22 @@ export function requireApiKeyScope(resource: string, action: string) {
 }
 
 /**
- * Middleware that requires either JWT authentication OR API key authentication.
- * This is useful for endpoints that should be accessible by both users and internal services.
+ * Middleware that accepts either JWT Bearer token OR API key authentication.
+ *
+ * Resolution order:
+ * 1. If `Authorization: Bearer <token>` is present, delegates entirely to
+ *    {@link authenticateMiddleware} (JWT path). `req.user` is populated on
+ *    success.
+ * 2. If `X-API-Key` is present (without a Bearer header), delegates to
+ *    {@link authenticateApiKey}. `req.apiKey` is populated on success.
+ * 3. If neither credential is provided, responds immediately with **401**.
+ *
+ * Use this on endpoints that must be accessible by both human users (JWT) and
+ * automated internal services (API key).
+ *
+ * @param req  - Express request supporting both `user` and `apiKey` fields.
+ * @param res  - Express response.
+ * @param next - Called by the delegated middleware on success.
  */
 export function authenticateEither(
   req: any, // Using any to support both AuthenticatedRequest and ApiKeyAuthenticatedRequest

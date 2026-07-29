@@ -1,9 +1,9 @@
-import type { Contract, ContractStatus } from '../../../db/types';
-import type {
-  CreateContractDto,
-  UpdateContractDto,
-} from './contract.dto';
-import { assertResponseSchema, contractResponseSchema } from './contract-response.dto';
+import type { Contract, ContractStatus } from "../../../db/types";
+import type { CreateContractDto, UpdateContractDto } from "./contract.dto";
+import {
+  assertResponseSchema,
+  contractResponseSchema,
+} from "./contract-response.dto";
 
 export interface ContractMilestoneDto {
   title: string;
@@ -47,6 +47,7 @@ export interface ContractResponseDto {
   status: ContractStatus;
   createdAt: string;
   version: number;
+  deletedAt?: string | null;
 }
 
 /**
@@ -109,6 +110,13 @@ export function toUpdateContractDto(
  * (500) instead of silently changing the API's outgoing shape.
  */
 export function toContractResponseDto(contract: Contract): ContractResponseDto {
+  const createdAtStr =
+    contract.createdAt instanceof Date
+      ? contract.createdAt.toISOString()
+      : typeof contract.createdAt === "string"
+        ? contract.createdAt
+        : new Date(contract.createdAt ?? Date.now()).toISOString();
+
   return assertResponseSchema<ContractResponseDto>(
     contractResponseSchema,
     {
@@ -118,10 +126,11 @@ export function toContractResponseDto(contract: Contract): ContractResponseDto {
       freelancerId: contract.freelancerId,
       amount: contract.amount,
       status: contract.status,
-      createdAt: contract.createdAt,
+      createdAt: createdAtStr,
       version: contract.version,
+      deletedAt: contract.deletedAt ?? null,
     },
-    'Contract',
+    "Contract",
   );
 }
 
@@ -139,6 +148,7 @@ export function fromContractResponseDto(dto: ContractResponseDto): Contract {
     status: dto.status,
     createdAt: dto.createdAt,
     version: dto.version,
+    deletedAt: dto.deletedAt ?? null,
   };
 }
 
@@ -146,7 +156,7 @@ export function fromContractResponseDto(dto: ContractResponseDto): Contract {
 
 export interface BulkMilestoneOperationResult {
   index: number;
-  status: 'success' | 'error';
+  status: "success" | "error";
   contractId?: string;
   error?: {
     code: string;

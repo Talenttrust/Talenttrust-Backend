@@ -7,7 +7,7 @@
  * with retry/backoff and dead-letter queue handling.
  */
 
-import { Registry } from 'prom-client';
+import { Registry, Counter } from 'prom-client';
 import { v4 as uuidv4 } from 'uuid';
 import {
   WebhookDeliveryService,
@@ -73,11 +73,11 @@ export class ReputationWebhookService {
   private readonly dlqStore: DlqStore;
   private readonly subscriptions = new Map<string, ReputationWebhookSubscription>();
   private readonly metrics: {
-    eventsEmittedTotal: ReturnType<Registry['counter']>;
-    deliveriesTotal: ReturnType<Registry['counter']>;
-    deliveriesSuccessTotal: ReturnType<Registry['counter']>;
-    deliveriesFailureTotal: ReturnType<Registry['counter']>;
-    dlqEnqueuedTotal: ReturnType<Registry['counter']>;
+    eventsEmittedTotal: Counter<string>;
+    deliveriesTotal: Counter<string>;
+    deliveriesSuccessTotal: Counter<string>;
+    deliveriesFailureTotal: Counter<string>;
+    dlqEnqueuedTotal: Counter<string>;
   };
 
   constructor(config: ReputationWebhookServiceConfig) {
@@ -92,34 +92,39 @@ export class ReputationWebhookService {
     );
 
     // Initialize metrics
-    const eventsEmittedTotal = config.registry.createCounter({
+    const eventsEmittedTotal = new Counter({
       name: 'reputation_webhook_events_emitted_total',
       help: 'Total number of reputation webhook events emitted',
-      labelNames: ['event_type'],
+      labelNames: ['event_type'] as const,
+      registers: [config.registry],
     });
 
-    const deliveriesTotal = config.registry.createCounter({
+    const deliveriesTotal = new Counter({
       name: 'reputation_webhook_deliveries_total',
       help: 'Total number of reputation webhook delivery attempts',
-      labelNames: ['subscription_id', 'event_type'],
+      labelNames: ['subscription_id', 'event_type'] as const,
+      registers: [config.registry],
     });
 
-    const deliveriesSuccessTotal = config.registry.createCounter({
+    const deliveriesSuccessTotal = new Counter({
       name: 'reputation_webhook_deliveries_success_total',
       help: 'Total number of successful reputation webhook deliveries',
-      labelNames: ['subscription_id', 'event_type'],
+      labelNames: ['subscription_id', 'event_type'] as const,
+      registers: [config.registry],
     });
 
-    const deliveriesFailureTotal = config.registry.createCounter({
+    const deliveriesFailureTotal = new Counter({
       name: 'reputation_webhook_deliveries_failure_total',
       help: 'Total number of failed reputation webhook deliveries',
-      labelNames: ['subscription_id', 'event_type', 'reason'],
+      labelNames: ['subscription_id', 'event_type', 'reason'] as const,
+      registers: [config.registry],
     });
 
-    const dlqEnqueuedTotal = config.registry.createCounter({
+    const dlqEnqueuedTotal = new Counter({
       name: 'reputation_webhook_dlq_enqueued_total',
       help: 'Total number of reputation webhook events enqueued to DLQ',
-      labelNames: ['subscription_id', 'event_type'],
+      labelNames: ['subscription_id', 'event_type'] as const,
+      registers: [config.registry],
     });
 
     this.metrics = {
@@ -363,11 +368,12 @@ export class ReputationWebhookService {
   private async handleDlqEntry(entry: DLQEntry): Promise<void> {
     // Convert webhook delivery DLQ entry to reputation DLQ entry
     const dlqEntry = {
-      providerId: entry.provider,
+      providerId: 'reputation-webhook',
       deliveryId: uuidv4(),
       targetUrl: entry.url,
       payload: entry.body,
       timestamp: entry.attemptedAt,
+      attemptCount: entry.finalAttemptNumber,
     };
 
     this.dlqStore.push(dlqEntry);
@@ -455,4 +461,11 @@ export function getReputationWebhookService(): ReputationWebhookService {
     throw new Error('ReputationWebhookService not initialized. Call initializeReputationWebhookService first.');
   }
   return globalInstance;
+}
+
+/**
+ * Reset the global reputation webhook service instance (for testing).
+ */
+export function resetGlobalInstance(): void {
+  globalInstance = null;
 }

@@ -76,7 +76,10 @@ describe("ContractRepository.create", () => {
   });
 
   it("uses the provided status when given", async () => {
-    const contract = await contractRepo.create({ ...baseData(), status: "active" });
+    const contract = await contractRepo.create({
+      ...baseData(),
+      status: "active",
+    });
     expect(contract.status).toBe("active");
   });
 
@@ -151,16 +154,85 @@ describe("ContractRepository.findByClientId", () => {
   });
 });
 
-describe("ContractRepository.delete", () => {
-  it("returns true and removes the contract", async () => {
+describe("ContractRepository.delete and soft-delete", () => {
+  it("returns true and soft-deletes the contract (hidden from default reads)", async () => {
     const created = await contractRepo.create(baseData());
     const result = await contractRepo.delete(created.id);
     expect(result).toBe(true);
     expect(await contractRepo.findById(created.id)).toBeUndefined();
+
+    const deletedRecord = await contractRepo.findById(created.id, {
+      includeDeleted: true,
+    });
+    expect(deletedRecord).toBeDefined();
+    expect(deletedRecord?.deletedAt).toBeTruthy();
   });
 
-  it("returns false for a non-existent id", async () => {
+  it("returns false for a non-existent id or already deleted id", async () => {
     expect(await contractRepo.delete("ghost-id")).toBe(false);
+    const created = await contractRepo.create(baseData());
+    await contractRepo.delete(created.id);
+    expect(await contractRepo.delete(created.id)).toBe(false);
+  });
+
+  it("restore within retention window makes the contract active again", async () => {
+    const created = await contractRepo.create(baseData());
+    const deleteTime = new Date("2026-01-01T00:00:00.000Z");
+    await contractRepo.delete(created.id, deleteTime);
+
+    const restoreTime = new Date("2026-01-10T00:00:00.000Z");
+    const restored = await contractRepo.restore(created.id, restoreTime, 30);
+    expect(restored.deletedAt).toBeNull();
+    expect(await contractRepo.findById(created.id)).toBeDefined();
+  });
+
+  it("restore past retention window throws SoftDeleteRetentionError", async () => {
+    const created = await contractRepo.create(baseData());
+    const deleteTime = new Date("2026-01-01T00:00:00.000Z");
+    await contractRepo.delete(created.id, deleteTime);
+
+    const restoreTime = new Date("2026-03-01T00:00:00.000Z");
+    await expect(
+      contractRepo.restore(created.id, restoreTime, 30),
+    ).rejects.toThrow(/retention window/i);
+  });
+
+  it("purgeExpired hard-deletes contracts older than retention window", async () => {
+    const keep = await contractRepo.create({
+      ...baseData(),
+      title: "Keep Active",
+    });
+    const expiredTarget = await contractRepo.create({
+      ...baseData(),
+      title: "Expired",
+    });
+    const recentTarget = await contractRepo.create({
+      ...baseData(),
+      title: "Recent Soft Deleted",
+    });
+
+    await contractRepo.delete(
+      expiredTarget.id,
+      new Date("2025-01-01T00:00:00.000Z"),
+    );
+    await contractRepo.delete(
+      recentTarget.id,
+      new Date("2026-07-01T00:00:00.000Z"),
+    );
+
+    const purged = await contractRepo.purgeExpired(
+      new Date("2026-07-20T00:00:00.000Z"),
+      30,
+    );
+    expect(purged).toBe(1);
+
+    expect(await contractRepo.findById(keep.id)).toBeDefined();
+    expect(
+      await contractRepo.findById(recentTarget.id, { includeDeleted: true }),
+    ).toBeDefined();
+    expect(
+      await contractRepo.findById(expiredTarget.id, { includeDeleted: true }),
+    ).toBeUndefined();
   });
 });
 
@@ -188,7 +260,11 @@ describe("ContractRepository.updateWithVersion (OCC)", () => {
     const created = await contractRepo.create(baseData());
     expect(created.version).toBe(0);
 
-    await contractRepo.updateWithVersion(created.id, { title: "First Update" }, 0);
+    await contractRepo.updateWithVersion(
+      created.id,
+      { title: "First Update" },
+      0,
+    );
 
     await expect(
       contractRepo.updateWithVersion(created.id, { title: "Second Update" }, 0),

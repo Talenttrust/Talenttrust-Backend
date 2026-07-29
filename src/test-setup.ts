@@ -53,4 +53,11 @@ process.env.STELLAR_HORIZON_URL = 'https://horizon-testnet.stellar.org';
 process.env.SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org';
 process.env.STELLAR_RPC_URL = 'https://rpc-testnet.stellar.org';
 process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+process.env.REPUTATION_ENABLED = 'true';
+
+// Mock uuid using native crypto.randomUUID to bypass Jest ESM parser issues
+import { randomUUID } from 'crypto';
+jest.mock('uuid', () => ({
+  v4: jest.fn().mockImplementation(() => randomUUID()),
+}));
 

@@ -24,9 +24,9 @@
  *   restricted filesystem permissions (chmod 600).
  */
 
-import { getDb } from '../db/database';
-import { redactPayload } from '../utils/redact';
-import type Database from '../db/betterSqlite3';
+import { getDb } from './db/database';
+import { redactPayload } from './utils/redact';
+import type Database from './db/betterSqlite3';
 import type * as BetterSqlite3 from 'better-sqlite3';
 
 // ---------------------------------------------------------------------------

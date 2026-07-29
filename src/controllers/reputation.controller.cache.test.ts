@@ -21,14 +21,18 @@ jest.mock('../services/reputation.service');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function makeRes(): { res: Partial<Response>; statusMock: jest.Mock; jsonMock: jest.Mock } {
+function makeRes(): { res: Partial<Response>; statusMock: jest.Mock; jsonMock: jest.Mock; nextMock: jest.Mock } {
   const jsonMock = jest.fn();
   const statusMock = jest.fn().mockReturnValue({ json: jsonMock });
-  const res: Partial<Response> = {
+  const nextMock = jest.fn();
+  const res = {
     status: statusMock,
-    locals: { requestId: 'test-req-id' },
+    locals: {
+      requestId: 'test-req-id',
+      correlationId: 'test-corr-id',
+    },
   } as unknown as Response;
-  return { res, statusMock, jsonMock };
+  return { res, statusMock, jsonMock, nextMock };
 }
 
 function makeGetReq(id = 'user-1'): Partial<Request> {
@@ -91,7 +95,7 @@ describe('ReputationController.getProfile — cold cache', () => {
     await ReputationController.getProfile(makeGetReq() as Request, res as Response);
 
     expect(statusMock).toHaveBeenCalledWith(200);
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p });
+    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p, correlationId: 'test-corr-id' });
   });
 
   it('populates the cache after the first miss', async () => {
@@ -143,7 +147,7 @@ describe('ReputationController.getProfile — cache hit', () => {
     await ReputationController.getProfile(makeGetReq() as Request, r2 as Response);
 
     expect(statusMock).toHaveBeenCalledWith(200);
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p });
+    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p, correlationId: 'test-corr-id' });
   });
 
   it('hit metric increments on second request', async () => {
@@ -177,7 +181,7 @@ describe('ReputationController.getProfile — cache hit', () => {
     const { res: r3, jsonMock } = makeRes();
     await ReputationController.getProfile(makeGetReq('user-1') as Request, r3 as Response);
     expect(ReputationService.getProfile).not.toHaveBeenCalled();
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p1 });
+    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p1, correlationId: 'test-corr-id' });
   });
 });
 
@@ -246,7 +250,7 @@ describe('ReputationController.createRating — cache invalidation', () => {
     // Second GET — cache is cold again, must call service
     const { res: r2, jsonMock } = makeRes();
     await ReputationController.getProfile(makeGetReq() as Request, r2 as Response);
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p2 });
+    expect(jsonMock).toHaveBeenCalledWith({ status: 'success', data: p2, correlationId: 'test-corr-id' });
   });
 
   it('invalidation is a no-op when no profile was cached (no error)', async () => {
@@ -303,7 +307,14 @@ describe('ReputationController.createRating — cache invalidation', () => {
     const { res, statusMock, jsonMock } = makeRes();
     await ReputationController.createRating(makeWriteReq() as Request, res as Response);
     expect(statusMock).toHaveBeenCalledWith(418);
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'error', message: "I'm a teapot" });
+    expect(jsonMock).toHaveBeenCalledWith({
+      error: {
+        code: 'teapot',
+        message: "I'm a teapot",
+        requestId: 'test-req-id',
+        correlationId: 'test-corr-id',
+      },
+    });
   });
 
   it('returns 500 for an unknown error thrown from service', async () => {
@@ -313,7 +324,14 @@ describe('ReputationController.createRating — cache invalidation', () => {
     const { res, statusMock, jsonMock } = makeRes();
     await ReputationController.createRating(makeWriteReq() as Request, res as Response);
     expect(statusMock).toHaveBeenCalledWith(500);
-    expect(jsonMock).toHaveBeenCalledWith({ status: 'error', message: 'Internal server error' });
+    expect(jsonMock).toHaveBeenCalledWith({
+      error: {
+        code: 'internal_error',
+        message: 'An unexpected error occurred',
+        requestId: 'test-req-id',
+        correlationId: 'test-corr-id',
+      },
+    });
   });
 });
 

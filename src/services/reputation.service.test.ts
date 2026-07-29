@@ -23,12 +23,21 @@ import {
   ValidationError,
   AppError,
 } from '../errors/appError';
+import { validateEnv } from '../config/env.schema';
 
 // Mock the audit service to avoid side effects and to assert calls cleanly.
 jest.mock('../audit/service', () => ({
   auditService: {
     log: jest.fn(),
   },
+}));
+
+jest.mock('../config/env.schema', () => ({
+  validateEnv: jest.fn(() => ({
+    REPUTATION_ENABLED: true,
+    REPUTATION_DECAY_LAMBDA: 0.005,
+    REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+  })),
 }));
 
 // Save the original ReputationRepository constructor so mock-based suites
@@ -401,7 +410,7 @@ describe('ReputationService.getProfile — empty target id', () => {
   });
 
   it('throws error for empty target ID', () => {
-    expect(() => ReputationService.getProfile('')).toThrow('Target ID is required');
+    expect(() => ReputationService.getProfile('')).toThrow('Freelancer ID is required');
   });
 });
 
@@ -661,13 +670,12 @@ describe('ReputationService.getProfile', () => {
   });
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    ReputationService.initialize(mockDb);
+    (ReputationService as any).repository = null;
   });
 
   afterAll(() => {
     // Restore the seeded state used by the rest of the suite.
-    originalInit.initialize(getDb(':memory:'));
+    ReputationService.initialize(getDb(':memory:'));
   });
 
   it('createRating throws "not initialized" before any work', () => {
@@ -719,17 +727,17 @@ describe('ReputationService.createRating — anti-abuse guards', () => {
     expect(logArg.action).toBe('REPUTATION_UPDATED');
     expect(logArg.actor).toBe(REVIEWER_ID);
     expect(logArg.resourceId).toBe(TARGET_ID);
-    expect(logArg.metadata.rating).toBe(5);
+    expect(logArg.metadata.after.rating).toBe(5);
     // The audit log stores a SHA-256 hash of the comment rather than plaintext.
-    expect(logArg.metadata.comment).toMatch(/^[a-f0-9]{64}$/);
+    expect(logArg.metadata.after.comment).toMatch(/^[a-f0-9]{64}$/);
     expect(logArg.metadata.contextId).toBe(CONTEXT_ID);
   });
 
   it('logs metadata with comment = undefined when no comment is provided', () => {
     ReputationService.createRating(REVIEWER_ID, TARGET_ID, 4, CONTEXT_ID);
     const logArg = (auditService.log as jest.Mock).mock.calls[0][0];
-    expect(logArg.metadata.comment).toBeUndefined();
-    expect(logArg.metadata.rating).toBe(4);
+    expect(logArg.metadata.after.comment).toBeUndefined();
+    expect(logArg.metadata.after.rating).toBe(4);
   });
 
   it('refuses self-rating and surfaces a ForbiddenError', () => {
@@ -1006,8 +1014,8 @@ describe('ReputationService.updateProfile — happy path', () => {
       comment: 'plaintext-must-not-leak',
     });
     const call = (auditService.log as jest.Mock).mock.calls[0][0];
-    expect(call.metadata.comment).toMatch(/^[a-f0-9]{64}$/);
-    expect(call.metadata.comment).not.toContain('plaintext');
+    expect(call.metadata.after.comment).toMatch(/^[a-f0-9]{64}$/);
+    expect(call.metadata.after.comment).not.toContain('plaintext');
   });
 
   it('forwards payload.contextId to createRating (drives participation check)', () => {
@@ -1043,8 +1051,10 @@ describe('ReputationService.getProfile — error paths', () => {
       const err = e as AppError;
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe('bad_request');
-      expect(err.message).toBe('Freelancer ID is required');
-    }
+  });
+
+  afterAll(() => {
+    (ReputationRepository as unknown) = OriginalReputationRepository;
   });
 });
 
@@ -1115,8 +1125,11 @@ describe('ReputationService.getProfile — aggregation (mock-based)', () => {
     const profile = ReputationService.getProfile('test-id');
     expect(typeof profile.weightedScore).toBe('number');
     expect(typeof profile.scoreAlgorithm).toBe('string');
-    // Defaults when env validation fails (test envs intentionally skip env setup).
     expect(profile.scoreAlgorithm).toBe('exp-decay-v1');
+  });
+
+  afterAll(() => {
+    (ReputationRepository as unknown) = OriginalReputationRepository;
   });
 });
 

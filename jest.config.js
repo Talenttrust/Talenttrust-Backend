@@ -47,7 +47,7 @@ module.exports = {
   ],
   testEnvironment: 'node',
   testTimeout: 15000,
-  roots: ['<rootDir>/src'],
+  roots: ['<rootDir>/src', '<rootDir>/tests'],
   testMatch: ['**/*.test.ts'],
   collectCoverageFrom: [
     'src/**/*.ts',
