@@ -828,6 +828,8 @@ describe('PATCH /api/v1/contracts/:id — numeric range and type bounds', () => 
   });
 });
 
+}); // Close the main describe('GET /api/v1/contracts') from line 94
+
 afterAll(() => {
   closeDb();
 });

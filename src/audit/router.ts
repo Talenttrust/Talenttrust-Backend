@@ -24,15 +24,13 @@
 import { Router, Request, Response, type RequestHandler } from 'express';
 import type { ZodError } from 'zod';
 import { pipeline } from 'stream/promises';
-import { z } from 'zod';
 import compression from 'compression';
 import { auditService, AuditService } from './service';
-import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
+import { auditExportService, AuditExportService, type AuditExportResult } from './exportService';
 import type { AuditQuery } from './types';
 import { buildAuditQuerySchema, createAuditEntryBodySchema, type AuditQueryParams } from './schemas';
 import { mapZodErrorToDetails, type ValidationErrorResponse } from '../middleware/validate.middleware';
 import { idempotencyMiddleware } from '../middleware/idempotency';
-import { validateRequest } from '../middleware/validate.middleware';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
 import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
 
@@ -70,7 +68,7 @@ function buildValidationErrorResponse(requestId: string, correlationId: string |
  * filters, so the "parse, then reject" preamble lives in one place instead
  * of being repeated per-route.
  */
-function parseAuditQueryOrRespond(
+function _parseAuditQueryOrRespond(
   req: Request,
   res: Response,
   options: { defaultLimit?: number; maxLimit: number },
@@ -112,7 +110,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const accessMiddleware = options.accessMiddleware ?? [];
   const exportMiddleware = options.exportMiddleware ?? [];
   const integrityMiddleware = options.integrityMiddleware ?? [];
-  const bulkMiddleware = options.bulkMiddleware ?? [];
+  const _bulkMiddleware = options.bulkMiddleware ?? [];
 
   /**
    * POST /api/v1/audit

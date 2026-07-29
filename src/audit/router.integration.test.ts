@@ -28,8 +28,8 @@ import { AuditExportService } from './exportService';
 import { createAuditRouter } from './router';
 import { IdempotencyStore } from './idempotency';
 import { requireAuth, requireRole } from '../middleware/authorization';
-import { idempotencyMiddleware, clearIdempotencyStore } from '../middleware/idempotency';
-import { InMemoryIdempotencyStore } from '../db/idempotencyStore';
+import { idempotencyMiddleware as _idempotencyMiddleware, clearIdempotencyStore as _clearIdempotencyStore } from '../middleware/idempotency';
+import { InMemoryIdempotencyStore as _InMemoryIdempotencyStore } from '../db/idempotencyStore';
 import type { AuditEntry, CreateAuditEntryInput } from './types';
 import { encodeCursor, decodeCursor, type CursorData } from './types';
 
