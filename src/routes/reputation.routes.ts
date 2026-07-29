@@ -4,6 +4,7 @@ import { registry } from '../docs/openapi-registry';
 import {
   updateReputationSchema,
   reputationParamsSchema,
+  bulkReputationSchema,
 } from '../modules/reputation/dto/reputation.dto';
 import { validateSchema } from '../middleware/validate.middleware';
 import { createRateLimiter } from '../middleware/rateLimiter';

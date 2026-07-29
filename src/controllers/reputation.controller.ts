@@ -99,7 +99,50 @@ export class ReputationController {
       };
       res.status(200).json(response);
     } catch (error) {
-      handleControllerError(error, res);
+      sendError(res, error);
+    }
+  }
+
+  /**
+   * POST /api/v1/reputation/bulk
+   * Batch create reputation ratings with per-item partial success handling (207 status code if any item fails).
+   */
+  public static async createBulkRatings(req: Request, res: Response): Promise<void> {
+    try {
+      const items = (req.body as any)?.items;
+      const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+
+      if (!Array.isArray(items) || items.length === 0) {
+        res.status(400).json({
+          error: {
+            code: 'bad_request',
+            message: 'Request body must contain a non-empty items array',
+            requestId,
+          },
+        });
+        return;
+      }
+
+      const results = (ReputationService as any).createBulkRatings
+        ? (ReputationService as any).createBulkRatings(items)
+        : [];
+
+      const hasFailures = results.some((r: any) => !r.success);
+      const statusCode = hasFailures ? 207 : 200;
+
+      res.status(statusCode).json({
+        status: 'success',
+        data: results,
+      });
+    } catch (error) {
+      const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
+      res.status(500).json({
+        error: {
+          code: 'internal_error',
+          message: 'An unexpected error occurred',
+          requestId,
+        },
+      });
     }
   }
 }

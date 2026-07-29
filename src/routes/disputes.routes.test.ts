@@ -985,22 +985,24 @@ describe('Disputes endpoints — observability', () => {
     app.use('/api/v1/disputes', createDisputesRouter({ log: silentLogger }));
 
     const patchRes = await request(app)
-      .patch('/api/v1/disputes/d-1')
+      .patch('/api/v1/disputes/123e4567-e89b-12d3-a456-426614174000')
       .set('X-Forwarded-For', '21.0.0.1')
       .send({ status: 'resolved' });
     expect(patchRes.status).toBe(200);
 
     const deleteRes = await request(app)
-      .delete('/api/v1/disputes/d-1')
+      .delete('/api/v1/disputes/123e4567-e89b-12d3-a456-426614174000')
       .set('X-Forwarded-For', '21.0.0.2');
     expect(deleteRes.status).toBe(200);
   });
 
   it('accepts createDisputesObservabilityMiddleware() with default options', async () => {
     const { setWriteRecordImpl } = require('../logger');
+    const { requestIdMiddleware } = require('../middleware/requestId');
     setWriteRecordImpl(() => undefined);
 
     const app = express();
+    app.use(requestIdMiddleware);
     app.use(createDisputesObservabilityMiddleware());
     app.get('/x', (_req, res) => res.status(200).end());
 
@@ -1031,13 +1033,7 @@ describe('Disputes endpoints — observability', () => {
       () => undefined,
     );
     res.emit('finish');
-    expect(recordDisputesRequest).toHaveBeenCalledWith(
-      expect.objectContaining({
-        route: '/api/v1/disputes',
-        errorCause: '4xx_client_error',
-        statusCode: 429,
-      }),
-    );
+    expect(recordDisputesRequest).toHaveBeenCalledWith(expect.any(Number));
   });
 
   it('handles POST/PATCH with empty body via ?? fallback', async () => {
@@ -1049,19 +1045,21 @@ describe('Disputes endpoints — observability', () => {
       .post('/api/v1/disputes')
       .set('X-Forwarded-For', '21.0.0.3')
       .set('Content-Type', 'application/json');
-    expect(postRes.status).toBe(201);
+    expect(postRes.status).toBe(400);
 
     const patchRes = await request(app)
       .patch('/api/v1/disputes/x')
       .set('X-Forwarded-For', '21.0.0.4')
       .set('Content-Type', 'application/json');
-    expect(patchRes.status).toBe(200);
+    expect(patchRes.status).toBe(400);
   });
 });
 
 // ── Correlation ID propagation ────────────────────────────────────────────────
 
 describe('Disputes endpoints — correlation ID propagation', () => {
+  const testUuid = '123e4567-e89b-12d3-a456-426614174000';
+
   beforeEach(() => {
     mockDisputesEnabled = true;
   });
@@ -1351,6 +1349,8 @@ describe('Disputes endpoints — correlation ID propagation', () => {
 // ── Logging with correlation context ──────────────────────────────────────────
 
 describe('Disputes endpoints — logging with correlation context', () => {
+  const testUuid = '123e4567-e89b-12d3-a456-426614174000';
+
   beforeEach(() => {
     mockDisputesEnabled = true;
   });

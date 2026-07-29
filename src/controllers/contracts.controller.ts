@@ -2,7 +2,6 @@ import type { NextFunction, Request, Response } from 'express';
 import { CONTRACT_BOUNDS, ContractBoundsError } from '../contracts/bounds';
 import { parseLimit, resolveCursorQueryParam } from '../contracts/cursor.repository';
 import { CURSOR_DEFAULT_LIMIT } from '../contracts/cursor.types';
-import { parseLimit, resolveCursorQueryParam } from '../contracts/cursor.repository';
 import { NotFoundError } from '../errors/appError';
 import {
   CreateContractRequestDto,
@@ -94,39 +93,23 @@ export class ContractsController {
 
     try {
       const query = (req.query ?? {}) as Record<string, unknown>;
-      if (
-        query['page'] === undefined &&
-        (query['cursor'] !== undefined || query['limit'] !== undefined)
-      ) {
-        await this.getContractsCursor(req, res, next);
-        return;
-      }
-
-      const pagination = parsePaginationQuery(
-        query,
-      );
-      if (!pagination.ok) {
-        log.warn('contracts.getContracts: bad pagination params', { ...ctx, error: pagination.error });
-        fail(res, 'bad_request', pagination.error, 400);
-        return;
-      }
-
       let limit: number;
       try {
-        limit = parseLimit((req.query ?? {}).limit);
+        limit = parseLimit(query['limit']);
       } catch (err) {
         fail(res, 'bad_request', (err as Error).message, 400);
         return;
       }
 
-      log.info('contracts.getContracts: success', { ...ctx, total });
-      ok(res, pageItems, {
-        page,
+      const cursorResult = resolveCursorQueryParam(query['cursor']);
+      const page = await this.service.getContractsPage({
         limit,
+        cursor: cursorResult.ok ? cursorResult.cursor : undefined,
       });
 
       const items = page.data.map(toContractResponseDto);
 
+      log.info('contracts.getContracts: success', { ...ctx, count: items.length });
       ok(res, items, {
         limit: page.limit,
         nextCursor: page.nextCursor,
@@ -258,6 +241,7 @@ export class ContractsController {
     const startMs = Date.now();
     const requestId =
       typeof res.locals.requestId === 'string' ? res.locals.requestId : undefined;
+    const correlationId = getCorrelationId(res);
     const hasMilestones = Array.isArray(req.body?.milestones) && req.body.milestones.length > 0;
     const log = this.log.child({ operation: 'create', requestId, hasMilestones });
 
@@ -296,6 +280,7 @@ export class ContractsController {
     const contractId = req.params.id ?? '';
     const requestId =
       typeof res.locals.requestId === 'string' ? res.locals.requestId : undefined;
+    const correlationId = getCorrelationId(res);
     const hasMilestones = Array.isArray(req.body?.milestones) && req.body.milestones.length > 0;
     const log = this.log.child({ operation: 'update', contractId, requestId, hasMilestones });
 

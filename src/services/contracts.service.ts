@@ -8,6 +8,7 @@ import { ContractCacheService } from './contractCache.service';
 import { MAX_MILESTONES_PER_CONTRACT, MAX_CONTRACT_AMOUNT_STROOPS, validateContractBounds, ContractBoundsError } from '../contracts/bounds';
 import { NotFoundError, MissingVersionError, InvalidVersionError, VersionConflictError } from '../errors/appError';
 import { parseBoolEnv } from '../config/env';
+import { logger as log } from '../logger';
 
 /**
  * @dev Service layer for managing Freelancer Escrow Contracts.
@@ -84,7 +85,8 @@ export class ContractsService {
    * @returns The newly created contract object.
    * @throws ContractBoundsError if budget or milestone totals exceed policy limits.
    */
-  public async createContract(data: CreateContractDto): Promise<Contract> {
+  public async createContract(data: CreateContractDto, correlationId?: string): Promise<Contract> {
+    const traceCtx = correlationId ? { correlationId } : {};
     // Strip milestones when the feature flag is disabled. Validation and
     // budget-cap checks are skipped entirely — the contract is created as if
     // no milestones were supplied.

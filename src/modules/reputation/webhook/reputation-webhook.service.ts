@@ -14,8 +14,8 @@ import {
   type DeliveryPayload,
   type DLQEntry,
   createWebhookSignature,
-} from '../../webhookDelivery';
-import { InMemoryDlqStore, type DlqStore } from '../../dlqStore';
+} from '../../../webhookDelivery';
+import { InMemoryDlqStore, type DlqStore } from '../../../dlqStore';
 import {
   type ReputationWebhookEvent,
   type ReputationWebhookSubscription,

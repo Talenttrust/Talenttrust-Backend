@@ -108,7 +108,7 @@ export function createApp(options?: AppFactoryOptions): express.Application {
   app.use('/api/v1/api-keys', metricsService.trackApiKeysRequest.bind(metricsService));
   app.use('/api/v1', apiKeysRouter);
   app.use('/api/v1/contracts', createContractsRouter(metricsService));
-  app.use('/api/v1/disputes', disputesRouter);
+  app.use('/api/v1/disputes', createDisputesRouter());
   app.use('/api/v1/reputation', reputationRouter);
   app.use('/api/v1/dependency-scan', dependencyScanRouter);
   app.use('/api/v1', apiKeysRouter);

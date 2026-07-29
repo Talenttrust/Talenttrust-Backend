@@ -110,6 +110,31 @@ export const reputationProfileResponseSchema = z.object({
   scoreAlgorithm: z.string().openapi({ example: 'exp-decay-v1' }),
 });
 
+export const MAX_BULK_BATCH_SIZE = 50;
+
+export const bulkRatingItemSchema = z.object({
+  reviewerId: z.string().min(1, 'reviewerId is required'),
+  targetId: z.string().min(1, 'targetId is required'),
+  contextId: z.string().uuid('contextId must be a valid UUID'),
+  rating: z.number()
+    .finite('Rating must be a finite number')
+    .int('Rating must be an integer')
+    .min(1, 'Rating must be at least 1')
+    .max(5, 'Rating must be at most 5'),
+  comment: z.string()
+    .max(1000, 'Comment must not exceed 1000 characters')
+    .refine((val: string) => isNotSpamComment(val), 'Comment contains excessive repetitive content')
+    .optional(),
+});
+
+export const bulkReputationSchema = z.object({
+  body: z.object({
+    items: z.array(bulkRatingItemSchema)
+      .min(1, 'items array must contain at least one item')
+      .max(MAX_BULK_BATCH_SIZE, `items array must not exceed ${MAX_BULK_BATCH_SIZE} items`),
+  }),
+});
+
 /** Inferred TypeScript types from the schemas above. */
 export type ReputationParamsDto = z.infer<typeof reputationParamsSchema>;
 export type UpdateReputationDto = z.infer<typeof updateReputationSchema>;

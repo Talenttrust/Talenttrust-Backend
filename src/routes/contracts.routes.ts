@@ -219,6 +219,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     validateContractId,
     validateRequest(createMilestoneSchema),
     requireAuth,
+    contractCreateIdempotencyMiddleware(),
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.create.bind(milestonesSoftDelete),
   );
@@ -230,6 +231,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
+    contractCreateIdempotencyMiddleware(),
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.restore.bind(milestonesSoftDelete),
   );
@@ -241,6 +243,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
+    contractCreateIdempotencyMiddleware(),
     requirePermission('contracts', 'update', getContractOwnerId),
     milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
   );
@@ -287,6 +290,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     '/bulk',
     requireAuth,
     requirePermission('contracts', 'create'),
+    contractCreateIdempotencyMiddleware(),
     validateSchema(bulkCreateContractsSchema),
     bulkController.bulkCreateContracts,
   );
@@ -313,6 +317,7 @@ function createContractsRouter(metricsService?: MetricsServiceLike): Router {
     validateContractId,
     requireAuth,
     requirePermission('contracts', 'delete', getContractOwnerId),
+    contractCreateIdempotencyMiddleware(),
     controller.deleteContract,
   );
 

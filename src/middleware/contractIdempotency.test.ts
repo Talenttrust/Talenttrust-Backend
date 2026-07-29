@@ -314,7 +314,10 @@ describe('Replay: same key + same body', () => {
     const listRes = await request(app)
       .get(BASE)
       .set(auth(adminToken()));
-    expect(listRes.body.data).toHaveLength(1);
+    const items = Array.isArray(listRes.body.data)
+      ? listRes.body.data
+      : (listRes.body.data?.data ?? []);
+    expect(items).toHaveLength(1);
   });
 
   it('stores only one entry in the idempotency store after two identical requests', async () => {
@@ -453,8 +456,11 @@ describe('Conflict: same key + different body', () => {
     const listRes = await request(app)
       .get(BASE)
       .set(auth(adminToken()));
-    expect(listRes.body.data).toHaveLength(1);
-    expect(listRes.body.data[0].title).toBe('First Title');
+    const items = Array.isArray(listRes.body.data)
+      ? listRes.body.data
+      : (listRes.body.data?.data ?? []);
+    expect(items).toHaveLength(1);
+    expect(items[0].title).toBe('First Title');
   });
 
   it('409 response includes requestId', async () => {
