@@ -129,7 +129,7 @@ export class AuditExportService {
   private readonly batchSize: number;
 
   constructor(
-    private readonly service: AuditService = auditService,
+    private readonly service?: AuditService,
     options: AuditExportServiceOptions = {},
   ) {
     this.exportRoot = path.resolve(
@@ -183,7 +183,8 @@ export class AuditExportService {
     let recordCount = 0;
 
     const query: AuditQuery = { ...filters };
-    const cursor = this.service.stream(query);
+    const srv = this.service || auditService;
+    const cursor = srv.stream(query);
 
     async function* generateLines(): AsyncGenerator<string> {
       for (const entry of cursor) {
@@ -247,7 +248,8 @@ export class AuditExportService {
     let recordCount = 0;
 
     const query: AuditQuery = { ...filters };
-    const cursor = this.service.stream(query);
+    const srv = this.service || auditService;
+    const cursor = srv.stream(query);
 
     async function* generateLines(): AsyncGenerator<string> {
       // Write the header row first.

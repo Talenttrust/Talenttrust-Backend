@@ -7,8 +7,7 @@ triage, and step-by-step recovery procedures.
 > **Audience:** Operators, DevOps, SRE, on-call engineers.
 >
 > **Related docs:**
-> - [Audit API Contract](./audit.md) — full API reference, entry schema, hash chain
-> - [docs/backend/audit-log.md](./backend/audit-log.md) — architecture, redaction policy, security considerations
+> - [Audit API Contract & Tech Reference](./backend/audit-log.md) — full API reference, architecture, redaction policy, security considerations
 > - [Event Audit Repository](../src/repository/eventAuditRepository.ts) — event processing audit trails
 > - [Compliance Audit Logger](../src/retention/audit.ts) — retention/archival/deletion proof
 > - [docs/configuration.md](./configuration.md) — retry-policy env-var overrides
@@ -450,5 +449,4 @@ curl -H "Authorization: Bearer $TOKEN" /api/v1/audit/integrity
 | Types | `src/audit/types.ts` | 1-151 | AuditEntry, AuditAction, etc. |
 | Event audit | `src/repository/eventAuditRepository.ts` | 1-193 | Event processing audit |
 | Retention audit | `src/retention/audit.ts` | 1-324 | Compliance proof logging |
-| Audit API contract | `docs/audit.md` | 1-488 | Full REST API reference |
-| Audit tech reference | `docs/backend/audit-log.md` | 1-393 | Architecture & design |
+| Audit API & tech reference | `docs/backend/audit-log.md` | 1-393 | Full REST API reference, Architecture & design |

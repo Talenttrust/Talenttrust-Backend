@@ -16,6 +16,7 @@ import { AuditService } from './service';
 import { auditMiddleware } from './middleware';
 import { auditRouter } from './router';
 import type { AuditEntry, CreateAuditEntryInput } from './types';
+import { requestIdMiddleware } from '../middleware/requestId';
 import {
   isSensitiveHeader,
   isSensitiveKey,
@@ -45,6 +46,7 @@ function makeInput(overrides: Partial<CreateAuditEntryInput> = {}): CreateAuditE
 function buildTestApp(store?: AuditStore) {
   const app = express();
   app.use(express.json());
+  app.use(requestIdMiddleware);
   app.use(auditMiddleware);
   if (store) {
     // Swap the singleton for an isolated store in integration tests
@@ -990,6 +992,7 @@ describe('protectedEndpointAuditMiddleware', () => {
     const app = buildProtectedApp({ method: 'GET', statusCode: 200 });
     await request(app).get('/api/v1/contracts').expect(200);
 
+    console.log(store.getAll());
     expect(store.count()).toBe(1);
     const entry = store.getAll()[0];
     expect(entry.action).toBe('ENDPOINT_ACCESS');

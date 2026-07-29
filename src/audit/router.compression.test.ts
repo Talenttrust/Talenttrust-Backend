@@ -4,6 +4,7 @@ import { AuditStore } from './store';
 import { AuditService } from './service';
 import { createAuditRouter } from './router';
 import type { CreateAuditEntryInput } from './types';
+import { requestIdMiddleware } from '../middleware/requestId';
 
 describe('Audit Router - Gzip Compression', () => {
   let app: express.Application;
@@ -21,6 +22,7 @@ describe('Audit Router - Gzip Compression', () => {
 
     app = express();
     app.use(express.json());
+    app.use(requestIdMiddleware);
     app.use('/api/v1/audit', auditRouter);
   });
 

@@ -99,6 +99,67 @@ export class AuditStore implements AuditLogRepository {
   }
 
   /**
+   * Updates an entry by id and recomputes the hash chain.
+   */
+  update(id: string, payload: Partial<CreateAuditEntryInput>): AuditEntry {
+    const index = this.log.findIndex(e => e.id === id);
+    if (index === -1) {
+      throw new Error('Audit entry not found');
+    }
+
+    const current = this.log[index];
+    const partial: Omit<AuditEntry, 'hash'> = {
+      ...current,
+      action: payload.action ?? current.action,
+      severity: payload.severity ?? current.severity,
+      actor: payload.actor ?? current.actor,
+      resource: payload.resource ?? current.resource,
+      resourceId: payload.resourceId ?? current.resourceId,
+      metadata: payload.metadata ? Object.freeze({ ...payload.metadata }) : current.metadata,
+      ipAddress: payload.ipAddress !== undefined ? payload.ipAddress : current.ipAddress,
+      correlationId: payload.correlationId !== undefined ? payload.correlationId : current.correlationId,
+    };
+
+    const entry: AuditEntry = Object.freeze({
+      ...partial,
+      hash: computeEntryHash(partial),
+    });
+
+    this.log[index] = entry;
+    this._recomputeHashChainFrom(index + 1);
+    return entry;
+  }
+
+  /**
+   * Deletes an entry by id and recomputes the hash chain.
+   */
+  delete(id: string): void {
+    const index = this.log.findIndex(e => e.id === id);
+    if (index === -1) {
+      throw new Error('Audit entry not found');
+    }
+
+    this.log.splice(index, 1);
+    this._recomputeHashChainFrom(index);
+  }
+
+  private _recomputeHashChainFrom(startIndex: number): void {
+    for (let i = startIndex; i < this.log.length; i++) {
+      const current = this.log[i];
+      const previousHash = i === 0 ? GENESIS_HASH : this.log[i - 1].hash;
+      const partial = { ...current, previousHash };
+      
+      const { hash: _oldHash, ...rest } = partial;
+      const newHash = computeEntryHash(rest);
+
+      this.log[i] = Object.freeze({
+        ...rest,
+        hash: newHash,
+      });
+    }
+  }
+
+  /**
    * Returns a shallow copy of all entries (originals remain frozen).
    */
   getAll(): AuditEntry[] {
@@ -179,7 +240,10 @@ export class AuditStore implements AuditLogRepository {
             cursorData.filters.to !== query.to) {
           throw new Error('Cursor filters do not match query filters');
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && err.message === 'Cursor filters do not match query filters') {
+          throw err;
+        }
         // If cursor is invalid, start from beginning
         startIndex = 0;
       }

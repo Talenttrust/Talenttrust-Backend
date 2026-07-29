@@ -35,6 +35,7 @@ import { idempotencyMiddleware } from '../middleware/idempotency';
 import { validateRequest } from '../middleware/validate.middleware';
 import { toAuditEntryResponseDto } from './dto/audit.dto';
 import { getCorrelationId, getRequestId as getRequestIdFromUtils } from '../utils/correlationId';
+import { validateCreateAuditEntry, readValidatedBody } from './inputValidation';
 
 export interface AuditRouterOptions {
   service?: AuditService;
@@ -49,6 +50,7 @@ export interface AuditRouterOptions {
    */
   integrityMiddleware?: RequestHandler[];
   bulkMiddleware?: RequestHandler[];
+  idempotencyMiddleware?: RequestHandler;
 }
 
 function buildValidationErrorResponse(requestId: string, correlationId: string | undefined, error: ZodError): ValidationErrorResponse {
@@ -113,6 +115,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const exportMiddleware = options.exportMiddleware ?? [];
   const integrityMiddleware = options.integrityMiddleware ?? [];
   const bulkMiddleware = options.bulkMiddleware ?? [];
+  const idempMiddleware = options.idempotencyMiddleware ?? idempotencyMiddleware;
 
   /**
    * POST /api/v1/audit
@@ -122,22 +125,14 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
    */
   router.post(
     '/',
-    idempotencyMiddleware,
     ...accessMiddleware,
+    validateCreateAuditEntry,
+    idempMiddleware,
     (req: Request, res: Response): void => {
       try {
-        const parseResult = createAuditEntryBodySchema.safeParse(req.body);
-
-        if (!parseResult.success) {
-          const requestId = getRequestIdFromUtils(res);
-          const correlationId = getCorrelationId(res);
-          res.status(400).json(buildValidationErrorResponse(requestId, correlationId, parseResult.error));
-          return;
-        }
-
         // Propagate correlation ID from request context to audit entry
         const correlationId = getCorrelationId(res);
-        const entryData = parseResult.data;
+        const entryData = readValidatedBody(res);
         if (correlationId && !entryData.correlationId) {
           entryData.correlationId = correlationId;
         }
@@ -167,7 +162,12 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
     ...accessMiddleware,
     compression({ threshold: 1024 }),
     (req: Request, res: Response): void => {
+    const parsed = parseAuditQueryOrRespond(req, res, { defaultLimit: 50, maxLimit: 100 });
+    if (!parsed) return;
+
     try {
+      // Just pass the original query string, but we know it's valid now
+      // Alternatively pass parsed.query but queryLogs expects Record<string, unknown>
       const result = service.queryLogs(req.query as Record<string, unknown>, { defaultLimit: 50, maxLimit: 100 });
       const requestId = getRequestIdFromUtils(res);
       const correlationId = getCorrelationId(res);
@@ -192,6 +192,9 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
    * Streams a file-backed NDJSON export for compliance downloads.
    */
   router.get('/export', ...accessMiddleware, ...exportMiddleware, async (req: Request, res: Response): Promise<void> => {
+    const parsed = parseAuditQueryOrRespond(req, res, { maxLimit: 50_000 });
+    if (!parsed) return;
+
     let exportResult: AuditExportResult | undefined;
 
     try {
@@ -211,7 +214,7 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
       await pipeline(exportResult.openReadStream(), res);
     } catch (error) {
       if (!res.headersSent) {
-        const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
+        console.error("EXPORT ERROR:", error); const status = (error as Error).message.startsWith('Invalid ') ? 400 : 500;
         const requestId = getRequestIdFromUtils(res);
         const correlationId = getCorrelationId(res);
         res.status(status).json({ 
@@ -260,6 +263,64 @@ export function createAuditRouter(options: AuditRouterOptions = {}): Router {
       return;
     }
     res.json(toAuditEntryResponseDto(entry));
+  });
+
+  /**
+   * GET /api/v1/audit/:id/mutations
+   * Retrieve mutations (create, update, delete) for a specific audit entry.
+   */
+  router.get('/:id/mutations', ...accessMiddleware, (req: Request, res: Response): void => {
+    const mutations = service.getMutations(req.params['id'] ?? '');
+    res.json(mutations.map(toAuditEntryResponseDto));
+  });
+
+  /**
+   * PUT /api/v1/audit/:id
+   * Update an audit entry and append an AUDIT_UPDATED mutation log.
+   */
+  router.put('/:id', ...accessMiddleware, (req: Request, res: Response): void => {
+    try {
+      const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
+      const correlationId = getCorrelationId(res);
+      const ipAddress = req.ip;
+
+      const payload = req.body;
+      const entry = service.updateEntry(req.params['id'] ?? '', payload, { actor, ipAddress, correlationId });
+      res.json(toAuditEntryResponseDto(entry));
+    } catch (error) {
+      const status = (error as Error).message === 'Audit entry not found' ? 404 : 400;
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(status).json({ 
+        error: (error as Error).message,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
+    }
+  });
+
+  /**
+   * DELETE /api/v1/audit/:id
+   * Delete an audit entry and append an AUDIT_DELETED mutation log.
+   */
+  router.delete('/:id', ...accessMiddleware, (req: Request, res: Response): void => {
+    try {
+      const actor = (req as Request & { user?: { id?: string } }).user?.id ?? 'anonymous';
+      const correlationId = getCorrelationId(res);
+      const ipAddress = req.ip;
+
+      service.deleteEntry(req.params['id'] ?? '', { actor, ipAddress, correlationId });
+      res.status(204).send();
+    } catch (error) {
+      const status = (error as Error).message === 'Audit entry not found' ? 404 : 400;
+      const requestId = getRequestIdFromUtils(res);
+      const correlationId = getCorrelationId(res);
+      res.status(status).json({ 
+        error: (error as Error).message,
+        requestId,
+        ...(correlationId !== undefined && { correlationId }),
+      });
+    }
   });
 
   return router;

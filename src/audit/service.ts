@@ -20,6 +20,7 @@ import { decodeCursor } from './types';
 import { createDefaultAuditRepository, type AuditLogRepository } from './repository';
 import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
 import { AuditCache, type AuditCacheOptions } from './auditCache';
+import { redactObject } from '../utils/redact';
 
 export interface AuditServiceOptions {
   /** Cache options for audit read responses. */
@@ -185,6 +186,67 @@ export class AuditService {
   }
 
   /**
+   * Updates an existing audit entry and appends a mutation record.
+   */
+  updateEntry(id: string, payload: Partial<CreateAuditEntryInput>, context: { actor: string, ipAddress?: string, correlationId?: string }): AuditEntry {
+    const existing = this.getById(id);
+    if (!existing) {
+      throw new Error('Audit entry not found');
+    }
+    
+    const entry = this.repository.update(id, payload);
+
+    if (this.cache) {
+      this.cache.invalidateByResourceId(entry.resourceId);
+    }
+
+    this.repository.append({
+      action: 'AUDIT_UPDATED',
+      severity: 'WARNING',
+      actor: context.actor,
+      resource: 'audit-log',
+      resourceId: entry.id,
+      metadata: {
+        before_summary: JSON.stringify(redactObject(existing.metadata as Record<string, unknown>)),
+        after_summary: JSON.stringify(redactObject(entry.metadata as Record<string, unknown>)),
+      },
+      ipAddress: context.ipAddress,
+      correlationId: context.correlationId,
+    });
+
+    return entry;
+  }
+
+  /**
+   * Deletes an existing audit entry and appends a mutation record.
+   */
+  deleteEntry(id: string, context: { actor: string, ipAddress?: string, correlationId?: string }): void {
+    const existing = this.getById(id);
+    if (!existing) {
+      throw new Error('Audit entry not found');
+    }
+
+    this.repository.delete(id);
+
+    if (this.cache) {
+      this.cache.invalidateByResourceId(existing.resourceId);
+    }
+
+    this.repository.append({
+      action: 'AUDIT_DELETED',
+      severity: 'CRITICAL',
+      actor: context.actor,
+      resource: 'audit-log',
+      resourceId: id,
+      metadata: {
+        before_summary: JSON.stringify(redactObject(existing.metadata as Record<string, unknown>)),
+      },
+      ipAddress: context.ipAddress,
+      correlationId: context.correlationId,
+    });
+  }
+
+  /**
    * Validates payload fields and creates an audit entry.
    * Throws Error if any required field is missing.
    */
@@ -235,6 +297,16 @@ export class AuditService {
       limit,
       offset,
     };
+  }
+
+  /**
+   * Retrieves mutations for a specific audit entry.
+   */
+  getMutations(auditId: string): AuditEntry[] {
+    return this.query({
+      resource: 'audit-log',
+      resourceId: auditId,
+    });
   }
 
   /**

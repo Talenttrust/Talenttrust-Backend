@@ -39,6 +39,9 @@ export const AUDIT_ACTIONS = [
   'ENDPOINT_MUTATION',
   'DEPLOYMENT_PROMOTED',
   'DEPLOYMENT_ROLLED_BACK',
+  'AUDIT_CREATED',
+  'AUDIT_UPDATED',
+  'AUDIT_DELETED',
 ] as const;
 
 /** Categories of sensitive state changes that must be audited. */
@@ -67,7 +70,10 @@ export type AuditAction =
   | 'DEPLOYMENT_ROLLED_BACK'
   | 'MILESTONES_CREATED'
   | 'MILESTONES_UPDATED'
-  | 'MILESTONES_DELETED';
+  | 'MILESTONES_DELETED'
+  | 'AUDIT_CREATED'
+  | 'AUDIT_UPDATED'
+  | 'AUDIT_DELETED';
 
 export const AUDIT_SEVERITIES = ['INFO', 'WARNING', 'CRITICAL'] as const;
 

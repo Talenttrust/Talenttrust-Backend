@@ -186,7 +186,7 @@ export class ReputationController {
       res.status(200).json(response);
     } catch (error) {
       log.error('reputation.createRating: error', { freelancerId: req.params.id, correlationId, err: error });
-      sendError(res, error);
+      handleError(res, next, error);
     }
   }
 
@@ -203,7 +203,7 @@ export class ReputationController {
       const { items } = req.body as { items: unknown[] };
 
       if (!Array.isArray(items) || items.length === 0) {
-        sendError(res, new AppError(400, 'bad_request', 'Request body must contain a non-empty items array'));
+        handleError(res, next, new AppError(400, 'bad_request', 'Request body must contain a non-empty items array'));
         return;
       }
 
@@ -261,7 +261,7 @@ export class ReputationController {
       res.status(statusCode).json(response);
     } catch (error) {
       log.error('reputation.createBulkRatings: error', { correlationId, err: error });
-      sendError(res, error);
+      handleError(res, next, error);
     }
   }
 }

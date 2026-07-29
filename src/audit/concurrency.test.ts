@@ -323,8 +323,12 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
     const service = new AuditService(store);
     const app = express();
     app.use(express.json());
-    app.use((_req, res, next) => {
+    app.use((req, res, next) => {
       res.locals['requestId'] = 'concurrency-test';
+      // console.log(`[${req.method} ${req.url}] Headers:`, req.headers);
+      if (!req.headers['idempotency-key']) {
+        console.error('MISSING IN TEST MIDDLEWARE:', req.headers);
+      }
       next();
     });
     app.use('/api/v1/audit', createAuditRouter({ service }));
@@ -338,15 +342,19 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
 
     const tasks = Array.from({ length: count }, async (_, i) => {
       await Promise.resolve();
-      return request(app)
+      const res = await request(app)
         .post('/api/v1/audit')
-        .send(makeInput({ seq: i, metadata: { seq: i } }))
-        .set('Idempotency-Key', `idem-${i}-${Math.random()}`);
+        .set('Idempotency-Key', `idem-${i}-${Math.random()}`)
+        .send(makeInput({ seq: i, metadata: { seq: i } }));
+      return res;
     });
 
     const responses = await Promise.all(tasks);
 
     for (const res of responses) {
+      if (res.status !== 201) {
+        console.error('FAILED POST:', res.status, JSON.stringify(res.body, null, 2));
+      }
       expect(res.status).toBe(201);
       expect(res.body).toHaveProperty('id');
       expect(res.body).toHaveProperty('hash');
@@ -363,10 +371,11 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
 
     const writeTasks = Array.from({ length: writeCount }, async (_, i) => {
       await Promise.resolve();
-      return request(app)
+      const res = await request(app)
         .post('/api/v1/audit')
-        .send(makeInput({ seq: i, metadata: { seq: i } }))
-        .set('Idempotency-Key', `rw-${i}-${Math.random()}`);
+        .set('Idempotency-Key', `rw-${i}-${Math.random()}`)
+        .send(makeInput({ seq: i, metadata: { seq: i } }));
+      return res;
     });
 
     const readTask = async (): Promise<void> => {
@@ -416,8 +425,8 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
       Array.from({ length: count }, async (_, i) => {
         const res = await request(app)
           .post('/api/v1/audit')
-          .send(makeInput({ seq: i, metadata: { seq: i } }))
-          .set('Idempotency-Key', `getid-${i}-${Math.random()}`);
+          .set('Idempotency-Key', `getid-${i}-${Math.random()}`)
+          .send(makeInput({ seq: i, metadata: { seq: i } }));
         return res.body.id as string;
       }),
     );
@@ -447,18 +456,19 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
         action === 'PAYMENT_INITIATED' ? 'payment' :
         action === 'AUTH_LOGIN' ? 'auth' : 'contract';
       tasks.push(
-        Promise.resolve().then(() =>
-          request(app)
+        Promise.resolve().then(async () => {
+          const res = await request(app)
             .post('/api/v1/audit')
+            .set('Idempotency-Key', `filter-${i}-${Math.random()}`)
             .send(makeInput({
               action,
               severity,
               resource,
               resourceId: `${resource}-${i}`,
               metadata: { seq: i },
-            }))
-            .set('Idempotency-Key', `filter-${i}-${Math.random()}`),
-        ),
+            }));
+          return res;
+        })
       );
     }
 
@@ -488,14 +498,20 @@ describe('Audit router endpoints — concurrency smoke tests', () => {
     const responses = await Promise.all(
       Array.from({ length: count }, async (_, i) => {
         await Promise.resolve();
-        return request(app)
+        const res = await request(app)
           .post('/api/v1/audit')
-          .send(makeInput({ seq: i, metadata: { seq: i } }))
-          .set('Idempotency-Key', `lost-${i}-${Math.random()}`);
+          .set('Idempotency-Key', `lost-${i}-${Math.random()}`)
+          .send(makeInput({ seq: i, metadata: { seq: i } }));
+        return res;
       }),
     );
 
-    const successful = responses.filter((r) => r.status === 201);
+    const successful = responses.filter((r) => {
+      if (r.status !== 201) {
+        console.error('FAILED POST 50:', r.status, JSON.stringify(r.body, null, 2));
+      }
+      return r.status === 201;
+    });
     expect(successful.length).toBe(count);
     expect(store.count()).toBe(count);
     assertHashChain(store);

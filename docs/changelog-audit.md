@@ -20,7 +20,7 @@
 - **Request Validation and Bounds** (`07d71a5`) - Added comprehensive request validation and bounds checking for audit endpoints. Validates query parameters, limits, and offsets to prevent abuse.
 - **Rate Limiting** (`fb39160`) - Added rate limiting to audit endpoints. Prevents abuse with configurable rate limits and 429 responses with Retry-After headers.
 - **Cursor Pagination** (`ea906a1`) - Added cursor-based pagination to audit listing endpoint (`GET /api/v1/audit`). Improves performance for large datasets compared to offset-based pagination.
-- **API Contract Documentation** (`f676fbe`) - Documented the audit API contract in `docs/audit.md`. Includes endpoint specifications, authentication, error codes, hash chain integrity, and redaction policy.
+- **API Contract Documentation** (`f676fbe`) - Documented the audit API contract in `docs/backend/audit-log.md`. Includes endpoint specifications, authentication, error codes, hash chain integrity, and redaction policy.
 
 ## 2026-07-24
 - **Rate Limit Queue Depth Capping** (`53da5fb`) - Added per-provider queue depth capping with reject-on-overflow for rate limiter. Prevents memory exhaustion under high load.

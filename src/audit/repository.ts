@@ -7,6 +7,8 @@ import Database from '../db/betterSqlite3';
 export interface AuditLogRepository {
   append(input: CreateAuditEntryInput): AuditEntry;
   getById(id: string): AuditEntry | undefined;
+  update(id: string, payload: Partial<CreateAuditEntryInput>): AuditEntry;
+  delete(id: string): void;
   query(query?: AuditQuery): AuditEntry[];
   /**
    * Query with cursor-based pagination.

@@ -26,9 +26,8 @@ import { AuditStore } from './store';
 import { AuditService } from './service';
 import { AuditExportService } from './exportService';
 import { createAuditRouter } from './router';
-import { IdempotencyStore } from './idempotency';
 import { requireAuth, requireRole } from '../middleware/authorization';
-import { idempotencyMiddleware, clearIdempotencyStore } from '../middleware/idempotency';
+import { idempotencyMiddleware, clearIdempotencyStore, createIdempotencyMiddleware } from '../middleware/idempotency';
 import { InMemoryIdempotencyStore } from '../db/idempotencyStore';
 import type { AuditEntry, CreateAuditEntryInput } from './types';
 import { encodeCursor, decodeCursor, type CursorData } from './types';
@@ -66,7 +65,7 @@ function buildApp(
   opts: {
     accessMiddleware?: RequestHandler[];
     exportMiddleware?: RequestHandler[];
-    idempotencyStore?: IdempotencyStore;
+    idempotencyStore?: InMemoryIdempotencyStore;
   } = {},
 ) {
   const service = new AuditService(store);
@@ -88,7 +87,7 @@ function buildApp(
       exportService: exportSvc,
       accessMiddleware: opts.accessMiddleware ?? [],
       exportMiddleware: opts.exportMiddleware ?? [],
-      idempotencyStore: opts.idempotencyStore,
+      idempotencyMiddleware: opts.idempotencyStore ? createIdempotencyMiddleware({ store: opts.idempotencyStore }) : undefined,
     }),
   );
 
@@ -1133,11 +1132,12 @@ describe('GET /api/v1/audit — cursor pagination', () => {
 
 describe('POST /api/v1/audit — idempotent writes', () => {
   let store: AuditStore;
-  let idempotencyStore: IdempotencyStore;
+  let idempotencyStore: InMemoryIdempotencyStore;
 
   beforeEach(() => {
     store = new AuditStore();
-    idempotencyStore = new IdempotencyStore({ maxSize: 1000, ttlMs: 86_400_000 });
+    idempotencyStore = new InMemoryIdempotencyStore({ maxSize: 1000, ttlMs: 86_400_000 });
+    clearIdempotencyStore();
   });
 
   const validPayload = {
@@ -1176,13 +1176,13 @@ describe('POST /api/v1/audit — idempotent writes', () => {
     const first = await request(app)
       .post('/api/v1/audit')
       .set('Idempotency-Key', 'key-replay')
-      .send(input)
+      .send(validPayload)
       .expect(201);
 
     const replay = await request(app)
       .post('/api/v1/audit')
       .set('Idempotency-Key', 'key-replay')
-      .send(input)
+      .send(validPayload)
       .expect(200);
 
     expect(replay.body.id).toBe(first.body.id);
@@ -1191,7 +1191,7 @@ describe('POST /api/v1/audit — idempotent writes', () => {
   });
 
   it('rejects reused Idempotency-Key with different payload via 409', async () => {
-    const { app } = buildAppWithIdempotency(store);
+    const { app } = buildApp(store, { idempotencyStore });
 
     await request(app)
       .post('/api/v1/audit')
@@ -1209,7 +1209,7 @@ describe('POST /api/v1/audit — idempotent writes', () => {
   });
 
   it('returns 400 when required fields are missing', async () => {
-    const { app } = buildAppWithIdempotency(store);
+    const { app } = buildApp(store, { idempotencyStore });
 
     const res = await request(app)
       .post('/api/v1/audit')
@@ -1222,8 +1222,28 @@ describe('POST /api/v1/audit — idempotent writes', () => {
     );
   });
 
+  it('returns 200 on exact replay with the same key and body', async () => {
+    const { app } = buildApp(store, { idempotencyStore });
+
+    const first = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-replay')
+      .send(validPayload)
+      .expect(201);
+
+    const replay = await request(app)
+      .post('/api/v1/audit')
+      .set('Idempotency-Key', 'key-replay')
+      .send(validPayload)
+      .expect(200);
+
+    expect(replay.body.id).toBe(first.body.id);
+    expect(replay.body.action).toBe(first.body.action);
+    expect(replay.body.idempotencyHeader).toBe('replay-detected');
+  });
+
   it('allows different Idempotency-Keys for independent entries', async () => {
-    const { app } = buildAppWithIdempotency(store);
+    const { app } = buildApp(store, { idempotencyStore });
 
     const first = await request(app)
       .post('/api/v1/audit')
@@ -1233,12 +1253,11 @@ describe('POST /api/v1/audit — idempotent writes', () => {
 
     const second = await request(app)
       .post('/api/v1/audit')
-      .set('Idempotency-Key', 'replay-key')
-      .send(validPayload)
-      .expect(200);
+      .set('Idempotency-Key', 'key-b')
+      .send(makeInput({ actor: 'bob' }))
+      .expect(201);
 
-    expect(second.body.id).toBe(first.body.id);
-    expect(second.body).toEqual(first.body);
+    expect(second.body.id).not.toBe(first.body.id);
   });
 
   it('returns 409 when same key is used with a different body', async () => {
@@ -1256,7 +1275,7 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send({ ...validPayload, actor: 'different-actor' })
       .expect(409);
 
-    expect(conflict.body.error).toMatch(/already used with a different request body/i);
+    expect(conflict.body.error.message).toMatch(/already used with a different request payload/i);
   });
 
   it('returns 400 when Idempotency-Key header is missing', async () => {
@@ -1267,7 +1286,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send(validPayload)
       .expect(400);
 
-    expect(res.body.error).toMatch(/Idempotency-Key header is required/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('Idempotency-Key'))).toBe(true);
   });
 
   it('returns 400 for an empty Idempotency-Key', async () => {
@@ -1279,7 +1299,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send(validPayload)
       .expect(400);
 
-    expect(res.body.error).toMatch(/Idempotency-Key must be a string/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('Idempotency-Key'))).toBe(true);
   });
 
   it('returns 400 for an invalid action', async () => {
@@ -1291,7 +1312,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send({ ...validPayload, action: 'INVALID_ACTION' })
       .expect(400);
 
-    expect(res.body.error).toMatch(/Invalid action/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('action'))).toBe(true);
   });
 
   it('returns 400 for an invalid severity', async () => {
@@ -1303,7 +1325,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send({ ...validPayload, severity: 'DEBUG' })
       .expect(400);
 
-    expect(res.body.error).toMatch(/Invalid severity/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('severity'))).toBe(true);
   });
 
   it('returns 400 when actor is missing', async () => {
@@ -1316,7 +1339,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send(noActor)
       .expect(400);
 
-    expect(res.body.error).toMatch(/actor is required/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('actor'))).toBe(true);
   });
 
   it('returns 400 when resource is missing', async () => {
@@ -1329,7 +1353,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send(noResource)
       .expect(400);
 
-    expect(res.body.error).toMatch(/resource is required/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('resource'))).toBe(true);
   });
 
   it('returns 400 when resourceId is missing', async () => {
@@ -1342,7 +1367,8 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send(noResourceId)
       .expect(400);
 
-    expect(res.body.error).toMatch(/resourceId is required/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('resourceId'))).toBe(true);
   });
 
   it('returns 400 when metadata is an array', async () => {
@@ -1354,11 +1380,12 @@ describe('POST /api/v1/audit — idempotent writes', () => {
       .send({ ...validPayload, metadata: ['a', 'b'] })
       .expect(400);
 
-    expect(res.body.error).toMatch(/metadata must be a plain object/i);
+    expect(res.body.error.code).toBe('validation_error');
+    expect(res.body.error.details.some((d: any) => d.path.includes('metadata'))).toBe(true);
   });
 
   it('returns 201 and persists after expiry when TTL has elapsed', async () => {
-    const shortTtlStore = new IdempotencyStore({ ttlMs: 10, maxSize: 100 });
+    const shortTtlStore = new InMemoryIdempotencyStore({ ttlMs: 10, maxSize: 100 });
     const { app } = buildApp(store, { idempotencyStore: shortTtlStore });
 
     await request(app)

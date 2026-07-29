@@ -120,15 +120,27 @@ export function createIdempotencyMiddleware(options: IdempotencyMiddlewareOption
 
     const originalSend = res.send.bind(res);
     res.send = function sendWithIdempotencyCache(body: unknown): Response {
-      const result = typeof body === 'string' ? JSON.parse(body) : body;
+      try {
+        let result = body;
+        if (typeof body === 'string') {
+          try {
+            result = JSON.parse(body);
+          } catch {
+            // Ignore parse errors, store as is
+          }
+        }
 
-      store.set({
-        key: idempotencyKey,
-        payloadHash,
-        result,
-        createdAt: new Date(),
-      });
-      inFlight.delete(idempotencyKey);
+        console.log('CALLING STORE SET, STORE CONSTRUCTOR:', store.constructor.name);
+        store.set({
+          key: idempotencyKey,
+          payloadHash,
+          result,
+          createdAt: new Date(),
+        });
+        inFlight.delete(idempotencyKey);
+      } catch (err) {
+        console.error('IDEMPOTENCY CACHE ERROR:', err instanceof Error ? err.stack : err);
+      }
 
       return originalSend(body);
     };

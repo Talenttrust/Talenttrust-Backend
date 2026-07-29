@@ -143,6 +143,14 @@ describe('AuditCache', () => {
   });
 
   describe('LRU eviction', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it('should evict oldest entry when at capacity', () => {
       registry.clear();
       cache = new AuditCache({ ttlMs: 10000, maxEntries: 3 }, registry);
@@ -153,24 +161,29 @@ describe('AuditCache', () => {
       const query4: AuditQuery = { action: 'CONTRACT_COMPLETED' };
 
       cache.set(query1, [], 'query');
+      jest.advanceTimersByTime(10);
       cache.set(query2, [], 'query');
+      jest.advanceTimersByTime(10);
       cache.set(query3, [], 'query');
+      jest.advanceTimersByTime(10);
 
       expect(cache.getStats().size).toBe(3);
 
       // Access query1 to make it recently used
       cache.get(query1, 'query');
+      jest.advanceTimersByTime(10);
 
-      // Add query4, should evict the oldest not accessed (query2 or query3)
+      // Add query4, should evict the oldest not accessed (which is query2)
       cache.set(query4, [], 'query');
 
       expect(cache.getStats().size).toBe(3);
       expect(cache.get(query1, 'query')).toEqual([]); // Still cached
       expect(cache.get(query4, 'query')).toEqual([]); // New entry
-      // One of query2 or query3 should be evicted
-      const query2Result = cache.get(query2, 'query');
-      const query3Result = cache.get(query3, 'query');
-      expect(query2Result === null || query3Result === null).toBe(true);
+      
+      // query2 should be evicted as it's the oldest not recently accessed
+      expect(cache.get(query2, 'query')).toBeNull();
+      // query3 should still be cached
+      expect(cache.get(query3, 'query')).toEqual([]);
     });
   });
 

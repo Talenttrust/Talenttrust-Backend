@@ -43,6 +43,10 @@ function buildHarness(options: { terminalHandlers?: boolean } = {}): Harness {
 
   const app = express();
   app.use(express.json());
+  app.use((req, res, next) => {
+    res.locals.requestId = 'req-test-id';
+    next();
+  });
   app.use('/api/v1/audit', createAuditRouter({ service, exportService }));
   if (options.terminalHandlers) {
     app.use(notFoundHandler);

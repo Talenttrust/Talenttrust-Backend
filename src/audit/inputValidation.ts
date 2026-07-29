@@ -677,23 +677,35 @@ export function validateCreateAuditEntry(
   next: NextFunction,
 ): void {
   const result = validateCreateAuditEntryInput(req.body);
+  const issues = result.ok ? [] : result.issues;
 
-  if (!result.ok) {
+  const idempotencyKey = req.headers['idempotency-key'] || req.headers['Idempotency-Key'];
+  if (!idempotencyKey || (typeof idempotencyKey === 'string' && idempotencyKey.trim() === '')) {
+    console.error('MISSING KEY, HEADERS:', req.headers);
+    issues.push({
+      path: ['Idempotency-Key'],
+      field: 'Idempotency-Key',
+      code: AUDIT_VALIDATION_CODES.MISSING_FIELD,
+      message: 'Idempotency-Key header is required',
+    });
+  }
+
+  if (issues.length > 0) {
     const requestId =
       typeof res.locals['requestId'] === 'string' ? res.locals['requestId'] : 'unknown';
 
     res.status(400).json({
       error: {
-        code: result.code,
+        code: AUDIT_VALIDATION_ERROR_CODE,
         message: 'Request validation failed',
         requestId,
-        details: result.issues,
+        details: issues,
       },
     });
     return;
   }
 
-  res.locals[VALIDATED_BODY_KEY] = result.data;
+  res.locals[VALIDATED_BODY_KEY] = result.ok ? result.data : undefined;
   next();
 }
 

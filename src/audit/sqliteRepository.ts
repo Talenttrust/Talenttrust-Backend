@@ -110,9 +110,114 @@ export class SqliteAuditRepository implements AuditLogRepository {
     return row ? toAuditEntry(row) : undefined;
   }
 
+  update(id: string, payload: Partial<CreateAuditEntryInput>): AuditEntry {
+    const updateTransaction = this.db.transaction((id: string, payload: Partial<CreateAuditEntryInput>) => {
+      const current = this.getById(id);
+      if (!current) {
+        throw new Error('Audit entry not found');
+      }
+
+      const seqRow = this.db.prepare('SELECT seq FROM audit_log_entries WHERE id = ?').get(id);
+      if (!seqRow) {
+        throw new Error('Audit entry not found');
+      }
+
+      const partial: Omit<AuditEntry, 'hash'> = {
+        ...current,
+        action: payload.action ?? current.action,
+        severity: payload.severity ?? current.severity,
+        actor: payload.actor ?? current.actor,
+        resource: payload.resource ?? current.resource,
+        resourceId: payload.resourceId ?? current.resourceId,
+        metadata: payload.metadata ? Object.freeze({ ...payload.metadata }) : current.metadata,
+        ipAddress: payload.ipAddress !== undefined ? payload.ipAddress : current.ipAddress,
+        correlationId: payload.correlationId !== undefined ? payload.correlationId : current.correlationId,
+      };
+
+      const entry: AuditEntry = Object.freeze({
+        ...partial,
+        hash: computeEntryHash(partial),
+      });
+
+      this.db.prepare<
+        [string, string, string, string, string, string, string | null, string | null, string, string]
+      >(
+        `UPDATE audit_log_entries
+         SET action = ?, severity = ?, actor = ?, resource = ?, resource_id = ?, metadata_json = ?, ip_address = ?, correlation_id = ?, hash = ?
+         WHERE id = ?`
+      ).run(
+        entry.action,
+        entry.severity,
+        entry.actor,
+        entry.resource,
+        entry.resourceId,
+        JSON.stringify(entry.metadata),
+        entry.ipAddress ?? null,
+        entry.correlationId ?? null,
+        entry.hash,
+        id
+      );
+
+      this._recomputeHashChainFrom(seqRow.seq + 1);
+      return entry;
+    });
+
+    return updateTransaction(id, payload);
+  }
+
+  delete(id: string): void {
+    const deleteTransaction = this.db.transaction((id: string) => {
+      const seqRow = this.db.prepare('SELECT seq FROM audit_log_entries WHERE id = ?').get(id);
+      if (!seqRow) {
+        throw new Error('Audit entry not found');
+      }
+
+      this.db.prepare('DELETE FROM audit_log_entries WHERE id = ?').run(id);
+      this._recomputeHashChainFrom(seqRow.seq);
+    });
+
+    deleteTransaction(id);
+  }
+
+  private _recomputeHashChainFrom(startIndex: number): void {
+    const rows = this.db
+      .prepare<[number], AuditRow>(
+        `SELECT id, timestamp, action, severity, actor, resource, resource_id, metadata_json, ip_address, correlation_id, hash, previous_hash, seq
+         FROM audit_log_entries
+         WHERE seq >= ?
+         ORDER BY seq ASC`
+      )
+      .all(startIndex);
+
+    if (rows.length === 0) return;
+
+    let previousHash = GENESIS_HASH;
+    if (startIndex > 1) {
+      // Find the actual previous sequence. It might not be exactly startIndex - 1 if there were deletions.
+      const prevRow = this.db
+        .prepare<[number], { hash: string }>('SELECT hash FROM audit_log_entries WHERE seq < ? ORDER BY seq DESC LIMIT 1')
+        .get(startIndex);
+      if (prevRow) {
+        previousHash = prevRow.hash;
+      }
+    }
+
+    const updateStmt = this.db.prepare('UPDATE audit_log_entries SET previous_hash = ?, hash = ? WHERE id = ?');
+
+    for (const row of rows) {
+      const entry = toAuditEntry(row);
+      const partial = { ...entry, previousHash };
+      const { hash: _oldHash, ...rest } = partial;
+      const newHash = computeEntryHash(rest);
+
+      updateStmt.run(previousHash, newHash, entry.id);
+      previousHash = newHash;
+    }
+  }
+
   query(query: AuditQuery = {}): AuditEntry[] {
     const { sql, params } = this.buildQuerySql(query);
-    const rows = this.db.prepare<typeof params, AuditRow>(sql).all(...params);
+    const rows = this.db.prepare(sql).all(...params);
     return rows.map(toAuditEntry);
   }
 
@@ -159,7 +264,7 @@ export class SqliteAuditRepository implements AuditLogRepository {
     
     // Build query with cursor-based pagination
     const { sql, params } = this.buildCursorQuerySql(query, startIndex, limit);
-    const rows = this.db.prepare<typeof params, AuditRow>(sql).all(...params);
+    const rows = this.db.prepare(sql).all(...params);
     const entries = rows.map(toAuditEntry);
     
     // Generate next cursor if there are more results
@@ -167,7 +272,7 @@ export class SqliteAuditRepository implements AuditLogRepository {
     if (entries.length === limit && entries.length > 0) {
       // Check if there are actually more results by querying with limit+1
       const checkSql = this.buildCursorQuerySql(query, startIndex, limit + 1);
-      const checkRows = this.db.prepare<typeof checkSql.params, AuditRow>(checkSql.sql).all(...checkSql.params);
+      const checkRows = this.db.prepare(checkSql.sql).all(...checkSql.params);
       if (checkRows.length > limit) {
         const lastEntry = entries[entries.length - 1];
         const cursorData: CursorData = {
@@ -197,7 +302,7 @@ export class SqliteAuditRepository implements AuditLogRepository {
 
   *stream(query: AuditQuery = {}): IterableIterator<AuditEntry> {
     const { sql, params } = this.buildQuerySql(query);
-    const cursor = this.db.prepare<typeof params, AuditRow>(sql).iterate(...params);
+    const cursor = this.db.prepare(sql).iterate(...params);
     for (const row of cursor) {
       yield toAuditEntry(row);
     }
