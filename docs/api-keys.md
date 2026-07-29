@@ -141,7 +141,8 @@ Content-Type: application/json
     "createdBy": "user-id",
     "createdAt": "2024-01-01T00:00:00Z",
     "expiresAt": "2024-12-31T23:59:59Z",
-    "isActive": true
+    "isActive": true,
+    "callCount": 0
   }
 }
 ```
@@ -163,6 +164,7 @@ Authorization: Bearer <user-token>
       "updatedAt": "2024-01-01T00:00:00Z",
       "expiresAt": "2024-12-31T23:59:59Z",
       "lastUsedAt": "2024-01-15T10:30:00Z",
+      "callCount": 42,
       "isActive": true
     }
   ],
@@ -194,7 +196,9 @@ Authorization: Bearer <user-token>
     "createdAt": "2024-01-01T00:00:00Z",
     "updatedAt": "2024-01-15T10:30:00Z",
     "expiresAt": "2024-12-31T23:59:59Z",
-    "isActive": true
+    "isActive": true,
+    "callCount": 42,
+    "lastUsedAt": "2024-01-15T10:30:00Z"
   }
 }
 ```
@@ -230,8 +234,9 @@ Authorization: Bearer <user-token>
 - Expired keys are deactivated on first access attempt
 
 ## Audit Trail
-- Last usage timestamp is updated on successful authentication
-- Helps identify unused or suspicious keys
+- Last usage timestamp and monotonic call count are updated on successful authentication
+- Helps identify unused or suspicious keys and usage patterns
+- Throttled database writes (flushed every 5 seconds) prevent hot keys from thrashing the database
 - Useful for security monitoring and compliance
 
 ## Best Practices
@@ -258,7 +263,7 @@ Authorization: Bearer <user-token>
 ## Lifecycle Overview
 
 1. **Creation** – A client calls the `POST /api/v1/api-keys` endpoint. The server generates a cryptographically random 32‑byte key, hashes it with a unique salt using PBKDF2, stores the `salt:hash` pair, and returns the **plain‑text key** **once** in the response. The plain key must be stored securely by the client; it is never persisted by the server.
-2. **Usage** – Clients include the key in the `X‑API‑Key` header on each request. The middleware extracts the header, verifies the key against the stored hash, updates `last_used_at`, and enforces any required scopes via `requireApiKeyScope`.
+2. **Usage** – Clients include the key in the `X‑API‑Key` header on each request. The middleware extracts the header, verifies the key against the stored hash, buffers a call count increment and `last_used_at` update (which flushes asynchronously), and enforces any required scopes via `requireApiKeyScope`.
 3. **Expiration** – If an `expires_at` timestamp is set, the middleware rejects the key after that date, deactivates it on first use after expiry, and returns a 401 error.
 4. **Revocation** – A key can be deactivated at any time via `DELETE /api/v1/api-keys/:id`. The `is_active` flag is cleared, causing subsequent requests to be rejected with a 401.
 5. **Rotation** – To rotate a key, call `POST /api/v1/api-keys/:id/rotate`. A new plain‑text key is returned and the stored hash is replaced. The old key becomes immediately invalid. Update the consuming service's configuration with the new key, verify functionality, and optionally keep the old key for a short rollback window before fully deactivating it.
@@ -363,7 +368,7 @@ key_selector = SHA-256(plain_api_key)
 1. **Selector computation** — On each request, compute `SHA-256(api_key)` to derive the selector.
 2. **Indexed lookup** — Query the storage layer by `key_selector` to find the candidate row in O(1) instead of scanning all stored keys.
 3. **Salted verification** — The candidate's stored `salt:hash` is verified with PBKDF2 (the same slow salted hash as before). This ensures the selector alone is insufficient to authenticate; an attacker who compromises the selector column still cannot derive the original key or bypass the salted hash.
-4. **Post-validation** — `last_used_at` is updated, expiry is checked (and the key deactivated if expired), and the `ApiKeyInfo` shape is returned.
+4. **Post-validation** — `last_used_at` and `call_count` are updated via a memory buffer, expiry is checked (and the key deactivated if expired), and the `ApiKeyInfo` shape is returned.
 
 **Security properties:**
 | Property | Mechanism |
@@ -388,6 +393,7 @@ interface ApiKey {
   updated_at: Date;
   expires_at?: Date;
   last_used_at?: Date;
+  call_count: number;
   is_active: boolean;
 }
 ```

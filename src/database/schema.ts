@@ -39,6 +39,7 @@ export interface ApiKey {
   updated_at: Date;
   expires_at?: Date;
   last_used_at?: Date;
+  call_count: number;
   is_active: boolean;
 }
 

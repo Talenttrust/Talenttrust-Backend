@@ -65,6 +65,7 @@ interface ApiKeyRow {
   updated_at: string;
   expires_at: string | null;
   last_used_at: string | null;
+  call_count: number;
   is_active: number;
 }
 
@@ -95,6 +96,7 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
     created_by: row.created_by,
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
+    call_count: row.call_count,
     is_active: fromInt(row.is_active),
   };
   if (row.key_selector !== null) key.key_selector = row.key_selector;
@@ -156,6 +158,7 @@ export class SqliteMetadataStore {
         updated_at   TEXT    NOT NULL,
         expires_at   TEXT,
         last_used_at TEXT,
+        call_count   INTEGER NOT NULL DEFAULT 0,
         is_active    INTEGER NOT NULL DEFAULT 1
       );
 
@@ -311,8 +314,8 @@ export class SqliteMetadataStore {
       .prepare(
         `INSERT INTO api_keys
            (id, name, key_hash, key_selector, scope, created_by,
-            created_at, updated_at, expires_at, last_used_at, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            created_at, updated_at, expires_at, last_used_at, call_count, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         key.id,
@@ -325,6 +328,7 @@ export class SqliteMetadataStore {
         toIso(key.updated_at),
         toIso(key.expires_at),
         toIso(key.last_used_at),
+        key.call_count,
         toInt(key.is_active)
       );
     return key;
@@ -421,6 +425,16 @@ export class SqliteMetadataStore {
     return result.changes > 0;
   }
 
+  incrementApiKeyUsage(id: string, count: number, lastUsedAt: Date): void {
+    this.db
+      .prepare(
+        `UPDATE api_keys
+         SET call_count = call_count + ?, last_used_at = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(count, toIso(lastUsedAt), toIso(lastUsedAt), id);
+  }
+
   rotateApiKey(
     id: string,
     newKeyHash: string,
@@ -479,8 +493,8 @@ export class SqliteMetadataStore {
     const insertApiKey = this.db.prepare(
       `INSERT OR IGNORE INTO api_keys
          (id, name, key_hash, key_selector, scope, created_by,
-          created_at, updated_at, expires_at, last_used_at, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          created_at, updated_at, expires_at, last_used_at, call_count, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     let metadata = 0;
@@ -516,6 +530,7 @@ export class SqliteMetadataStore {
           toIso(key.updated_at),
           toIso(key.expires_at),
           toIso(key.last_used_at),
+          key.call_count ?? 0,
           toInt(key.is_active)
         ) as { changes: number };
         apiKeys += result.changes;

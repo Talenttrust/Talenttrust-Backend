@@ -262,6 +262,7 @@ export async function listApiKeysController(req: AuthenticatedRequest, res: Resp
       updated_at: key.updated_at,
       expires_at: key.expires_at,
       last_used_at: key.last_used_at,
+      callCount: key.call_count,
       is_active: key.is_active
     }));
 
@@ -399,6 +400,7 @@ export async function getApiKeyController(req: AuthenticatedRequest, res: Respon
       updated_at: apiKey.updated_at,
       expires_at: apiKey.expires_at,
       last_used_at: apiKey.last_used_at,
+      callCount: apiKey.call_count,
       is_active: apiKey.is_active
     };
 

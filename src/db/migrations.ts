@@ -614,3 +614,23 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 14: add call_count to api_keys
+MIGRATIONS.push({
+  version: 14,
+  name: "add_call_count_to_api_keys",
+  checksumSource: [
+    "ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0",
+  ].join("\n"),
+  up: (db) => {
+    // Check if the column already exists to prevent errors during repeated migrations
+    const columns = db.pragma("table_info(api_keys)") as Array<{
+      name: string;
+    }>;
+    const hasCallCount = columns.some((column) => column.name === "call_count");
+
+    if (!hasCallCount) {
+      db.exec("ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0");
+    }
+  },
+});

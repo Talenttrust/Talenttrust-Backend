@@ -220,7 +220,8 @@ class DatabaseService {
       ...data,
       id: require('crypto').randomUUID(),
       created_at: now,
-      updated_at: now
+      updated_at: now,
+      call_count: 0
     };
     return store.insertApiKey(apiKey);
   }
@@ -284,6 +285,19 @@ class DatabaseService {
     return store.setApiKeyActive(id, false, new Date());
   }
 
+  async incrementApiKeyUsage(id: string, count: number, lastUsedAt: Date): Promise<void> {
+    const store = await this.store();
+    store.incrementApiKeyUsage(id, count, lastUsedAt);
+    if (this.db) {
+      const index = this.db.api_keys.findIndex((k) => k.id === id);
+      if (index !== -1) {
+        this.db.api_keys[index].call_count = (this.db.api_keys[index].call_count || 0) + count;
+        this.db.api_keys[index].last_used_at = lastUsedAt;
+        this.db.api_keys[index].updated_at = new Date();
+      }
+    }
+  }
+
   async rotateApiKey(id: string, newKeyHash: string, newKeySelector?: string): Promise<ApiKey | null> {
     const store = await this.store();
     return store.rotateApiKey(id, newKeyHash, newKeySelector, new Date());
@@ -337,6 +351,8 @@ class DatabaseService {
       created_at: new Date(),
       updated_at: new Date(),
       expires_at: data.expires_at,
+      last_used_at: undefined,
+      call_count: 0,
       is_active: data.is_active,
     };
     db.api_keys.push(apiKey);

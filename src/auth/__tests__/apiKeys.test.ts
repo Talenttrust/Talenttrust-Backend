@@ -267,11 +267,57 @@ describe('API Key Utilities', () => {
       
       await validateApiKey(apiKey);
       
+      // Need to flush buffer manually for tests
+      const { flushApiKeyUsage } = require('../apiKeys');
+      await flushApiKeyUsage();
+      
       const db = await (database as any).loadDatabase();
       const storedKey = db.api_keys.find((key: any) => key.name === 'Test Key');
       
       expect(storedKey.last_used_at).toBeDefined();
       expect(storedKey.last_used_at).toBeInstanceOf(Date);
+    });
+
+    describe('Throttled usage tracking', () => {
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should buffer and flush call counts and last_used_at', async () => {
+        const request = {
+          name: 'Throttled Key',
+          scope: ['contracts:read'],
+          createdBy: 'user123'
+        };
+
+        const { apiKey } = await createApiKey(request);
+        
+        // Call it 3 times
+        await validateApiKey(apiKey);
+        await validateApiKey(apiKey);
+        await validateApiKey(apiKey);
+        
+        // Buffer has not flushed yet, so db should still have call_count = 0
+        const db = await (database as any).loadDatabase();
+        let storedKey = db.api_keys.find((key: any) => key.name === 'Throttled Key');
+        expect(storedKey.call_count).toBe(0);
+
+        // Advance timers to trigger flush
+        jest.advanceTimersByTime(5000);
+        
+        // Also manually call flush to await its promise completion
+        const { flushApiKeyUsage } = require('../apiKeys');
+        await flushApiKeyUsage();
+
+        const dbAfter = await (database as any).loadDatabase();
+        storedKey = dbAfter.api_keys.find((key: any) => key.name === 'Throttled Key');
+        expect(storedKey.call_count).toBe(3);
+        expect(storedKey.last_used_at).toBeInstanceOf(Date);
+      });
     });
 
     it('should find the correct key among many keys (O(1) property)', async () => {
