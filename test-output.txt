@@ -1,0 +1,443 @@
+{"timestamp":"2026-07-29T18:47:44.642Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"aa373837-4b9c-4e71-8f9b-f6954010f370","err":{"type":"TypeError","message":"this.service.getContractsPage is not a function"},"method":"GET","path":"/contracts","statusCode":500,"errorCode":"internal_error"}
+{"timestamp":"2026-07-29T18:47:44.673Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"9d6309c6-590d-406e-a0d1-8d7771a00db2","err":{"type":"TypeError","message":"this.service.getContractsPage is not a function"},"method":"GET","path":"/contracts","statusCode":500,"errorCode":"internal_error"}
+{"timestamp":"2026-07-29T18:47:44.676Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"0a6ad5b8-4474-45e5-83f8-dc54e16d2fb3","err":{"type":"TypeError","message":"this.service.getContractsPage is not a function"},"method":"GET","path":"/contracts","statusCode":500,"errorCode":"internal_error"}
+{"timestamp":"2026-07-29T18:47:44.686Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"0d1ba48e-07f7-4e7a-8167-229265bdd73b","err":{"type":"AppError","message":"The requested resource was not found"},"method":"GET","path":"/contracts/1c03ed53-082e-44b6-9442-d86bd59bc7c0","statusCode":404,"errorCode":"not_found"}
+{"timestamp":"2026-07-29T18:47:44.701Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"4657f4fb-2455-46f5-97b4-c870a65fd723","err":{"type":"AppError","message":"Budget exceeds maximum contract amount"},"method":"POST","path":"/contracts","statusCode":422,"errorCode":"contract_bounds_error"}
+{"timestamp":"2026-07-29T18:47:44.704Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"f21e3a4a-7b93-4a27-9a1c-1626d9cd9379","err":{"type":"AppError","message":"Budget exceeds maximum contract amount"},"method":"POST","path":"/contracts","statusCode":422,"errorCode":"contract_bounds_error"}
+{"timestamp":"2026-07-29T18:47:44.711Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"333520dd-75d0-46ca-8fef-8773f80379bd","err":{"type":"AppError","message":"Budget exceeds maximum"},"method":"PATCH","path":"/contracts/faba2b2b-2b4e-4ffe-95bb-223ae9ce0845","statusCode":422,"errorCode":"contract_bounds_error"}
+{"timestamp":"2026-07-29T18:47:44.726Z","level":"error","message":"contracts.getContractStats: error","service":"talenttrust-backend","requestId":"59bb483f-fc05-46ef-8bbf-a41855d330b6","err":{"type":"AppError","message":"ContractStats response failed schema validation: <root> Unrecognized key(s) in object: 'extra'","stack":"AppError: ContractStats response failed schema validation: <root> Unrecognized key(s) in object: 'extra'\n    at assertResponseSchema (/workspaces/Talenttrust-Backend/src/modules/contracts/dto/contract-response.dto.ts:95:11)\n    at ContractsController.getContractStats (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.ts:447:29)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"}}
+{"timestamp":"2026-07-29T18:47:44.726Z","level":"error","message":"API request failed","service":"talenttrust-backend","requestId":"59bb483f-fc05-46ef-8bbf-a41855d330b6","err":{"type":"AppError","message":"ContractStats response failed schema validation: <root> Unrecognized key(s) in object: 'extra'"},"method":"GET","path":"/contracts/stats","statusCode":500,"errorCode":"response_contract_error"}
+FAIL src/controllers/contracts.schema.test.ts
+  ● Contracts API — response schema contracts › GET /contracts (legacy offset pagination) › matches the success envelope schema with paginated data
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 500
+
+      149 |
+      150 |       const res = await request(app).get('/contracts?page=1&limit=10');
+    > 151 |       expect(res.status).toBe(200);
+          |                          ^
+      152 |
+      153 |       const parseResult = successEnvelopeSchema(z.array(contractResponseSchema)).safeParse(res.body);
+      154 |       expect(parseResult.success).toBe(true);
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:151:26)
+
+  ● Contracts API — response schema contracts › GET /contracts (legacy offset pagination) › drops extra fields via toContractResponseDto mapping
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 0
+    + Received  + 1
+
+    @@ -5,6 +5,7 @@
+        "freelancerId",
+        "amount",
+        "status",
+        "createdAt",
+        "version",
+    +   "deletedAt",
+      ]
+
+      167 |       const dto = toContractResponseDto(raw as any);
+      168 |       expect(dto).not.toHaveProperty('extraField');
+    > 169 |       expect(Object.keys(dto)).toEqual([
+          |                                ^
+      170 |         'id', 'title', 'clientId', 'freelancerId', 'amount', 'status', 'createdAt', 'version',
+      171 |       ]);
+      172 |     });
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:169:32)
+
+  ● Contracts API — response schema contracts › GET /contracts (legacy offset pagination) › rejects missing required fields in contract items
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 500
+
+      177 |
+      178 |       const res = await request(app).get('/contracts');
+    > 179 |       expect(res.status).toBe(200);
+          |                          ^
+      180 |
+      181 |       const parseResult = successEnvelopeSchema(z.array(contractResponseSchema)).safeParse(res.body);
+      182 |       expect(parseResult.success).toBe(false);
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:179:26)
+
+  ● Contracts API — response schema contracts › GET /contracts (legacy offset pagination) › returns 400 for invalid query parameters
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 400
+    Received: 500
+
+      185 |     it('returns 400 for invalid query parameters', async () => {
+      186 |       const res = await request(app).get('/contracts?page=-1');
+    > 187 |       expect(res.status).toBe(400);
+          |                          ^
+      188 |
+      189 |       const parseResult = errorResponseSchema.safeParse(res.body);
+      190 |       expect(parseResult.success).toBe(true);
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:187:26)
+
+  ● Contracts API — response schema contracts › GET /contracts/:id › matches the success envelope schema with a single contract
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      234 |
+      235 |       const parseResult = successEnvelopeSchema(contractResponseSchema).safeParse(res.body);
+    > 236 |       expect(parseResult.success).toBe(true);
+          |                                   ^
+      237 |     });
+      238 |
+      239 |     it('returns 404 error envelope when contract is not found', async () => {
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:236:35)
+
+  ● Contracts API — response schema contracts › POST /contracts › matches the success envelope schema on creation
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      268 |
+      269 |       const parseResult = successEnvelopeSchema(contractResponseSchema).safeParse(res.body);
+    > 270 |       expect(parseResult.success).toBe(true);
+          |                                   ^
+      271 |     });
+      272 |
+      273 |     it('returns 422 error envelope for contract bounds errors', async () => {
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:270:35)
+
+  ● Contracts API — response schema contracts › PATCH /contracts/:id › matches the success envelope schema on update
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      311 |
+      312 |       const parseResult = successEnvelopeSchema(contractResponseSchema).safeParse(res.body);
+    > 313 |       expect(parseResult.success).toBe(true);
+          |                                   ^
+      314 |     });
+      315 |
+      316 |     it('returns 422 error envelope for contract bounds on update', async () => {
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:313:35)
+
+  ● Contracts API — response schema contracts › GET /contracts/stats › rejects extra fields in stats response
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 500
+
+      361 |
+      362 |       const res = await request(app).get('/contracts/stats');
+    > 363 |       expect(res.status).toBe(200);
+          |                          ^
+      364 |
+      365 |       const parseResult = successEnvelopeSchema(contractStatsSchema).safeParse(res.body);
+      366 |       expect(parseResult.success).toBe(false);
+
+      at Object.<anonymous> (src/controllers/contracts.schema.test.ts:363:26)
+
+{"timestamp":"2026-07-29T18:47:44.641Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"aa373837-4b9c-4e71-8f9b-f6954010f370"}
+{"timestamp":"2026-07-29T18:47:44.672Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"9d6309c6-590d-406e-a0d1-8d7771a00db2"}
+{"timestamp":"2026-07-29T18:47:44.676Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"0a6ad5b8-4474-45e5-83f8-dc54e16d2fb3"}
+{"timestamp":"2026-07-29T18:47:44.679Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"test-req"}
+{"timestamp":"2026-07-29T18:47:44.682Z","level":"info","message":"Contract read operation started","service":"talenttrust-backend","requestId":"bb233e92-c734-4555-8f89-b1d9afe3720d","controller":"contracts","operation":"read","contractId":"b6c60361-9875-4fac-9fd2-967c4735c2c0"}
+{"timestamp":"2026-07-29T18:47:44.682Z","level":"info","message":"Milestone read operation succeeded","service":"talenttrust-backend","requestId":"bb233e92-c734-4555-8f89-b1d9afe3720d","controller":"contracts","operation":"read","contractId":"b6c60361-9875-4fac-9fd2-967c4735c2c0"}
+{"timestamp":"2026-07-29T18:47:44.685Z","level":"info","message":"Contract read operation started","service":"talenttrust-backend","requestId":"0d1ba48e-07f7-4e7a-8167-229265bdd73b","controller":"contracts","operation":"read","contractId":"1c03ed53-082e-44b6-9442-d86bd59bc7c0"}
+{"timestamp":"2026-07-29T18:47:44.686Z","level":"warn","message":"Milestone read failed: contract not found","service":"talenttrust-backend","requestId":"0d1ba48e-07f7-4e7a-8167-229265bdd73b","controller":"contracts","operation":"read","contractId":"1c03ed53-082e-44b6-9442-d86bd59bc7c0"}
+{"timestamp":"2026-07-29T18:47:44.697Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","requestId":"57d2ee3c-47bf-447f-aab8-147e75808440","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.697Z","level":"info","message":"Milestone create operation succeeded","service":"talenttrust-backend","requestId":"57d2ee3c-47bf-447f-aab8-147e75808440","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.701Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","requestId":"4657f4fb-2455-46f5-97b4-c870a65fd723","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.701Z","level":"warn","message":"Milestone create rejected: contract bounds violation","service":"talenttrust-backend","requestId":"4657f4fb-2455-46f5-97b4-c870a65fd723","controller":"contracts","operation":"create","hasMilestones":false,"errorMessage":"Budget exceeds maximum contract amount"}
+{"timestamp":"2026-07-29T18:47:44.704Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","requestId":"f21e3a4a-7b93-4a27-9a1c-1626d9cd9379","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.704Z","level":"warn","message":"Milestone create rejected: contract bounds violation","service":"talenttrust-backend","requestId":"f21e3a4a-7b93-4a27-9a1c-1626d9cd9379","controller":"contracts","operation":"create","hasMilestones":false,"errorMessage":"Budget exceeds maximum contract amount"}
+{"timestamp":"2026-07-29T18:47:44.707Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","requestId":"11efc5c3-252f-4ceb-8afd-66479016cc8c","controller":"contracts","operation":"update","contractId":"ed9d4243-633e-431f-b3c7-0f2ef7155b47","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.707Z","level":"info","message":"Milestone update operation succeeded","service":"talenttrust-backend","requestId":"11efc5c3-252f-4ceb-8afd-66479016cc8c","controller":"contracts","operation":"update","contractId":"ed9d4243-633e-431f-b3c7-0f2ef7155b47","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.711Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","requestId":"333520dd-75d0-46ca-8fef-8773f80379bd","controller":"contracts","operation":"update","contractId":"faba2b2b-2b4e-4ffe-95bb-223ae9ce0845","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:44.711Z","level":"warn","message":"Milestone update rejected: contract bounds violation","service":"talenttrust-backend","requestId":"333520dd-75d0-46ca-8fef-8773f80379bd","controller":"contracts","operation":"update","contractId":"faba2b2b-2b4e-4ffe-95bb-223ae9ce0845","hasMilestones":false,"errorMessage":"Budget exceeds maximum"}
+{"timestamp":"2026-07-29T18:47:44.713Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"96363ceb-4af0-4464-b38e-69d0909711fe","contractId":"a9de6c4c-8671-4a85-94d2-f1a187079988"}
+{"timestamp":"2026-07-29T18:47:44.715Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"4ea3f4d2-f932-4234-bbd0-952685cb9542"}
+{"timestamp":"2026-07-29T18:47:44.717Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"59bb483f-fc05-46ef-8bbf-a41855d330b6"}
+{"timestamp":"2026-07-29T18:47:44.813Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"5bb16e1f-ff87-443e-aaea-a81b358f854f"}
+{"timestamp":"2026-07-29T18:47:44.813Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"5bb16e1f-ff87-443e-aaea-a81b358f854f"}
+{"timestamp":"2026-07-29T18:47:44.813Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"bd62a550-112c-409f-aa98-5be8810a1091"}
+{"timestamp":"2026-07-29T18:47:44.813Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"bd62a550-112c-409f-aa98-5be8810a1091"}
+{"timestamp":"2026-07-29T18:47:44.826Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"90d68ab6-352a-4f64-9d6e-6fb01644581c"}
+{"timestamp":"2026-07-29T18:47:44.826Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"90d68ab6-352a-4f64-9d6e-6fb01644581c"}
+{"timestamp":"2026-07-29T18:47:44.826Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"cab2fa9f-3461-4ff0-9a7a-cf070fba010d"}
+{"timestamp":"2026-07-29T18:47:44.826Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"cab2fa9f-3461-4ff0-9a7a-cf070fba010d"}
+{"timestamp":"2026-07-29T18:47:44.847Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:44.847Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:44.848Z","level":"info","message":"ContractsService.updateContract: contract updated","service":"contracts","contractId":"abc","version":0}
+{"timestamp":"2026-07-29T18:47:44.852Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"d24af2c1-1441-42d5-a85e-719938f63464"}
+{"timestamp":"2026-07-29T18:47:44.852Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"d24af2c1-1441-42d5-a85e-719938f63464"}
+{"timestamp":"2026-07-29T18:47:44.853Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"561b0b0a-079b-418d-a63f-e41478589f01"}
+{"timestamp":"2026-07-29T18:47:44.853Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"561b0b0a-079b-418d-a63f-e41478589f01"}
+{"timestamp":"2026-07-29T18:47:44.855Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"05e885d5-4882-4fc3-bd40-4025d7caa3a2"}
+{"timestamp":"2026-07-29T18:47:44.855Z","level":"warn","message":"ContractsService.createContract: soroban prepareEscrow failed","service":"contracts","contractId":"05e885d5-4882-4fc3-bd40-4025d7caa3a2","err":{}}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"63790bad-cdc2-46a1-b6e5-91b31dbea737"}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"63790bad-cdc2-46a1-b6e5-91b31dbea737"}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.updateContract: contract updated","service":"contracts","contractId":"63790bad-cdc2-46a1-b6e5-91b31dbea737","version":0}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"849ec79b-6e80-48e9-a95c-87e123f1de37"}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"849ec79b-6e80-48e9-a95c-87e123f1de37"}
+{"timestamp":"2026-07-29T18:47:44.856Z","level":"info","message":"ContractsService.updateContract: contract updated","service":"contracts","contractId":"849ec79b-6e80-48e9-a95c-87e123f1de37","version":0}
+{"timestamp":"2026-07-29T18:47:44.857Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"dca62cbd-fb3d-4fe5-8d7c-2e4be0c397d9"}
+{"timestamp":"2026-07-29T18:47:44.857Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"dca62cbd-fb3d-4fe5-8d7c-2e4be0c397d9"}
+{"timestamp":"2026-07-29T18:47:44.857Z","level":"info","message":"ContractsService.updateContract: contract updated","service":"contracts","contractId":"dca62cbd-fb3d-4fe5-8d7c-2e4be0c397d9","version":0}
+{"timestamp":"2026-07-29T18:47:44.857Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"f03e526a-52a7-4675-84ca-06bf608f8b9c"}
+{"timestamp":"2026-07-29T18:47:44.857Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"f03e526a-52a7-4675-84ca-06bf608f8b9c"}
+{"timestamp":"2026-07-29T18:47:44.858Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"c76cf41e-748b-47bb-b6e6-63af9674507e"}
+{"timestamp":"2026-07-29T18:47:44.858Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"c76cf41e-748b-47bb-b6e6-63af9674507e"}
+{"timestamp":"2026-07-29T18:47:44.859Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"4533c95f-719c-4a80-91ae-dff23d14d543"}
+{"timestamp":"2026-07-29T18:47:44.859Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"4533c95f-719c-4a80-91ae-dff23d14d543"}
+{"timestamp":"2026-07-29T18:47:44.863Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"9f545855-9f1e-4d35-b37d-663158426acc"}
+{"timestamp":"2026-07-29T18:47:44.863Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"9f545855-9f1e-4d35-b37d-663158426acc"}
+{"timestamp":"2026-07-29T18:47:44.863Z","level":"info","message":"ContractsService.updateContract: contract updated","service":"contracts","contractId":"9f545855-9f1e-4d35-b37d-663158426acc","version":0}
+{"timestamp":"2026-07-29T18:47:44.863Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"86d53c93-7e9a-4972-8e03-481b21ccfb76"}
+{"timestamp":"2026-07-29T18:47:44.863Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"86d53c93-7e9a-4972-8e03-481b21ccfb76"}
+{"timestamp":"2026-07-29T18:47:44.864Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"56005c1d-54aa-4879-b7af-48d7234622d6"}
+{"timestamp":"2026-07-29T18:47:44.864Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"56005c1d-54aa-4879-b7af-48d7234622d6"}
+{"timestamp":"2026-07-29T18:47:44.865Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"dfa33b82-34f9-40b4-8ed7-056c9c14552d"}
+{"timestamp":"2026-07-29T18:47:44.865Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"dfa33b82-34f9-40b4-8ed7-056c9c14552d"}
+{"timestamp":"2026-07-29T18:47:44.866Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"27aa736e-c3bb-426f-85b5-a28f7c354eed"}
+{"timestamp":"2026-07-29T18:47:44.866Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"27aa736e-c3bb-426f-85b5-a28f7c354eed"}
+{"timestamp":"2026-07-29T18:47:44.866Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"f9ef7d81-689a-484b-b211-b7bbcc7d8130"}
+{"timestamp":"2026-07-29T18:47:44.866Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"f9ef7d81-689a-484b-b211-b7bbcc7d8130"}
+{"timestamp":"2026-07-29T18:47:44.870Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"c5b473d9-bb09-46e0-ac60-c66e9f6d82d3"}
+{"timestamp":"2026-07-29T18:47:44.870Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"c5b473d9-bb09-46e0-ac60-c66e9f6d82d3"}
+{"timestamp":"2026-07-29T18:47:44.871Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"6890df02-3319-4c50-9e2b-1a1f36615a15"}
+{"timestamp":"2026-07-29T18:47:44.871Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"6890df02-3319-4c50-9e2b-1a1f36615a15"}
+{"timestamp":"2026-07-29T18:47:44.871Z","level":"info","message":"ContractsService.deleteContract: contract soft-deleted","service":"contracts","contractId":"6890df02-3319-4c50-9e2b-1a1f36615a15"}
+{"timestamp":"2026-07-29T18:47:44.872Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"b091e895-88fe-4324-8778-74868e4ce4b5"}
+{"timestamp":"2026-07-29T18:47:44.872Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"b091e895-88fe-4324-8778-74868e4ce4b5"}
+{"timestamp":"2026-07-29T18:47:44.872Z","level":"info","message":"ContractsService.createContract: contract created","service":"contracts","contractId":"2d1149ee-be84-48e7-8f6a-ebcbb9cfe23f"}
+{"timestamp":"2026-07-29T18:47:44.872Z","level":"info","message":"ContractsService.createContract: soroban escrow prepared","service":"contracts","contractId":"2d1149ee-be84-48e7-8f6a-ebcbb9cfe23f"}
+FAIL src/services/contracts.service.test.ts
+  ● ContractsService › getContractById › delegates to the repository findById implementation
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: "abc"
+    Received: "abc", undefined
+
+    Number of calls: 1
+
+      129 |
+      130 |       expect(contract).toBe(fakeContract);
+    > 131 |       expect(mockRepository.findById).toHaveBeenCalledWith('abc');
+          |                                       ^
+      132 |     });
+      133 |
+      134 |     it('returns undefined for a non-existent id from the real repository', async () => {
+
+      at Object.<anonymous> (src/services/contracts.service.test.ts:131:39)
+
+  ● ContractsService › deleteContract › delegates to the repository delete implementation and throws when missing
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: "missing"
+    Received: "missing", undefined
+
+    Number of calls: 1
+
+      221 |
+      222 |       await expect(service.deleteContract('missing')).rejects.toThrow(/not found/);
+    > 223 |       expect(mockRepository.delete).toHaveBeenCalledWith('missing');
+          |                                     ^
+      224 |     });
+      225 |   });
+      226 |
+
+      at Object.<anonymous> (src/services/contracts.service.test.ts:223:37)
+
+  ● ContractsService › getContractHistory › delegates contract history retrieval to eventIngestionService
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: "contract-123"
+
+    Number of calls: 0
+
+      679 |       const result = await contractsService.getContractHistory('contract-123');
+      680 |
+    > 681 |       expect(eventIngestionService.getContractHistory).toHaveBeenCalledWith('contract-123');
+          |                                                        ^
+      682 |       expect(result).toBe(fakeHistory);
+      683 |     });
+      684 |   });
+
+      at Object.<anonymous> (src/services/contracts.service.test.ts:681:56)
+
+PASS src/middleware/errorHandlers.test.ts
+PASS src/controllers/contracts-bulk.controller.test.ts
+{"timestamp":"2026-07-29T18:47:45.120Z","level":"error","message":"Milestone create operation failed with unexpected error","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false,"err":{"type":"Error","message":"Creation failed","stack":"Error: Creation failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:631:27)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.123Z","level":"error","message":"Milestone update operation failed with unexpected error","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false,"err":{"type":"Error","message":"Update failed","stack":"Error: Update failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:687:21)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.125Z","level":"error","message":"contracts.deleteContract: error","service":"talenttrust-backend","requestId":"unknown","contractId":"abc","err":{"type":"Error","message":"Delete failed","stack":"Error: Delete failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:733:23)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.140Z","level":"error","message":"contracts.deleteContract: error","service":"talenttrust-backend","requestId":"unknown","contractId":"abc","err":{"type":"Error","message":"not found","stack":"Error: not found\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:760:44)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.142Z","level":"error","message":"contracts.getContractStats: error","service":"talenttrust-backend","requestId":"unknown","err":{"type":"Error","message":"Stats failed","stack":"Error: Stats failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:810:21)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.149Z","level":"error","message":"Milestone update operation failed with unexpected error","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false,"err":{"type":"Error","message":"Update failed","stack":"Error: Update failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:1040:25)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.151Z","level":"error","message":"contracts.deleteContract: error","service":"talenttrust-backend","requestId":"unknown","contractId":"abc","err":{"type":"Error","message":"Delete failed","stack":"Error: Delete failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:1079:25)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+{"timestamp":"2026-07-29T18:47:45.153Z","level":"error","message":"contracts.getContractStats: error","service":"talenttrust-backend","requestId":"unknown","err":{"type":"Error","message":"Stats failed","stack":"Error: Stats failed\n    at Object.<anonymous> (/workspaces/Talenttrust-Backend/src/controllers/contracts.controller.test.ts:1121:25)\n    at Promise.then.completed (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at _runTestsForDescribeBlock (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:121:9)\n    at run (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/workspaces/Talenttrust-Backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/workspaces/Talenttrust-Backend/node_modules/jest-runner/build/runTest.js:444:34)"}}
+PASS src/controllers/contracts.controller.test.ts
+PASS src/controllers/__tests__/contracts-error-snapshots.test.ts
+FAIL src/controllers/contracts.integration.test.ts
+  ● Test suite failed to run
+
+    SqliteError: no such table: api_keys
+
+      631 |
+      632 |     if (!hasCallCount) {
+    > 633 |       db.exec("ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0");
+          |          ^
+      634 |     }
+      635 |   },
+      636 | });
+
+      at Database.exec (node_modules/better-sqlite3/lib/methods/wrappers.js:9:14)
+      at Object.up (src/db/migrations.ts:633:10)
+      at src/db/migrations.ts:557:17
+      at sqliteTransaction (node_modules/better-sqlite3/lib/methods/transaction.js:65:24)
+      at runMigrations (src/db/migrations.ts:566:5)
+      at getDb (src/db/database.ts:74:16)
+      at createContractsRouter (src/routes/contracts.routes.ts:154:31)
+      at Object.<anonymous> (src/routes/contracts.routes.ts:370:16)
+      at Object.<anonymous> (src/app.ts:26:1)
+      at Object.<anonymous> (src/index.ts:10:1)
+      at Object.<anonymous> (src/controllers/contracts.integration.test.ts:21:1)
+
+FAIL src/controllers/contracts.concurrency.test.ts
+  ● Test suite failed to run
+
+    SqliteError: no such table: api_keys
+
+      631 |
+      632 |     if (!hasCallCount) {
+    > 633 |       db.exec("ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0");
+          |          ^
+      634 |     }
+      635 |   },
+      636 | });
+
+      at Database.exec (node_modules/better-sqlite3/lib/methods/wrappers.js:9:14)
+      at Object.up (src/db/migrations.ts:633:10)
+      at src/db/migrations.ts:557:17
+      at sqliteTransaction (node_modules/better-sqlite3/lib/methods/transaction.js:65:24)
+      at runMigrations (src/db/migrations.ts:566:5)
+      at getDb (src/db/database.ts:74:16)
+      at createContractsRouter (src/routes/contracts.routes.ts:154:31)
+      at Object.<anonymous> (src/routes/contracts.routes.ts:370:16)
+      at Object.<anonymous> (src/app.ts:26:1)
+      at Object.<anonymous> (src/index.ts:10:1)
+      at Object.<anonymous> (src/controllers/contracts.concurrency.test.ts:34:33)
+
+FAIL src/controllers/contracts.auth.test.ts
+  ● Test suite failed to run
+
+    SqliteError: no such table: api_keys
+
+      631 |
+      632 |     if (!hasCallCount) {
+    > 633 |       db.exec("ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0");
+          |          ^
+      634 |     }
+      635 |   },
+      636 | });
+
+      at Database.exec (node_modules/better-sqlite3/lib/methods/wrappers.js:9:14)
+      at Object.up (src/db/migrations.ts:633:10)
+      at src/db/migrations.ts:557:17
+      at sqliteTransaction (node_modules/better-sqlite3/lib/methods/transaction.js:65:24)
+      at runMigrations (src/db/migrations.ts:566:5)
+      at getDb (src/db/database.ts:74:16)
+      at createContractsRouter (src/routes/contracts.routes.ts:154:31)
+      at Object.<anonymous> (src/routes/contracts.routes.ts:370:16)
+      at Object.<anonymous> (src/app.ts:26:1)
+      at Object.<anonymous> (src/index.ts:10:1)
+      at Object.<anonymous> (src/controllers/contracts.auth.test.ts:32:33)
+
+Test Suites: 5 failed, 4 passed, 9 total
+Tests:       11 failed, 171 passed, 182 total
+Snapshots:   4 passed, 4 total
+Time:        4.041 s, estimated 8 s
+Ran all test suites matching /(contracts.controller.test|errorHandlers.test|contracts-error-snapshots|contracts-bulk.controller.test|contracts.service.test|contracts.concurrency.test|contracts.auth.test|contracts.schema.test|contracts.integration.test)/i.
+{"timestamp":"2026-07-29T18:47:45.083Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.083Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.085Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.085Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.085Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.086Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.086Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.086Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":1}
+{"timestamp":"2026-07-29T18:47:45.087Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.087Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.088Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.089Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.089Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.090Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.090Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.091Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.092Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.092Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.093Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.093Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.093Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.094Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.094Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.094Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.095Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.095Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":1}
+{"timestamp":"2026-07-29T18:47:45.095Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.096Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.096Z","level":"info","message":"Contract read operation started","service":"talenttrust-backend","controller":"contracts","operation":"read","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.096Z","level":"info","message":"Milestone read operation succeeded","service":"talenttrust-backend","controller":"contracts","operation":"read","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.097Z","level":"info","message":"Contract read operation started","service":"talenttrust-backend","controller":"contracts","operation":"read","contractId":"missing"}
+{"timestamp":"2026-07-29T18:47:45.097Z","level":"warn","message":"Milestone read failed: contract not found","service":"talenttrust-backend","controller":"contracts","operation":"read","contractId":"missing"}
+{"timestamp":"2026-07-29T18:47:45.097Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.097Z","level":"info","message":"Milestone create operation succeeded","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.098Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.098Z","level":"warn","message":"Milestone create rejected: contract bounds violation","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false,"errorMessage":"Budget exceeds maximum contract amount"}
+{"timestamp":"2026-07-29T18:47:45.099Z","level":"info","message":"Milestone create operation started","service":"talenttrust-backend","controller":"contracts","operation":"create","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.121Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.121Z","level":"info","message":"Milestone update operation succeeded","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.122Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.122Z","level":"warn","message":"Milestone update rejected: contract bounds violation","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false,"errorMessage":"Budget exceeds maximum"}
+{"timestamp":"2026-07-29T18:47:45.123Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.124Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.125Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.125Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.126Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.141Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.142Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.142Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.145Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.145Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":0}
+{"timestamp":"2026-07-29T18:47:45.145Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.145Z","level":"info","message":"contracts.getContracts: success","service":"talenttrust-backend","requestId":"unknown","count":1}
+{"timestamp":"2026-07-29T18:47:45.146Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.146Z","level":"info","message":"contracts.getContracts: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.147Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.147Z","level":"info","message":"Milestone update operation succeeded","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.148Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.148Z","level":"warn","message":"Milestone update rejected: contract bounds violation","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false,"errorMessage":"Budget exceeds maximum contract amount"}
+{"timestamp":"2026-07-29T18:47:45.149Z","level":"info","message":"Milestone update operation started","service":"talenttrust-backend","controller":"contracts","operation":"update","contractId":"abc","hasMilestones":false}
+{"timestamp":"2026-07-29T18:47:45.150Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.151Z","level":"info","message":"contracts.deleteContract: start","service":"talenttrust-backend","requestId":"unknown","contractId":"abc"}
+{"timestamp":"2026-07-29T18:47:45.152Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"unknown"}
+{"timestamp":"2026-07-29T18:47:45.153Z","level":"info","message":"contracts.getContractStats: start","service":"talenttrust-backend","requestId":"unknown"}
