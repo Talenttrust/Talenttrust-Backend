@@ -7,59 +7,82 @@
  */
 
 import express from 'express';
-import http from 'http';
+import request from 'supertest';
 import { healthRouter } from './health';
 
-interface SimpleResponse {
-  statusCode: number;
-  headers: http.IncomingHttpHeaders;
-  body: string;
-}
-
-function request(server: http.Server, method: string, path: string): Promise<SimpleResponse> {
-  return new Promise((resolve, reject) => {
-    const addr = server.address() as { port: number };
-    const req = http.request(
-      { hostname: '127.0.0.1', port: addr.port, path, method },
-      (res) => {
-        let data = '';
-        res.on('data', (c) => (data += c));
-        res.on('end', () =>
-          resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body: data }),
-        );
-      },
-    );
-    req.on('error', reject);
-    req.end();
-  });
-}
-
 describe('healthRouter', () => {
-  let server: http.Server;
+  let app: express.Application;
 
-  beforeAll((done: jest.DoneCallback) => {
-    const a = express();
-    a.use('/', healthRouter);
-    const s = a.listen(0, '127.0.0.1', done);
-    void (server = s);
+  beforeAll(() => {
+    app = express();
+    app.use(express.json());
+    app.use('/', healthRouter);
   });
 
-  afterAll((done) => {
-    void server.close(done);
+  describe('GET /', () => {
+    it('returns 200 and { status: "ok", service: "talenttrust-backend" }', async () => {
+      const res = await request(app).get('/');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'ok', service: 'talenttrust-backend' });
+      expect(res.headers['content-type']).toMatch(/application\/json/);
+    });
   });
 
-  it('GET / → 200', async () => {
-    const res = await request(server, 'GET', '/');
-    expect(res.statusCode).toBe(200);
-  });
+  describe('POST /', () => {
+    it('first write: returns 200 and healthy payload', async () => {
+      const res = await request(app)
+        .post('/')
+        .set('idempotency-key', 'test-key-1')
+        .send({ service: 'test-svc-1', status: 'ok', uptimeSeconds: 100 });
+      
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('healthy');
+      expect(res.body.timestamp).toBeDefined();
+      expect(res.body.version).toBeDefined();
+    });
 
-  it('returns { status: "ok", service: "talenttrust-backend" }', async () => {
-    const res = await request(server, 'GET', '/');
-    expect(JSON.parse(res.body)).toEqual({ status: 'ok', service: 'talenttrust-backend' });
-  });
+    it('exact replay: returns original response', async () => {
+      // First request
+      const firstRes = await request(app)
+        .post('/')
+        .set('idempotency-key', 'test-key-2')
+        .send({ service: 'test-svc-2', status: 'ok', uptimeSeconds: 200 });
+      
+      expect(firstRes.status).toBe(200);
+      
+      // Wait a bit to ensure timestamp would be different if not cached
+      await new Promise(r => setTimeout(r, 10));
 
-  it('content-type is application/json', async () => {
-    const res = await request(server, 'GET', '/');
-    expect(res.headers['content-type']).toMatch(/application\/json/);
+      // Second request (exact replay)
+      const secondRes = await request(app)
+        .post('/')
+        .set('idempotency-key', 'test-key-2')
+        .send({ service: 'test-svc-2', status: 'ok', uptimeSeconds: 200 });
+
+      expect(secondRes.status).toBe(200);
+      expect(secondRes.body).toEqual(firstRes.body);
+    });
+
+    it('key reuse with different body: returns 409 conflict', async () => {
+      // First request
+      await request(app)
+        .post('/')
+        .set('idempotency-key', 'test-key-3')
+        .send({ service: 'test-svc-3', status: 'ok', uptimeSeconds: 300 });
+
+      // Second request (different body, same key)
+      const conflictRes = await request(app)
+        .post('/')
+        .set('idempotency-key', 'test-key-3')
+        .send({ service: 'test-svc-different', status: 'ok', uptimeSeconds: 400 });
+
+      expect(conflictRes.status).toBe(409);
+      expect(conflictRes.body).toEqual({
+        error: {
+          code: 'conflict',
+          message: 'Idempotency key already used for a different request',
+        },
+      });
+    });
   });
 });

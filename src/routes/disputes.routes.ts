@@ -251,9 +251,6 @@ export function createDisputesObservabilityMiddleware(options: DisputesRouterOpt
   };
 }
 
-  return router;
-}
-
 function formatExpressPath(path: unknown): string | null {
   if (typeof path === 'string') {
     return normalizeRoutePart(path);
