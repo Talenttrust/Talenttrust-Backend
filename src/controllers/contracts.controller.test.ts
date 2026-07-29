@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { ContractBoundsError, CONTRACT_BOUNDS } from "../contracts/bounds";
+import { AppError } from "../errors/appError";
 
 const mockGetAllContracts = jest.fn();
 const mockGetContractById = jest.fn();
@@ -262,11 +263,9 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
-      expect(mockResponse.json).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "error" }),
-      );
-      expect(mockNext).not.toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
+      expect((mockNext as jest.Mock).mock.calls[0][0].code).toBe("bad_request");
     });
 
     it("returns 400 when limit is 0", async () => {
@@ -278,7 +277,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
 
     it("returns 400 when limit is negative", async () => {
@@ -290,7 +290,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
 
     it("returns 400 when limit is non-numeric", async () => {
@@ -302,7 +303,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
 
     it("returns 400 for a malformed cursor", async () => {
@@ -314,11 +316,9 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
-      expect(mockResponse.json).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "error" }),
-      );
-      expect(mockNext).not.toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
+      expect((mockNext as jest.Mock).mock.calls[0][0].code).toBe("bad_request");
     });
 
     it("returns 400 for a cursor missing the id field", async () => {
@@ -334,7 +334,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
 
     it("returns 400 for a cursor with an invalid date", async () => {
@@ -350,7 +351,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
 
     it("returns 400 for a cursor exceeding max length", async () => {
@@ -363,7 +365,8 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
     });
   });
 
@@ -490,8 +493,8 @@ describe("ContractsController", () => {
         });
       });
 
-      it("returns 400 for malformed cursor", async () => {
-        mockRequest.query = { cursor: "invalid" };
+      it("returns 400 for a malformed cursor", async () => {
+        mockRequest.query = { cursor: "not-a-valid-cursor" };
 
         await controller.getContracts(
           mockRequest as Request,
@@ -499,12 +502,14 @@ describe("ContractsController", () => {
           mockNext,
         );
 
-        expect(mockResponse.status).toHaveBeenCalledWith(400);
+        expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+        expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
+        expect((mockNext as jest.Mock).mock.calls[0][0].code).toBe("bad_request");
       });
 
       it("calls next() when service throws", async () => {
-        const error = new Error("Service error");
-        mockGetContractsPage.mockRejectedValue(error);
+        const mockError = new Error("Service error");
+        mockGetContractsPage.mockRejectedValue(mockError);
 
         await controller.getContracts(
           mockRequest as Request,
@@ -512,7 +517,7 @@ describe("ContractsController", () => {
           mockNext,
         );
 
-        expect(mockNext).toHaveBeenCalledWith(error);
+        expect(mockNext).toHaveBeenCalledWith(mockError);
       });
     });
 
@@ -604,16 +609,10 @@ describe("ContractsController", () => {
           mockResponse as Response,
           mockNext,
         );
-        expect(mockResponse.status).toHaveBeenCalledWith(422);
-        expect(mockResponse.json).toHaveBeenCalledWith({
-          status: "error",
-          error: {
-            code: "contract_bounds_error",
-            message: "Budget exceeds maximum contract amount",
-            requestId: "unknown",
-          },
-        });
-        expect(mockNext).not.toHaveBeenCalled();
+        expect(mockNext).toHaveBeenCalledWith(expect.any(ContractBoundsError));
+        expect((mockNext as jest.Mock).mock.calls[0][0].message).toBe(
+          "Budget exceeds maximum contract amount",
+        );
       });
 
       it("delegates non-bounds errors to next()", async () => {
@@ -665,8 +664,7 @@ describe("ContractsController", () => {
         mockResponse as Response,
         mockNext,
       );
-      expect(mockResponse.status).toHaveBeenCalledWith(422);
-      expect(mockNext).not.toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ContractBoundsError));
     });
 
     it("delegates non-bounds errors to next()", async () => {
@@ -785,8 +783,7 @@ describe("ContractsController", () => {
         mockResponse as Response,
         mockNext,
       );
-      expect(mockResponse.status).toHaveBeenCalledWith(422);
-      expect(mockNext).not.toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ContractBoundsError));
     });
 
     it("delegates non-bounds errors to next()", async () => {
@@ -932,16 +929,9 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(400);
-      expect(mockResponse.json).toHaveBeenCalledWith(
-        expect.objectContaining({
-          status: "error",
-          error: expect.objectContaining({
-            code: "bad_request",
-            message: expect.stringMatching(/invalid pagination cursor/i),
-          }),
-        }),
-      );
+      expect(mockNext).toHaveBeenCalledWith(expect.any(AppError));
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(400);
+      expect((mockNext as jest.Mock).mock.calls[0][0].code).toBe("bad_request");
     });
 
     it("calls next() when service throws", async () => {
@@ -1015,16 +1005,7 @@ describe("ContractsController", () => {
         mockNext,
       );
 
-      expect(mockResponse.status).toHaveBeenCalledWith(422);
-      expect(mockResponse.json).toHaveBeenCalledWith({
-        status: "error",
-        error: {
-          code: "contract_bounds_error",
-          message: "Budget exceeds maximum contract amount",
-          requestId: "unknown",
-        },
-      });
-      expect(mockNext).not.toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ContractBoundsError));
     });
 
     it("delegates non-bounds errors to next()", async () => {

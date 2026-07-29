@@ -35,8 +35,8 @@ import type {
   BulkItemResult,
 } from "../modules/contracts/dto/bulk-operations.dto";
 import { ContractBoundsError } from "../contracts/bounds";
-import { NotFoundError } from "../errors/appError";
-import { fail, ok } from "../utils/apiResponse";
+import { AppError, NotFoundError } from "../errors/appError";
+import { ok } from "../utils/apiResponse";
 
 type ContractRequest<TBody = unknown> = Request<
   Record<string, string>,
@@ -94,16 +94,13 @@ export class ContractsBulkController {
             : [];
 
       if (!rawItems || rawItems.length === 0 || rawItems.length > 25) {
-        res.status(400).json({
-          error: {
-            code: "validation_error",
-            message:
-              rawItems.length > 25
-                ? "Batch size exceeds maximum of 25"
-                : "Operations array is required and must not be empty",
-          },
-        });
-        return;
+        throw new AppError(
+          400,
+          "validation_error",
+          rawItems.length > 25
+            ? "Batch size exceeds maximum of 25"
+            : "Operations array is required and must not be empty",
+        );
       }
 
       // Structural validation check across all items in batch
@@ -112,36 +109,18 @@ export class ContractsBulkController {
       for (const item of rawItems) {
         const action = item.action ?? "create";
         if (!["create", "update", "delete"].includes(action)) {
-          res.status(400).json({
-            error: {
-              code: "validation_error",
-              message: `Invalid action '${action}'`,
-            },
-          });
-          return;
+          throw new AppError(400, "validation_error", `Invalid action '${action}'`);
         }
 
         if (action === "delete") {
           const contractId = item.contractId ?? item.id;
           if (!contractId || item.version === undefined) {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "contractId and version required",
-              },
-            });
-            return;
+            throw new AppError(400, "validation_error", "contractId and version required");
           }
         } else if (action === "update") {
           const contractId = item.contractId ?? item.id;
           if (!contractId || item.version === undefined) {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "contractId and version required",
-              },
-            });
-            return;
+            throw new AppError(400, "validation_error", "contractId and version required");
           }
         } else if (action === "create") {
           if (item.milestones !== undefined) {
@@ -149,13 +128,7 @@ export class ContractsBulkController {
               !Array.isArray(item.milestones) ||
               item.milestones.length === 0
             ) {
-              res.status(400).json({
-                error: {
-                  code: "validation_error",
-                  message: "milestones array is required",
-                },
-              });
-              return;
+              throw new AppError(400, "validation_error", "milestones array is required");
             }
             for (const m of item.milestones) {
               if (
@@ -165,24 +138,12 @@ export class ContractsBulkController {
                 typeof m.amount !== "number" ||
                 m.amount <= 0
               ) {
-                res.status(400).json({
-                  error: {
-                    code: "validation_error",
-                    message: "invalid milestone values",
-                  },
-                });
-                return;
+                throw new AppError(400, "validation_error", "invalid milestone values");
               }
             }
           }
           if (item.clientId === "invalid-uuid") {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "invalid clientId UUID",
-              },
-            });
-            return;
+            throw new AppError(400, "validation_error", "invalid clientId UUID");
           }
         }
       }

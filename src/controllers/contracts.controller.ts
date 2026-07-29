@@ -5,7 +5,7 @@ import {
   resolveCursorQueryParam,
 } from "../contracts/cursor.repository";
 import { CURSOR_DEFAULT_LIMIT } from "../contracts/cursor.types";
-import { NotFoundError } from "../errors/appError";
+import { AppError, NotFoundError } from "../errors/appError";
 import { SoftDeleteRetentionError } from "../utils/softDelete";
 import {
   CreateContractRequestDto,
@@ -27,7 +27,7 @@ import {
 import { ContractsService } from "../services/contracts.service";
 import { createLogger } from "../logger";
 import type { MetricsServiceLike } from "../observability/metrics-service";
-import { fail, ok } from "../utils/apiResponse";
+import { ok } from "../utils/apiResponse";
 import { getCorrelationId, getRequestId } from "../utils/correlationId";
 import { applyPagination, parsePaginationQuery } from "../utils/pagination";
 import type { Logger } from "../logger";
@@ -101,13 +101,13 @@ export class ContractsController {
       try {
         limit = parseLimit(query["limit"]);
       } catch (err) {
-        fail(res, "bad_request", (err as Error).message, 400);
+        next(new AppError(400, "bad_request", (err as Error).message));
         return;
       }
 
       const cursorResult = resolveCursorQueryParam(query["cursor"]);
       if (!cursorResult.ok) {
-        fail(res, "bad_request", (cursorResult as any).message, 400);
+        next(new AppError(400, "bad_request", (cursorResult as any).message));
         return;
       }
 
@@ -146,19 +146,13 @@ export class ContractsController {
       try {
         limit = parseLimit(query["limit"]);
       } catch (error) {
-        res.status(400).json({
-          status: "error",
-          message: error instanceof Error ? error.message : "Invalid limit",
-        });
+        next(new AppError(400, "bad_request", error instanceof Error ? error.message : "Invalid limit"));
         return;
       }
 
       const cursorResult = resolveCursorQueryParam(query["cursor"]);
       if (!cursorResult.ok) {
-        res.status(400).json({
-          status: "error",
-          message: (cursorResult as any).message,
-        });
+        next(new AppError(400, "bad_request", (cursorResult as any).message));
         return;
       }
 
@@ -281,7 +275,7 @@ export class ContractsController {
           durationSeconds,
           "contract_bounds_error",
         );
-        fail(res, "contract_bounds_error", error.message, 422);
+        next(error);
         return;
       }
       log.error("Milestone create operation failed with unexpected error", {
@@ -347,7 +341,7 @@ export class ContractsController {
           durationSeconds,
           "contract_bounds_error",
         );
-        fail(res, "contract_bounds_error", error.message, 422);
+        next(error);
         return;
       }
       if (error instanceof NotFoundError) {
@@ -421,7 +415,7 @@ export class ContractsController {
       ok(res, toContractResponseDto(restored));
     } catch (error) {
       if (error instanceof SoftDeleteRetentionError) {
-        fail(res, error.code, error.message, error.statusCode);
+        next(error);
         return;
       }
       log.error("contracts.restoreContract: error", {
@@ -454,7 +448,7 @@ export class ContractsController {
       );
     } catch (error) {
       if (error instanceof ContractBoundsError) {
-        fail(res, "contract_bounds_error", error.message, 422);
+        next(error);
         return;
       }
       log.error("contracts.getContractStats: error", {
