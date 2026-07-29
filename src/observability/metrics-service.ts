@@ -14,11 +14,23 @@ import {
   assertDisputesErrorCause,
   assertServiceStatus,
   assertWebhookOutcome,
+  assertContractsRequestMetric,
+  assertReputationRequestMetric,
+  ContractsErrorCause,
+  ContractsRequestMetric,
+  ContractsRequestStatus,
   DisputesErrorCause,
+  ReputationRequestMetric,
   WebhookOutcome as ValidatedWebhookOutcome,
 } from './metrics-validation';
 import { DEFAULT_HISTOGRAM_BUCKETS, validateHistogramBuckets } from './observability-config';
 import { Logger, logger as rootLogger } from '../logger';
+
+export type {
+  ContractsErrorCause,
+  ContractsRequestMetric,
+  ContractsRequestStatus,
+} from './metrics-validation';
 
 /**
  * Re-exported from metrics-validation to preserve existing import paths.
@@ -44,6 +56,9 @@ export const CATALOG_METRIC_NAMES: readonly string[] = [
   'auth_requests_total',
   'auth_request_duration_seconds',
   'auth_errors_total',
+  'reputation_requests_total',
+  'reputation_request_duration_seconds',
+  'reputation_errors_total',
   'service_health_status',
   'webhook_deliveries_total',
   'webhook_dlq_depth',
@@ -51,7 +66,39 @@ export const CATALOG_METRIC_NAMES: readonly string[] = [
   'webhook_rate_limit_queue_depth',
   'milestone_operations_total',
   'milestone_operation_duration_seconds',
+  'disputes_requests_total',
+  'disputes_request_duration_seconds',
+  'contracts_requests_total',
+  'contracts_request_duration_seconds',
 ] as const;
+
+export const REPUTATION_OPERATIONS = ['get_profile', 'create_rating'] as const;
+export type ReputationOperation = (typeof REPUTATION_OPERATIONS)[number];
+
+export const REPUTATION_STATUSES = ['success', 'client_error', 'server_error'] as const;
+export type ReputationRequestStatus = (typeof REPUTATION_STATUSES)[number];
+
+export const REPUTATION_ERROR_CAUSES = [
+  'none',
+  'bad_request',
+  'authentication',
+  'authorization',
+  'not_found',
+  'conflict',
+  'validation',
+  'rate_limit',
+  'client_error',
+  'internal_error',
+] as const;
+export type ReputationErrorCause = (typeof REPUTATION_ERROR_CAUSES)[number];
+
+export interface ReputationRequestMetric {
+  operation: ReputationOperation;
+  status: ReputationRequestStatus;
+  statusCode: number;
+  errorCause: ReputationErrorCause;
+  durationSeconds: number;
+}
 
 /** The type of milestone operation being instrumented. */
 export type MilestoneOperation = 'create' | 'update' | 'read';
@@ -84,6 +131,7 @@ export interface MetricsServiceLike {
     durationSeconds: number,
     errorCause?: string,
   ) => void;
+  recordContractsRequest: (metric: ContractsRequestMetric) => void;
 }
 
 const HEALTH_STATUS_VALUE: Record<ServiceStatus, number> = {
@@ -119,6 +167,12 @@ export class MetricsService implements MetricsServiceLike {
 
   private readonly httpRequestDurationSeconds: Histogram;
 
+  private readonly reputationRequestsTotal: Counter;
+
+  private readonly reputationRequestDurationSeconds: Histogram;
+
+  private readonly reputationErrorsTotal: Counter;
+
   private readonly apiKeysRequestsTotal: Counter;
 
   private readonly apiKeysRequestDurationSeconds: Histogram;
@@ -144,6 +198,14 @@ export class MetricsService implements MetricsServiceLike {
   private readonly milestoneOperationsTotal: Counter;
 
   private readonly milestoneOperationDurationSeconds: Histogram;
+
+  private readonly disputesRequestsTotal: Counter;
+
+  private readonly disputesRequestDurationSeconds: Histogram;
+
+  private readonly contractsRequestsTotal: Counter;
+
+  private readonly contractsRequestDurationSeconds: Histogram;
 
   private readonly httpRouteLabelLimit: number;
 
@@ -180,6 +242,28 @@ export class MetricsService implements MetricsServiceLike {
       help: 'Duration of HTTP requests in seconds.',
       labelNames: ['method', 'route', 'status_code', 'error_cause'],
       buckets: resolvedBuckets,
+      registers: [this.register],
+    });
+
+    this.reputationRequestsTotal = new Counter({
+      name: 'reputation_requests_total',
+      help: 'Total reputation endpoint requests by operation, status, and error cause.',
+      labelNames: ['operation', 'status', 'status_code', 'error_cause'],
+      registers: [this.register],
+    });
+
+    this.reputationRequestDurationSeconds = new Histogram({
+      name: 'reputation_request_duration_seconds',
+      help: 'Duration of reputation endpoint requests in seconds.',
+      labelNames: ['operation', 'status', 'status_code', 'error_cause'],
+      buckets: resolvedBuckets,
+      registers: [this.register],
+    });
+
+    this.reputationErrorsTotal = new Counter({
+      name: 'reputation_errors_total',
+      help: 'Total reputation endpoint errors by operation and error cause.',
+      labelNames: ['operation', 'error_cause'],
       registers: [this.register],
     });
 
@@ -275,6 +359,36 @@ export class MetricsService implements MetricsServiceLike {
       name: 'milestone_operation_duration_seconds',
       help: 'Duration of milestone operations in seconds, labelled by operation type and status.',
       labelNames: ['operation', 'status'],
+      buckets: resolvedBuckets,
+      registers: [this.register],
+    });
+
+    this.disputesRequestsTotal = new Counter({
+      name: 'disputes_requests_total',
+      help: 'Total number of disputes endpoint requests.',
+      labelNames: ['method', 'route', 'status_code', 'error_cause'],
+      registers: [this.register],
+    });
+
+    this.disputesRequestDurationSeconds = new Histogram({
+      name: 'disputes_request_duration_seconds',
+      help: 'Duration of disputes endpoint requests in seconds.',
+      labelNames: ['method', 'route', 'status_code', 'error_cause'],
+      buckets: resolvedBuckets,
+      registers: [this.register],
+    });
+
+    this.contractsRequestsTotal = new Counter({
+      name: 'contracts_requests_total',
+      help: 'Total number of contracts requests by method, route, status, status_code, and error_cause.',
+      labelNames: ['method', 'route', 'status', 'status_code', 'error_cause'],
+      registers: [this.register],
+    });
+
+    this.contractsRequestDurationSeconds = new Histogram({
+      name: 'contracts_request_duration_seconds',
+      help: 'Duration of contracts requests in seconds.',
+      labelNames: ['method', 'route', 'status', 'status_code', 'error_cause'],
       buckets: resolvedBuckets,
       registers: [this.register],
     });
@@ -479,6 +593,20 @@ export class MetricsService implements MetricsServiceLike {
   ): void {
     this.milestoneOperationsTotal.inc({ operation, status, error_cause: errorCause });
     this.milestoneOperationDurationSeconds.observe({ operation, status }, durationSeconds);
+  }
+
+  recordContractsRequest(metric: ContractsRequestMetric): void {
+    const validated = assertContractsRequestMetric(metric);
+    const labels = {
+      method: validated.method,
+      route: this.boundRouteLabel(validated.route),
+      status: validated.status,
+      status_code: String(validated.statusCode),
+      error_cause: validated.errorCause,
+    };
+
+    this.contractsRequestsTotal.inc(labels);
+    this.contractsRequestDurationSeconds.observe(labels, validated.durationSeconds);
   }
 
   getMetrics(): Promise<string> {
@@ -700,6 +828,28 @@ function resolveErrorCause(res: Response): string {
     return 'client_error';
   }
   return 'server_error';
+}
+
+function assertReputationRequestMetric(metric: ReputationRequestMetric): void {
+  if (!REPUTATION_OPERATIONS.includes(metric.operation)) {
+    throw new Error('Invalid reputation operation');
+  }
+
+  if (!REPUTATION_STATUSES.includes(metric.status)) {
+    throw new Error('Invalid reputation request status');
+  }
+
+  if (!REPUTATION_ERROR_CAUSES.includes(metric.errorCause)) {
+    throw new Error('Invalid reputation error cause');
+  }
+
+  if (!Number.isInteger(metric.statusCode) || metric.statusCode < 100 || metric.statusCode > 599) {
+    throw new Error('Invalid reputation status code');
+  }
+
+  if (!Number.isFinite(metric.durationSeconds) || metric.durationSeconds < 0) {
+    throw new Error('Invalid reputation request duration');
+  }
 }
 
 

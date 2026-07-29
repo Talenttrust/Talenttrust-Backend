@@ -30,6 +30,7 @@ import {
   validateQuery,
 } from "../middleware/validate.middleware";
 import type { MetricsServiceLike } from "../observability/metrics-service";
+import { createContractsObservabilityMiddleware } from "../observability/contracts-observability";
 
 // ─── Inline route-param validator ────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ function createContractsRouter(
   // Enable compression for large payloads (e.g. milestones arrays)
   // The threshold is 1KB by default, but we set it explicitly here.
   router.use(compression({ threshold: 1024 }));
+  router.use(createContractsObservabilityMiddleware({ metricsService }));
 
   const db = customDb ?? getDb();
   const repo = new ContractRepository(db);

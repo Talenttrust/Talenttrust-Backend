@@ -276,3 +276,67 @@ export function assertDisputesErrorCause(value: unknown): DisputesErrorCause {
   }
   return result.data;
 }
+
+// ---------------------------------------------------------------------------
+// Contracts request metrics
+// ---------------------------------------------------------------------------
+
+export const CONTRACTS_REQUEST_STATUSES = ['success', 'client_error', 'server_error'] as const;
+export type ContractsRequestStatus = (typeof CONTRACTS_REQUEST_STATUSES)[number];
+
+export const CONTRACTS_ERROR_CAUSES = [
+  'none',
+  'bad_request',
+  'authentication',
+  'authorization',
+  'not_found',
+  'conflict',
+  'validation',
+  'contract_bounds_error',
+  'rate_limit',
+  'client_error',
+  'internal_error',
+] as const;
+export type ContractsErrorCause = (typeof CONTRACTS_ERROR_CAUSES)[number];
+
+export const ContractsRequestStatusSchema = z.enum(CONTRACTS_REQUEST_STATUSES);
+export const ContractsErrorCauseSchema = z.enum(CONTRACTS_ERROR_CAUSES);
+
+export interface ContractsRequestMetric {
+  method: string;
+  route: string;
+  status: ContractsRequestStatus;
+  statusCode: number;
+  errorCause: ContractsErrorCause;
+  durationSeconds: number;
+}
+
+export function assertContractsRequestMetric(value: unknown): ContractsRequestMetric {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('Contracts request metric must be an object');
+  }
+
+  const metric = value as Record<string, unknown>;
+  const statusResult = ContractsRequestStatusSchema.safeParse(metric.status);
+  if (!statusResult.success) {
+    throw new TypeError(`Invalid contracts request status: ${JSON.stringify(metric.status)}`);
+  }
+
+  const causeResult = ContractsErrorCauseSchema.safeParse(metric.errorCause);
+  if (!causeResult.success) {
+    throw new TypeError(`Invalid contracts error cause: ${JSON.stringify(metric.errorCause)}`);
+  }
+
+  if (typeof metric.durationSeconds !== 'number' || !Number.isFinite(metric.durationSeconds) || metric.durationSeconds < 0) {
+    throw new TypeError(`Invalid durationSeconds: ${metric.durationSeconds}`);
+  }
+
+  return {
+    method: String(metric.method ?? 'UNKNOWN'),
+    route: String(metric.route ?? 'unmatched'),
+    status: statusResult.data,
+    statusCode: Number(metric.statusCode ?? 500),
+    errorCause: causeResult.data,
+    durationSeconds: metric.durationSeconds,
+  };
+}
