@@ -39,7 +39,6 @@
   "author": "Talenttrust Team",
   "license": "MIT",
   "dependencies": {
-    "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@stellar/stellar-sdk": "^13.0.0",
     "axios": "^1.16.1",
     "better-sqlite3": "^12.11.1",
@@ -75,6 +74,7 @@
     }
   },
   "devDependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@types/better-sqlite3": "^7.6.11",
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
