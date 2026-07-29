@@ -26,6 +26,15 @@ export interface AuditServiceOptions {
   cache?: AuditCacheOptions;
 }
 
+/**
+ * Callback invoked after an audit entry is successfully persisted.
+ *
+ * The callback is fire-and-forget — errors thrown by the callback are caught
+ * and logged to avoid disrupting the primary audit logging flow. Implementers
+ * should handle their own error recovery (e.g. retries, DLQ).
+ */
+export type AfterLogCallback = (entry: AuditEntry) => void | Promise<void>;
+
 export const VALID_ACTIONS = new Set<AuditAction>([
   'CONTRACT_CREATED', 'CONTRACT_UPDATED', 'CONTRACT_CANCELLED', 'CONTRACT_COMPLETED',
   'PAYMENT_INITIATED', 'PAYMENT_RELEASED', 'PAYMENT_DISPUTED',
@@ -109,7 +118,7 @@ export function parseAuditQuery(
   if (cursor) {
     try {
       decodeCursor(cursor);
-    } catch (_error) {
+    } catch {
       throw new Error('Invalid cursor format');
     }
   }
@@ -154,6 +163,26 @@ export function parseAuditQuery(
 export class AuditService {
   private cache: AuditCache | null;
 
+  /**
+   * Optional callback invoked after every successful `log()` call.
+   *
+   * Set by external integrators (e.g. the audit webhook bridge) to react to
+   * new audit entries without modifying the core service.  The callback runs
+   * **after** the entry is persisted and the cache is invalidated; errors
+   * thrown by the callback are caught and logged so they never break the
+   * primary audit-logging flow.
+   *
+   * @example
+   * ```ts
+   * auditService.onAfterLog = (entry) => {
+   *   auditWebhook.notify(entry).catch((err) => {
+   *     console.error('[audit] webhook delivery failed', err);
+   *   });
+   * };
+   * ```
+   */
+  public onAfterLog: AfterLogCallback | null = null;
+
   constructor(
     private readonly repository: AuditLogRepository = createDefaultAuditRepository(),
     private readonly options: AuditServiceOptions = {},
@@ -175,6 +204,20 @@ export class AuditService {
       // Invalidate cache on write operations
       if (this.cache) {
         this.cache.invalidateByResourceId(input.resourceId);
+      }
+      
+      // Fire the after-log callback (fire-and-forget — errors are caught)
+      if (this.onAfterLog) {
+        try {
+          const result = this.onAfterLog(entry);
+          if (result instanceof Promise) {
+            result.catch((err) => {
+              console.error('[AuditService] onAfterLog callback failed:', err);
+            });
+          }
+        } catch (err) {
+          console.error('[AuditService] onAfterLog callback threw:', err);
+        }
       }
       
       return entry;
