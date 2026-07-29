@@ -58,6 +58,25 @@ const refreshSchema = z.object({
   }).strict(),
 });
 
+const bulkAuthItemSchema = z.discriminatedUnion('operation', [
+  z.object({
+    operation: z.literal('login'),
+    payload: loginSchema.shape.body,
+  }),
+  z.object({
+    operation: z.literal('register'),
+    payload: registerSchema.shape.body,
+  }),
+  z.object({
+    operation: z.literal('refresh'),
+    payload: refreshSchema.shape.body,
+  }),
+]);
+
+const bulkAuthSchema = z.object({
+  body: z.array(bulkAuthItemSchema).min(1).max(100),
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getAuthService(): AuthService {
@@ -233,6 +252,85 @@ router.post(
       getAuthService().logout(userId);
     }
     return res.status(200).json({ message: 'Logged out successfully' });
+  }
+);
+
+router.post(
+  '/bulk',
+  authLimiter,
+  idempotencyMiddleware,
+  validateSchema(bulkAuthSchema),
+  async (req: Request, res: Response) => {
+    const batch = req.body as Array<{
+      operation: 'login' | 'register' | 'refresh';
+      payload: any;
+    }>;
+    const results = [];
+    const authService = getAuthService();
+
+    const ipAddress =
+      typeof req.ip === 'string' && req.ip.length > 0 ? req.ip : undefined;
+    const correlationId =
+      (typeof res.locals.requestId === 'string' && (res.locals.requestId as string)) ||
+      (typeof req.headers['x-correlation-id'] === 'string'
+        ? (req.headers['x-correlation-id'] as string)
+        : undefined);
+    const lockoutCtx = {
+      ...(ipAddress !== undefined ? { ipAddress } : {}),
+      ...(correlationId !== undefined ? { correlationId } : {}),
+    };
+
+    for (const item of batch) {
+      if (item.operation === 'login') {
+        const { email, password } = item.payload;
+        const startMs = Date.now();
+        const pre = accountLockout.assess(email);
+        try {
+          const tokens = await authService.login(email, password);
+          const live = accountLockout.assess(email);
+          if (live.isLocked) {
+            await padResponseTime(startMs, pre.preDelayMs);
+            results.push({ status: 'error', error: { code: 'invalid_credentials', message: 'Request validation failed' } });
+            continue;
+          }
+          accountLockout.recordSuccess(email, lockoutCtx);
+          await padResponseTime(startMs, pre.preDelayMs);
+          results.push({ status: 'success', data: tokens });
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'invalid_credentials') {
+            results.push({ status: 'error', error: { code: 'internal_error', message: 'An unexpected error occurred.' } });
+            continue;
+          }
+          const failure = accountLockout.recordFailure(email, lockoutCtx);
+          await padResponseTime(startMs, failure.waitMs);
+          results.push({ status: 'error', error: { code: 'invalid_credentials', message: 'Request validation failed' } });
+        }
+      } else if (item.operation === 'register') {
+        const { email, password, username, role } = item.payload;
+        try {
+          const tokens = await authService.register(email, password, username, role);
+          results.push({ status: 'success', data: tokens });
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'duplicate_email') {
+            results.push({ status: 'error', error: { code: 'conflict', message: 'Registration failed. Please try again.' } });
+          } else {
+            results.push({ status: 'error', error: { code: 'internal_error', message: 'An unexpected error occurred.' } });
+          }
+        }
+      } else if (item.operation === 'refresh') {
+        const { refreshToken } = item.payload;
+        try {
+          const tokens = await authService.refresh(refreshToken);
+          results.push({ status: 'success', data: tokens });
+        } catch {
+          results.push({ status: 'error', error: { code: 'invalid_refresh_token', message: 'Invalid or expired refresh token.' } });
+        }
+      }
+    }
+
+    return res.status(200).json({ items: results });
   }
 );
 

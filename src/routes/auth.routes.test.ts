@@ -325,3 +325,52 @@ describe('POST /auth/logout', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /auth/bulk', () => {
+  const loginOp = { operation: 'login', payload: { email: 'bulk@example.com', password: 'Password1!' } };
+  const registerOp = { operation: 'register', payload: { email: 'bulk@example.com', password: 'Password1!', username: 'bulk' } };
+
+  it('processes a batch and reports per-item results', async () => {
+    const res = await request(app)
+      .post('/auth/bulk')
+      .send([
+        registerOp,
+        loginOp
+      ]);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items[0].status).toBe('success');
+    expect(res.body.items[1].status).toBe('success');
+  });
+
+  it('rejects an empty batch with 400', async () => {
+    const res = await request(app).post('/auth/bulk').send([]);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('rejects a batch exceeding 100 items with 400', async () => {
+    const hugeBatch = Array(101).fill(loginOp);
+    const res = await request(app).post('/auth/bulk').send(hugeBatch);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_error');
+  });
+
+  it('handles partial failures', async () => {
+    const res = await request(app)
+      .post('/auth/bulk')
+      .send([
+        registerOp,
+        { operation: 'login', payload: { email: 'bulk@example.com', password: 'WrongPassword!' } }
+      ]);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items[0].status).toBe('success');
+    expect(res.body.items[1].status).toBe('error');
+    expect(res.body.items[1].error.code).toBe('invalid_credentials');
+  });
+});
