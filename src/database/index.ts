@@ -4,11 +4,25 @@ import { Database, ContractMetadata, Contract, User, ApiKey } from './schema';
 import { decodeCursor, encodeCursor } from '../contracts/cursor.repository';
 import type { CursorPage, CursorPaginationInput } from '../contracts/cursor.types';
 import { MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT } from '../utils/pagination';
+import { getMetadataStore } from './sqliteStore';
 
 const DB_PATH = path.join(__dirname, '../../data/database.json');
 
+/**
+ * DatabaseService
+ *
+ * `contract_metadata` and `api_keys` are persisted in SQLite through
+ * `SqliteMetadataStore`. `contracts` and `users` remain in `data/database.json`
+ * because `src/db/types.ts` defines conflicting shapes for those two entities
+ * and the SQLite tables belong to that other model — see
+ * `docs/persistence-json-to-sqlite.md`.
+ *
+ * Every public method below keeps the signature and return type it had when the
+ * whole service was JSON-backed, so no caller needs to change.
+ */
 class DatabaseService {
   private db: Database | null = null;
+  private imported = false;
 
   private async ensureDataDir(): Promise<void> {
     const dataDir = path.dirname(DB_PATH);
@@ -51,18 +65,53 @@ class DatabaseService {
     await fs.writeFile(DB_PATH, JSON.stringify(this.db, null, 2));
   }
 
+  /**
+   * Moves any legacy JSON metadata/API-key rows into SQLite exactly once per
+   * process.
+   *
+   * The import is `INSERT OR IGNORE` inside a transaction, so it is safe if a
+   * previous run already completed. Failures are swallowed deliberately: a
+   * missing or unreadable JSON file is the normal steady state after migration
+   * and must not take the service down.
+   */
+  private importLegacyRecords(): void {
+    if (this.imported) return;
+    this.imported = true;
+
+    if (!this.db) return;
+
+    const hasLegacyRows =
+      (this.db.contract_metadata?.length ?? 0) > 0 || (this.db.api_keys?.length ?? 0) > 0;
+    if (!hasLegacyRows) return;
+
+    try {
+      getMetadataStore().importFromJson({
+        contract_metadata: this.db.contract_metadata,
+        api_keys: this.db.api_keys
+      });
+    } catch {
+      // Best-effort backfill; the store remains the source of truth.
+    }
+  }
+
+  /** Ensures the JSON file has been read (for the legacy import) and returns the store. */
+  private async store() {
+    await this.loadDatabase();
+    this.importLegacyRecords();
+    return getMetadataStore();
+  }
+
   // Contract Metadata operations
   async createContractMetadata(data: Omit<ContractMetadata, 'id' | 'created_at' | 'updated_at'>): Promise<ContractMetadata> {
-    const db = await this.loadDatabase();
+    const store = await this.store();
+    const now = new Date();
     const metadata: ContractMetadata = {
       ...data,
       id: require('crypto').randomUUID(),
-      created_at: new Date(),
-      updated_at: new Date()
+      created_at: now,
+      updated_at: now
     };
-    db.contract_metadata.push(metadata);
-    await this.saveDatabase();
-    return metadata;
+    return store.insertMetadata(metadata);
   }
 
   async getContractMetadataByContractId(
@@ -75,79 +124,54 @@ class DatabaseService {
       includeDeleted?: boolean;
     } = {}
   ): Promise<{ records: ContractMetadata[]; total: number; page: number; limit: number }> {
-    const db = await this.loadDatabase();
+    const store = await this.store();
     const MAX_LIMIT = 100;
     const { page = 1, limit = 20, key, data_type, includeDeleted = false } = options;
-    
+
     // Bound limit
     const boundedLimit = Math.min(Math.max(1, limit), MAX_LIMIT);
 
-    let filtered = db.contract_metadata.filter(record => {
-      if (record.contract_id !== contractId) return false;
-      if (!includeDeleted && record.deleted_at) return false;
-      if (key && record.key !== key) return false;
-      if (data_type && record.data_type !== data_type) return false;
-      return true;
-    });
+    const listOptions: {
+      offset: number;
+      limit: number;
+      key?: string;
+      dataType?: string;
+      includeDeleted: boolean;
+    } = {
+      offset: (page - 1) * boundedLimit,
+      limit: boundedLimit,
+      includeDeleted
+    };
+    if (key !== undefined) listOptions.key = key;
+    if (data_type !== undefined) listOptions.dataType = data_type;
 
-    // Stable sorting: latest first, then by ID for absolute stability
-    filtered.sort((a, b) => {
-      const dateA = new Date(a.created_at).getTime();
-      const dateB = new Date(b.created_at).getTime();
-      if (dateB !== dateA) return dateB - dateA;
-      return a.id.localeCompare(b.id);
-    });
-
-    const total = filtered.length;
-    const startIndex = (page - 1) * boundedLimit;
-    const records = filtered.slice(startIndex, startIndex + boundedLimit);
+    const { records, total } = store.listMetadata(contractId, listOptions);
 
     return { records, total, page, limit: boundedLimit };
   }
 
 
   async getContractMetadataById(id: string): Promise<ContractMetadata | null> {
-    const db = await this.loadDatabase();
-    return db.contract_metadata.find(record => record.id === id && !record.deleted_at) || null;
+    const store = await this.store();
+    return store.findMetadataById(id);
   }
 
   async updateContractMetadata(
     id: string,
     updates: Partial<Pick<ContractMetadata, 'value' | 'is_sensitive' | 'updated_by'>>
   ): Promise<ContractMetadata | null> {
-    const db = await this.loadDatabase();
-    const index = db.contract_metadata.findIndex(record => record.id === id && !record.deleted_at);
-    
-    if (index === -1) return null;
-
-    db.contract_metadata[index] = {
-      ...db.contract_metadata[index],
-      ...updates,
-      updated_at: new Date()
-    };
-
-    await this.saveDatabase();
-    return db.contract_metadata[index];
+    const store = await this.store();
+    return store.updateMetadata(id, updates, new Date());
   }
 
   async deleteContractMetadata(id: string): Promise<boolean> {
-    const db = await this.loadDatabase();
-    const record = db.contract_metadata.find(r => r.id === id && !r.deleted_at);
-    
-    if (!record) return false;
-
-    record.deleted_at = new Date();
-    record.updated_at = new Date();
-    
-    await this.saveDatabase();
-    return true;
+    const store = await this.store();
+    return store.softDeleteMetadata(id, new Date());
   }
 
   async findContractMetadataByKey(contractId: string, key: string): Promise<ContractMetadata | null> {
-    const db = await this.loadDatabase();
-    return db.contract_metadata.find(
-      record => record.contract_id === contractId && record.key === key && !record.deleted_at
-    ) || null;
+    const store = await this.store();
+    return store.findMetadataByKey(contractId, key);
   }
 
   // Contract operations
@@ -190,31 +214,30 @@ class DatabaseService {
 
   // API Key operations
   async createApiKey(data: Omit<ApiKey, 'id' | 'created_at' | 'updated_at'>): Promise<ApiKey> {
-    const db = await this.loadDatabase();
+    const store = await this.store();
+    const now = new Date();
     const apiKey: ApiKey = {
       ...data,
       id: require('crypto').randomUUID(),
-      created_at: new Date(),
-      updated_at: new Date()
+      created_at: now,
+      updated_at: now
     };
-    db.api_keys.push(apiKey);
-    await this.saveDatabase();
-    return apiKey;
+    return store.insertApiKey(apiKey);
   }
 
   async getApiKeyById(id: string): Promise<ApiKey | null> {
-    const db = await this.loadDatabase();
-    return db.api_keys.find(key => key.id === id && key.is_active) || null;
+    const store = await this.store();
+    return store.findApiKeyById(id);
   }
 
   async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
-    const db = await this.loadDatabase();
-    return db.api_keys.find(key => key.key_hash === keyHash && key.is_active) || null;
+    const store = await this.store();
+    return store.findActiveApiKeyBy('key_hash', keyHash);
   }
 
   async getApiKeyBySelector(selector: string): Promise<ApiKey | null> {
-    const db = await this.loadDatabase();
-    return db.api_keys.find(key => key.key_selector === selector && key.is_active) || null;
+    const store = await this.store();
+    return store.findActiveApiKeyBy('key_selector', selector);
   }
 
   /**
@@ -227,33 +250,21 @@ class DatabaseService {
    * throws and must be handled by the caller.
    */
   async listApiKeysPage(userId: string, input: CursorPaginationInput = {}): Promise<CursorPage<ApiKey>> {
-    const db = await this.loadDatabase();
+    const store = await this.store();
     const limit =
       input.limit !== undefined && Number.isFinite(input.limit) && input.limit >= 1
         ? Math.min(Math.trunc(input.limit), MAX_PAGE_LIMIT)
         : DEFAULT_PAGE_LIMIT;
 
-    let filtered = db.api_keys.filter(
-      key => key.created_by === userId && key.is_active
-    );
+    // decodeCursor throws on a malformed cursor; that propagates to the caller
+    // exactly as it did before.
+    const position = input.cursor ? decodeCursor(input.cursor) : null;
 
-    filtered.sort((a, b) => {
-      const dateA = new Date(a.created_at).getTime();
-      const dateB = new Date(b.created_at).getTime();
-      if (dateB !== dateA) return dateB - dateA;
-      return b.id.localeCompare(a.id);
-    });
+    // The store fetches limit + 1 rows so the extra row signals a further page.
+    const fetched = store.listApiKeysAfter(userId, limit, position);
 
-    if (input.cursor) {
-      const pos = decodeCursor(input.cursor);
-      filtered = filtered.filter(key => {
-        const createdAt = new Date(key.created_at).toISOString();
-        return createdAt < pos.createdAt || (createdAt === pos.createdAt && key.id < pos.id);
-      });
-    }
-
-    const hasNextPage = filtered.length > limit;
-    const data = filtered.slice(0, limit);
+    const hasNextPage = fetched.length > limit;
+    const data = fetched.slice(0, limit);
     const lastItem = data.at(-1);
     const nextCursor =
       hasNextPage && lastItem
@@ -264,73 +275,32 @@ class DatabaseService {
   }
 
   async updateApiKey(id: string, updates: Partial<Pick<ApiKey, 'name' | 'scope' | 'expires_at' | 'is_active' | 'last_used_at' | 'key_selector'>>): Promise<ApiKey | null> {
-    const db = await this.loadDatabase();
-    const index = db.api_keys.findIndex(key => key.id === id);
-    
-    if (index === -1) return null;
-
-    db.api_keys[index] = {
-      ...db.api_keys[index],
-      ...updates,
-      updated_at: new Date()
-    };
-
-    await this.saveDatabase();
-    return db.api_keys[index];
+    const store = await this.store();
+    return store.updateApiKey(id, updates, new Date());
   }
 
   async deactivateApiKey(id: string): Promise<boolean> {
-    const db = await this.loadDatabase();
-    const apiKey = db.api_keys.find(key => key.id === id);
-    
-    if (!apiKey) return false;
-
-    apiKey.is_active = false;
-    apiKey.updated_at = new Date();
-    
-    await this.saveDatabase();
-    return true;
+    const store = await this.store();
+    return store.setApiKeyActive(id, false, new Date());
   }
 
   async rotateApiKey(id: string, newKeyHash: string, newKeySelector?: string): Promise<ApiKey | null> {
-    const db = await this.loadDatabase();
-    const apiKey = db.api_keys.find(key => key.id === id);
-    
-    if (!apiKey) return null;
-
-    apiKey.key_hash = newKeyHash;
-    if (newKeySelector !== undefined) {
-      apiKey.key_selector = newKeySelector;
-    }
-    apiKey.updated_at = new Date();
-    
-    await this.saveDatabase();
-    return apiKey;
+    const store = await this.store();
+    return store.rotateApiKey(id, newKeyHash, newKeySelector, new Date());
   }
 
   /**
    * Backfills the key_selector field for all existing API keys that lack it.
-   * Uses the stored key_hash (salt:hash) to derive the selector deterministically.
-   * This must be called with the original plain-text key — we store the selector
-   * during createApiKey, so this is only needed for legacy keys.
    *
    * For security, this function does NOT attempt to recompute selectors from
    * stored hashes (impossible). Instead it is provided as a hook; callers pass
    * plain-text keys that are being validated and the selector is backfilled
-   * lazily in validateApiKey.
+   * lazily in validateApiKey. This method counts unindexed keys for
+   * monitoring/reporting.
    */
   async backfillKeySelectors(): Promise<number> {
-    const db = await this.loadDatabase();
-    let count = 0;
-    for (const key of db.api_keys) {
-      if (!key.key_selector) {
-        // Selector cannot be derived from stored hash; it must be set during
-        // validation when the plain-text key is available (handled in validateApiKey).
-        // This method counts unindexed keys for monitoring/reporting.
-        count++;
-      }
-    }
-    return count;
+    const store = await this.store();
+    return store.countApiKeysWithoutSelector();
   }
 
   // Cleanup for testing
@@ -341,6 +311,8 @@ class DatabaseService {
       users: [],
       api_keys: []
     };
+    this.imported = true;
+    getMetadataStore().clear();
     await this.saveDatabase();
   }
 }
