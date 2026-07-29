@@ -251,7 +251,8 @@ describe("GET /api/v1/contracts", () => {
       .get("/api/v1/contracts?cursor=garbage")
       .set(auth(adminToken()));
     expect(res.status).toBe(400);
-    expect(res.body.status).toBe("error");
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.code).toBe("bad_request");
   });
 
   it("returns cursor page with empty data set", async () => {

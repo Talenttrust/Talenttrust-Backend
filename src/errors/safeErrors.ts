@@ -39,6 +39,8 @@ export const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   // Dispute-specific error codes
   dispute_not_found: 'The requested dispute was not found',
   invalid_state_transition: 'The requested state transition is not allowed',
+  contract_bounds_error: 'Contract exceeds allowed policy limits',
+  soft_delete_retention_expired: 'The soft-deleted record is past the retention window and cannot be restored',
 };
 
 /**

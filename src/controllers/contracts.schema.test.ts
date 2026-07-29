@@ -60,17 +60,6 @@ const successEnvelopeSchema = <T extends z.ZodTypeAny>(dataSchema: T) =>
     })
     .strict();
 
-const errorEnvelopeSchema = z
-  .object({
-    status: z.literal('error'),
-    error: z.object({
-      code: z.string(),
-      message: z.string(),
-      requestId: z.string(),
-    }),
-  })
-  .strict();
-
 const errorResponseSchema = z
   .object({
     error: z.object({
@@ -197,7 +186,7 @@ describe('Contracts API — response schema contracts', () => {
       const res = await request(app).get('/contracts?page=-1');
       expect(res.status).toBe(400);
 
-      const parseResult = errorEnvelopeSchema.safeParse(res.body);
+      const parseResult = errorResponseSchema.safeParse(res.body);
       expect(parseResult.success).toBe(true);
     });
   });
@@ -292,7 +281,7 @@ describe('Contracts API — response schema contracts', () => {
         .send({ title: 'New', description: 'Long enough description here', clientId: randomUUID(), budget: 999999999 });
       expect(res.status).toBe(422);
 
-      const parseResult = errorEnvelopeSchema.safeParse(res.body);
+      const parseResult = errorResponseSchema.safeParse(res.body);
       expect(parseResult.success).toBe(true);
     });
 
@@ -335,7 +324,7 @@ describe('Contracts API — response schema contracts', () => {
         .send({ version: 0, budget: 999999999 });
       expect(res.status).toBe(422);
 
-      const parseResult = errorEnvelopeSchema.safeParse(res.body);
+      const parseResult = errorResponseSchema.safeParse(res.body);
       expect(parseResult.success).toBe(true);
     });
   });
