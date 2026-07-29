@@ -20,6 +20,10 @@ import { validateWebhookUrl, findSubscriptionOrFail } from './webhook-subscripti
 import { createRateLimiter } from '../middleware/rateLimiter';
 import { rateLimitConfig } from '../config/rateLimit';
 import { authRateLimitKeyFn } from '../auth/rateLimitKey';
+import {
+  WebhookSubscriptionCacheService,
+  loadWebhookCacheConfig,
+} from '../services/webhookSubscriptionCache.service';
 
 const router = Router();
 
@@ -30,6 +34,14 @@ const webhookRateLimiter = createRateLimiter({
   ...rateLimitConfig.webhooksApi,
   keyFn: authRateLimitKeyFn,
 });
+
+/**
+ * Module-level cache singleton, configured from environment variables.
+ * A separate Registry is used so these metrics are isolated from the global
+ * MetricsService registry and do not cause duplicate-registration errors in
+ * tests that spin up the app multiple times.
+ */
+const webhookCache = new WebhookSubscriptionCacheService(loadWebhookCacheConfig());
 
 /**
  * Removes the webhook secret from a subscription object before sending to the client.
@@ -60,6 +72,10 @@ router.post(
       const repo = getRepo();
       const createDto = toCreateWebhookSubscriptionDto(req.body);
       const subscription = await repo.create(createDto);
+
+      // A new subscription changes every list result — purge all list keys.
+      webhookCache.invalidateLists();
+
       res.status(201).json({
         status: 'success',
         data: toWebhookSubscriptionResponseDto(subscription),
@@ -72,7 +88,8 @@ router.post(
 
 /**
  * GET /api/v1/webhook-subscriptions
- * Lists subscriptions with filter and cursor-based pagination support
+ * Lists subscriptions with filter and cursor-based pagination support.
+ * Results are served from cache when available.
  */
 router.get(
   '/',
@@ -85,6 +102,7 @@ router.get(
       const repo = getRepo();
       const query = toListWebhookSubscriptionsQueryDto(req.query as any);
       const { cursor: cursorStr, limit, ...filters } = query;
+
       if (cursorStr !== undefined) {
         try {
           decodeCursor(cursorStr);
@@ -98,15 +116,23 @@ router.get(
           });
         }
       }
+
       const filter = {
         consumerId: filters.consumerId,
         eventType: filters.eventType,
         active: filters.active,
       };
-      const page = await repo.findAllPaginated(filter, {
-        cursor: cursorStr,
-        limit: limit as number | undefined,
-      });
+
+      // Serve from cache; on miss the fetcher calls the repository directly.
+      const page = await webhookCache.getList(
+        { ...filter, cursor: cursorStr, limit: limit as number | undefined },
+        () =>
+          repo.findAllPaginated(filter, {
+            cursor: cursorStr,
+            limit: limit as number | undefined,
+          }),
+      );
+
       res.status(200).json({
         status: 'success',
         data: page.data.map(sanitizeSubscription),
@@ -124,7 +150,7 @@ router.get(
 
 /**
  * GET /api/v1/webhook-subscriptions/:id
- * Retrieves a single subscription
+ * Retrieves a single subscription. Result is served from cache when available.
  */
 router.get(
   '/:id',
@@ -136,8 +162,20 @@ router.get(
     try {
       const { id } = req.params;
       const repo = getRepo();
-      const subscription = await findSubscriptionOrFail(id, repo, res);
-      if (!subscription) return;
+
+      // Serve from cache; on miss the fetcher calls findById on the repo.
+      const subscription = await webhookCache.getById(id, () => repo.findById(id));
+
+      if (!subscription) {
+        res.status(404).json({
+          error: {
+            code: 'not_found',
+            message: 'Webhook subscription not found.',
+            requestId: res.locals?.requestId || 'unknown',
+          },
+        });
+        return;
+      }
 
       res.status(200).json({
         status: 'success',
@@ -151,7 +189,7 @@ router.get(
 
 /**
  * PATCH /api/v1/webhook-subscriptions/:id
- * Updates a subscription
+ * Updates a subscription. Invalidates both the per-id key and all list keys.
  */
 router.patch(
   '/:id',
@@ -173,6 +211,11 @@ router.patch(
 
       const updateDto = toUpdateWebhookSubscriptionDto(req.body);
       const updated = await repo.update(id, updateDto);
+
+      // Invalidate the specific subscription key and all list keys.
+      webhookCache.invalidateSubscription(id);
+      webhookCache.invalidateLists();
+
       res.status(200).json({
         status: 'success',
         data: toWebhookSubscriptionResponseDto(updated),
@@ -185,7 +228,7 @@ router.patch(
 
 /**
  * DELETE /api/v1/webhook-subscriptions/:id
- * Deletes a subscription
+ * Deletes a subscription. Invalidates both the per-id key and all list keys.
  */
 router.delete(
   '/:id',
@@ -201,6 +244,11 @@ router.delete(
       if (!(await findSubscriptionOrFail(id, repo, res))) return;
 
       await repo.delete(id);
+
+      // Invalidate the specific subscription key and all list keys.
+      webhookCache.invalidateSubscription(id);
+      webhookCache.invalidateLists();
+
       res.status(200).json({
         status: 'success',
         data: {
