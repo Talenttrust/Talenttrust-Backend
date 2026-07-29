@@ -13,6 +13,13 @@ import { parseBoolEnv } from '../config/env';
 
 import { getDb } from '../db/database';
 import { SqliteWebhookSubscriptionRepository } from '../repositories/webhook-subscription.repository';
+import {
+  webhookEventTypeSchema,
+  webhookTriggerDataSchema,
+  webhookSendPayloadSchema,
+  webhookCorrelationIdSchema,
+} from '../modules/webhooks/dto/webhook-payload.dto';
+import { ZodError } from 'zod';
 
 /** Max deliveries per destination host per window. Default: 60. */
 const HOST_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_MAX ?? 60);
@@ -21,7 +28,7 @@ const HOST_RATE_LIMIT_WINDOW_MS = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_WIN
 /** Per-attempt outbound webhook timeout, validated through env schema. */
 const WEBHOOK_DELIVERY_TIMEOUT_MS = validateEnv().WEBHOOK_DELIVERY_TIMEOUT_MS;
 /** Maximum webhook payload size in bytes, validated through env schema. */
-const WEBHOOK_MAX_PAYLOAD_SIZE_BYTES = validateEnv().WEBHOOK_MAX_PAYLOAD_SIZE_BYTES;
+const _WEBHOOK_MAX_PAYLOAD_SIZE_BYTES = validateEnv().WEBHOOK_MAX_PAYLOAD_SIZE_BYTES;
 
 /**
  * Public, secret-redacted view of a DLQ entry. Exposes the failure reason as
@@ -114,6 +121,23 @@ export class WebhookService {
       return;
     }
 
+    // ── Schema-validate webhook trigger inputs ───────────────────────────
+    try {
+      webhookEventTypeSchema.parse(eventType);
+      webhookTriggerDataSchema.parse(data);
+      if (correlationId !== undefined) {
+        webhookCorrelationIdSchema.parse(correlationId);
+      }
+    } catch (err) {
+      if (err instanceof ZodError) {
+        throw Object.assign(
+          new Error(`Webhook trigger validation failed: ${err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`),
+          { code: 'webhook_validation_error', issues: err.issues },
+        );
+      }
+      throw err;
+    }
+
     const subscriptions = await this.repo.findAll({ eventType, active: true });
     console.log("TRIGGER FINDALL:", subscriptions.length, "subs for", eventType);
 
@@ -154,6 +178,19 @@ export class WebhookService {
    * @param payload - Webhook payload including URL, data, and retry state
    */
   async send(payload: WebhookPayload): Promise<void> {
+    // ── Schema-validate the send payload at the boundary ─────────────────
+    try {
+      webhookSendPayloadSchema.parse(payload);
+    } catch (err) {
+      if (err instanceof ZodError) {
+        throw Object.assign(
+          new Error(`Webhook send payload validation failed: ${err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`),
+          { code: 'webhook_validation_error', issues: err.issues },
+        );
+      }
+      throw err;
+    }
+
     const maxAttempts = WEBHOOK_RETRY_POLICY.maxRetries + 1;
     let lastError: Error | undefined;
 
