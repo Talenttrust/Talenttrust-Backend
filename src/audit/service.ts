@@ -20,6 +20,7 @@ import { decodeCursor } from './types';
 import { createDefaultAuditRepository, type AuditLogRepository } from './repository';
 import { auditExportService, AuditExportService, type AuditExportFilters, type AuditExportResult } from './exportService';
 import { AuditCache, type AuditCacheOptions } from './auditCache';
+import { AUDIT_ACTIONS, AUDIT_SEVERITIES } from '../constants/audit';
 
 export interface AuditServiceOptions {
   /** Cache options for audit read responses. */
