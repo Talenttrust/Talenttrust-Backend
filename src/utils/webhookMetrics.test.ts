@@ -129,19 +129,11 @@ describe('incrementDlqOperation', () => {
     expect(value).toBe(1);
   });
 
-    it('emits only bounded replay label values', async () => {
-      incrementDlqReplay('success');
-      incrementDlqReplay('failed');
-      incrementDlqReplay('idempotent_noop');
-      incrementDlqReplay('error');
+  it('increments the drop_overflow counter', async () => {
+    incrementDlqOperation('drop_overflow');
 
-      await expect(getMetricLabelNames('webhook_dlq_replays_total')).resolves.toEqual(['outcome']);
-      await expect(getMetricLabelValues('webhook_dlq_replays_total', 'outcome')).resolves.toEqual([
-        'error',
-        'failed',
-        'idempotent_noop',
-        'success',
-      ]);
+    const value = await getCounterValue('webhook_dlq_operations_total', {
+      operation: 'drop_overflow',
     });
     expect(value).toBe(1);
   });

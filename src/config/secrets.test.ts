@@ -282,9 +282,11 @@ describe('RotatingSecret', () => {
       expect(secretsManager.getValue('JWT_SECRET')).toBe('a'.repeat(32));
     });
 
-    expect(manager.get('mySecret')).toBe(secret);
-    expect(manager.getValue('mySecret')).toBe('test-value');
-  });
+    it('should fallback to default values in non-production environments', () => {
+      delete process.env.PORT;
+      delete process.env.NODE_ENV;
+      delete process.env.DATABASE_URL;
+      delete process.env.JWT_SECRET;
 
       initializeSecrets();
 
@@ -294,4 +296,4 @@ describe('RotatingSecret', () => {
       expect(secretsManager.getValue('JWT_SECRET')).toBe('dev-secret-keep-it-safe');
     });
   });
-});
+});
