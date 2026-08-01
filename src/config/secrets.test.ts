@@ -56,11 +56,13 @@ describe('Secrets Management', () => {
   });
 
   describe('EnvSecret with requireStrongInProd', () => {
-    it('should still use the default in development', () => {
-      process.env.NODE_ENV = 'development';
-      delete process.env.STRONG_KEY;
+    let prevEnv: string | undefined;
 
-  afterEach(() => {
+    beforeEach(() => {
+      prevEnv = process.env.NODE_ENV;
+    });
+
+    afterEach(() => {
     process.env.NODE_ENV = prevEnv;
     delete process.env.STRONG_KEY;
     delete process.env.SHORT_OK_KEY;
