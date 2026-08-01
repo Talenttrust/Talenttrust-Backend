@@ -49,6 +49,8 @@ export function getMetricsService(): MetricsServiceLike {
       setWebhookDlqDepth: () => {},
       recordCacheHit: () => {},
       recordCacheMiss: () => {},
+      recordAuditRequest: () => {},
+      recordContractsRequest: () => {},
     };
   }
   return _metricsService;

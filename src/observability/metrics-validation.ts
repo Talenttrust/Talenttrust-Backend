@@ -340,3 +340,71 @@ export function assertContractsRequestMetric(value: unknown): ContractsRequestMe
     durationSeconds: metric.durationSeconds,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Audit request metrics
+// ---------------------------------------------------------------------------
+
+export const AUDIT_REQUEST_STATUSES = ['success', 'client_error', 'server_error'] as const;
+export type AuditRequestStatus = (typeof AUDIT_REQUEST_STATUSES)[number];
+
+export const AUDIT_ERROR_CAUSES = [
+  'none',
+  'bad_request',
+  'authentication',
+  'authorization',
+  'not_found',
+  'conflict',
+  'validation',
+  'rate_limit',
+  'client_error',
+  'internal_error',
+] as const;
+export type AuditErrorCause = (typeof AUDIT_ERROR_CAUSES)[number];
+
+export const AuditRequestStatusSchema = z.enum(AUDIT_REQUEST_STATUSES);
+export const AuditErrorCauseSchema = z.enum(AUDIT_ERROR_CAUSES);
+
+export interface AuditRequestMetric {
+  method: string;
+  route: string;
+  status: AuditRequestStatus;
+  statusCode: number;
+  errorCause: AuditErrorCause;
+  durationSeconds: number;
+}
+
+export function assertAuditRequestMetric(value: unknown): AuditRequestMetric {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('Audit request metric must be an object');
+  }
+
+  const metric = value as Record<string, unknown>;
+  const statusResult = AuditRequestStatusSchema.safeParse(metric.status);
+  if (!statusResult.success) {
+    throw new TypeError(`Invalid audit request status: ${JSON.stringify(metric.status)}`);
+  }
+
+  const causeResult = AuditErrorCauseSchema.safeParse(metric.errorCause);
+  if (!causeResult.success) {
+    throw new TypeError(`Invalid audit error cause: ${JSON.stringify(metric.errorCause)}`);
+  }
+
+  if (
+    typeof metric.durationSeconds !== 'number' ||
+    !Number.isFinite(metric.durationSeconds) ||
+    metric.durationSeconds < 0
+  ) {
+    throw new TypeError(`Invalid durationSeconds: ${metric.durationSeconds}`);
+  }
+
+  return {
+    method: String(metric.method ?? 'UNKNOWN'),
+    route: String(metric.route ?? 'unmatched'),
+    status: statusResult.data,
+    statusCode: Number(metric.statusCode ?? 500),
+    errorCause: causeResult.data,
+    durationSeconds: metric.durationSeconds,
+  };
+}
+

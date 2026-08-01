@@ -36,6 +36,9 @@ import { getCorrelationId, getRequestId as getRequestIdFromUtils, isValidCorrela
 import { validateCreateAuditEntry, readValidatedBody } from './inputValidation';
 import { AUDIT_MESSAGES, AUDIT_DEFAULTS, AUDIT_ACTIONS, AUDIT_SEVERITIES } from '../constants/audit';
 import type { BulkAuditItemResult, CreateAuditEntryInput } from './types';
+import { createAuditObservabilityMiddleware } from '../observability/audit-observability';
+import type { MetricsServiceLike } from '../observability/metrics-service';
+import type { Logger } from '../logger';
 
 function getRequestIdSafe(res: Response): string {
   try {
@@ -111,6 +114,8 @@ export interface AuditRouterOptions {
   integrityMiddleware?: RequestHandler[];
   bulkMiddleware?: RequestHandler[];
   idempotencyMiddleware?: RequestHandler;
+  metricsService?: Pick<MetricsServiceLike, 'recordAuditRequest'>;
+  log?: Pick<Logger, 'info' | 'warn' | 'error'>;
 }
 
 
@@ -175,6 +180,12 @@ function parseAuditQueryOrRespond(
 
 export function createAuditRouter(options: AuditRouterOptions = {}): Router {
   const router = Router();
+  router.use(
+    createAuditObservabilityMiddleware({
+      metricsService: options.metricsService,
+      log: options.log,
+    }),
+  );
   const service = options.service ?? auditService;
   const exportService = options.exportService ?? auditExportService;
   const accessMiddleware = options.accessMiddleware ?? [];

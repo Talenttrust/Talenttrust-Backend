@@ -491,3 +491,88 @@ describe('assertDisputesErrorCause', () => {
     expect(() => assertDisputesErrorCause(null)).toThrow(TypeError);
   });
 });
+
+describe('assertAuditRequestMetric', () => {
+  const { assertAuditRequestMetric, AUDIT_REQUEST_STATUSES, AUDIT_ERROR_CAUSES } = require('./metrics-validation');
+
+  it('accepts a valid AuditRequestMetric', () => {
+    const metric = {
+      method: 'POST',
+      route: '/api/v1/audit',
+      status: 'success',
+      statusCode: 201,
+      errorCause: 'none',
+      durationSeconds: 0.05,
+    };
+    expect(assertAuditRequestMetric(metric)).toEqual(metric);
+  });
+
+  it.each(AUDIT_REQUEST_STATUSES)('accepts valid status "%s"', (status) => {
+    const metric = {
+      method: 'GET',
+      route: '/api/v1/audit',
+      status,
+      statusCode: 200,
+      errorCause: 'none',
+      durationSeconds: 0.01,
+    };
+    expect(assertAuditRequestMetric(metric).status).toBe(status);
+  });
+
+  it.each(AUDIT_ERROR_CAUSES)('accepts valid errorCause "%s"', (errorCause) => {
+    const metric = {
+      method: 'GET',
+      route: '/api/v1/audit',
+      status: 'client_error',
+      statusCode: 400,
+      errorCause,
+      durationSeconds: 0.01,
+    };
+    expect(assertAuditRequestMetric(metric).errorCause).toBe(errorCause);
+  });
+
+  it('throws TypeError for invalid status', () => {
+    expect(() =>
+      assertAuditRequestMetric({
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'invalid_status',
+        statusCode: 200,
+        errorCause: 'none',
+        durationSeconds: 0.01,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('throws TypeError for invalid errorCause', () => {
+    expect(() =>
+      assertAuditRequestMetric({
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'client_error',
+        statusCode: 400,
+        errorCause: 'unknown_cause',
+        durationSeconds: 0.01,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('throws TypeError for non-object input', () => {
+    expect(() => assertAuditRequestMetric(null)).toThrow(TypeError);
+    expect(() => assertAuditRequestMetric('string')).toThrow(TypeError);
+  });
+
+  it('throws TypeError for invalid durationSeconds', () => {
+    expect(() =>
+      assertAuditRequestMetric({
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'success',
+        statusCode: 200,
+        errorCause: 'none',
+        durationSeconds: -1,
+      }),
+    ).toThrow(TypeError);
+  });
+});
+

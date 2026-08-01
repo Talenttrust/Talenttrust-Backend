@@ -979,3 +979,62 @@ describe('MetricsService — structured request metric logs', () => {
     }
   });
 });
+
+describe('MetricsService — audit metrics', () => {
+  it('records success status, duration, and error cause', async () => {
+    const { service, register } = makeService();
+
+    service.recordAuditRequest({
+      method: 'GET',
+      route: '/api/v1/audit',
+      status: 'success',
+      statusCode: 200,
+      errorCause: 'none',
+      durationSeconds: 0.045,
+    });
+
+    const metrics = await register.getMetricsAsJSON();
+    const requestCounter = metrics.find((m) => m.name === 'audit_requests_total');
+    const duration = metrics.find((m) => m.name === 'audit_request_duration_seconds');
+
+    expect(requestCounter).toBeDefined();
+    expect(requestCounter!.values).toContainEqual({
+      labels: {
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'success',
+        status_code: '200',
+        error_cause: 'none',
+      },
+      value: 1,
+    });
+    expect(duration).toBeDefined();
+  });
+
+  it('rejects invalid audit request status or error cause', () => {
+    const { service } = makeService();
+
+    expect(() =>
+      service.recordAuditRequest({
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'invalid' as any,
+        statusCode: 200,
+        errorCause: 'none',
+        durationSeconds: 0.1,
+      }),
+    ).toThrow('Invalid audit request status');
+
+    expect(() =>
+      service.recordAuditRequest({
+        method: 'GET',
+        route: '/api/v1/audit',
+        status: 'client_error',
+        statusCode: 400,
+        errorCause: 'invalid' as any,
+        durationSeconds: 0.1,
+      }),
+    ).toThrow('Invalid audit error cause');
+  });
+});
+

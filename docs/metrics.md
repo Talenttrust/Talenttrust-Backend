@@ -128,6 +128,8 @@ The `/metrics` endpoint exports the following metric families:
 | `webhook_rate_limit_queue_depth` | Gauge | Current queue depth per provider in the rate-limiter | `metrics-service.ts` |
 | `disputes_requests_total` | Counter | Total disputes API requests by method, route, status, and error cause | `metrics-service.ts` |
 | `disputes_request_duration_seconds` | Histogram | Duration of disputes API requests in seconds | `metrics-service.ts` |
+| `audit_requests_total` | Counter | Total audit endpoint requests by method, route, status, status_code, and error_cause | `metrics-service.ts` |
+| `audit_request_duration_seconds` | Histogram | Duration of audit endpoint requests in seconds | `metrics-service.ts` |
 | `webhook_dlq_operations_total` | Counter | Total webhook DLQ operations | `utils/webhookMetrics.ts` |
 | `webhook_dlq_replays_total` | Counter | Total webhook DLQ replay attempts | `utils/webhookMetrics.ts` |
 | `webhook_delivery_attempts_total` | Counter | Total webhook delivery attempts | `webhookMetrics.ts` |

@@ -16,9 +16,16 @@ export {
   readObservabilityConfig,
   type ObservabilityConfig,
 } from './observability-config';
+export {
+  createAuditObservabilityMiddleware,
+  classifyAuditResponse,
+  type AuditObservabilityOptions,
+  type AuditResponseClassification,
+} from './audit-observability';
 export type {
   DependencyChecker,
   DependencyHealth,
   HealthReport,
   ServiceStatus,
 } from './types';
+

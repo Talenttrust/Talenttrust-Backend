@@ -16,6 +16,10 @@ import {
   assertWebhookOutcome,
   assertContractsRequestMetric,
   assertReputationRequestMetric,
+  assertAuditRequestMetric,
+  AuditErrorCause,
+  AuditRequestMetric,
+  AuditRequestStatus,
   ContractsErrorCause,
   ContractsRequestMetric,
   ContractsRequestStatus,
@@ -27,6 +31,9 @@ import { DEFAULT_HISTOGRAM_BUCKETS, validateHistogramBuckets } from './observabi
 import { Logger, logger as rootLogger } from '../logger';
 
 export type {
+  AuditErrorCause,
+  AuditRequestMetric,
+  AuditRequestStatus,
   ContractsErrorCause,
   ContractsRequestMetric,
   ContractsRequestStatus,
@@ -70,6 +77,8 @@ export const CATALOG_METRIC_NAMES: readonly string[] = [
   'disputes_request_duration_seconds',
   'contracts_requests_total',
   'contracts_request_duration_seconds',
+  'audit_requests_total',
+  'audit_request_duration_seconds',
 ] as const;
 
 export const REPUTATION_OPERATIONS = ['get_profile', 'create_rating'] as const;
@@ -132,6 +141,7 @@ export interface MetricsServiceLike {
     errorCause?: string,
   ) => void;
   recordContractsRequest: (metric: ContractsRequestMetric) => void;
+  recordAuditRequest: (metric: AuditRequestMetric) => void;
 }
 
 const HEALTH_STATUS_VALUE: Record<ServiceStatus, number> = {
@@ -206,6 +216,10 @@ export class MetricsService implements MetricsServiceLike {
   private readonly contractsRequestsTotal: Counter;
 
   private readonly contractsRequestDurationSeconds: Histogram;
+
+  private readonly auditRequestsTotal: Counter;
+
+  private readonly auditRequestDurationSeconds: Histogram;
 
   private readonly httpRouteLabelLimit: number;
 
@@ -388,6 +402,21 @@ export class MetricsService implements MetricsServiceLike {
     this.contractsRequestDurationSeconds = new Histogram({
       name: 'contracts_request_duration_seconds',
       help: 'Duration of contracts requests in seconds.',
+      labelNames: ['method', 'route', 'status', 'status_code', 'error_cause'],
+      buckets: resolvedBuckets,
+      registers: [this.register],
+    });
+
+    this.auditRequestsTotal = new Counter({
+      name: 'audit_requests_total',
+      help: 'Total number of audit requests by method, route, status, status_code, and error_cause.',
+      labelNames: ['method', 'route', 'status', 'status_code', 'error_cause'],
+      registers: [this.register],
+    });
+
+    this.auditRequestDurationSeconds = new Histogram({
+      name: 'audit_request_duration_seconds',
+      help: 'Duration of audit requests in seconds.',
       labelNames: ['method', 'route', 'status', 'status_code', 'error_cause'],
       buckets: resolvedBuckets,
       registers: [this.register],
@@ -607,6 +636,20 @@ export class MetricsService implements MetricsServiceLike {
 
     this.contractsRequestsTotal.inc(labels);
     this.contractsRequestDurationSeconds.observe(labels, validated.durationSeconds);
+  }
+
+  recordAuditRequest(metric: AuditRequestMetric): void {
+    const validated = assertAuditRequestMetric(metric);
+    const labels = {
+      method: validated.method,
+      route: this.boundRouteLabel(validated.route),
+      status: validated.status,
+      status_code: String(validated.statusCode),
+      error_cause: validated.errorCause,
+    };
+
+    this.auditRequestsTotal.inc(labels);
+    this.auditRequestDurationSeconds.observe(labels, validated.durationSeconds);
   }
 
   getMetrics(): Promise<string> {
