@@ -7,10 +7,12 @@ assignees: ''
 
 ## Persist the TransactionPoller's in-memory transactionsDb to SQLite for crash-safe polling
 
+
 ### Description
 `TransactionPoller.poll()` in [`src/services/TransactionPoller.ts`](src/services/TransactionPoller.ts) reads and writes transaction state through `transactionsDb`, an in-memory `Map`-backed store defined in [`src/models/Transaction.ts`](src/models/Transaction.ts). If the process restarts mid-poll, every `PENDING` transaction's `retryCount`, `lastCheckedAt`, and `receipt` are lost, so the poller silently abandons in-flight blockchain transactions and never reaches a terminal `SUCCESS`/`FAILED`/`TIMEOUT` state.
 
 This issue replaces the in-memory store with a durable SQLite-backed implementation so polling survives restarts and resumes from the last persisted `retryCount`.
+
 
 ### Requirements and context
 - **Repository scope:** Talenttrust/Talenttrust-Backend only.
@@ -19,6 +21,7 @@ This issue replaces the in-memory store with a durable SQLite-backed implementat
 - On startup, the poller should rehydrate any non-terminal transactions and continue their backoff schedule using `calculateDelay` from [`src/utils/retry.ts`](src/utils/retry.ts).
 - Keep the existing in-memory store available behind a feature flag for unit tests so test isolation is preserved.
 - Preserve the existing `TransactionStatus` enum and `Transaction` shape; do not change the public poll API.
+
 
 ### Suggested execution
 - Fork the repo and create a branch
@@ -30,6 +33,7 @@ This issue replaces the in-memory store with a durable SQLite-backed implementat
   - Include JSDoc on every new public method and the SQLite store class.
   - Validate security: ensure receipt JSON is parameter-bound (no string interpolation into SQL) and that malformed persisted receipts fail closed.
 - Test and commit
+
 
 ### Test and commit
 - Run `npm test` and `npm run lint`.
@@ -54,7 +58,9 @@ labels: type:enhancement, area:notifications, stack:nodejs, stack:typescript, pr
 assignees: ''
 ---
 
+
 ## Isolate per-channel failures in EscrowHooks so one failed notification channel does not drop the others
+
 
 ### Description
 `EscrowHooks.onEscrowEvent()` in [`src/hooks/escrow.hooks.ts`](src/hooks/escrow.hooks.ts) dispatches email and web notifications concurrently with `Promise.all`. Because `Promise.all` rejects as soon as any single channel throws, a transient failure in one channel (e.g. the email transport) aborts the whole dispatch and the other channel's notification is never confirmed — even though it may have succeeded or could have succeeded independently.
@@ -86,6 +92,7 @@ This issue switches the fan-out to `Promise.allSettled`, logs each channel's out
 ### Example commit message
 `feat: isolate per-channel escrow notification failures with allSettled`
 
+
 ### Guidelines
 - **Minimum 95 percent test coverage** for impacted modules.
 - Clear, reviewer-focused documentation.
@@ -103,6 +110,7 @@ assignees: ''
 ---
 
 ## Make ChaosPolicy randomness injectable so chaos tests are deterministic
+
 
 ### Description
 `ChaosPolicy.decide()` in [`src/chaos/chaosPolicy.ts`](src/chaos/chaosPolicy.ts) calls `Math.random()` directly when `chaosMode === 'random'`. This couples the policy to a global, non-seedable RNG, which makes the probabilistic branch impossible to test deterministically and impossible to reproduce when debugging a chaos-induced incident.
