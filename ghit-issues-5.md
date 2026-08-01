@@ -74,6 +74,7 @@ This issue switches the fan-out to `Promise.allSettled`, logs each channel's out
 - Return a typed `EscrowDispatchResult` summarizing which channels succeeded and which failed, so callers can decide on retry.
 - Ensure a single channel exception cannot prevent the other channel from being attempted.
 
+
 ### Suggested execution
 - Fork the repo and create a branch
 - `git checkout -b enhancement/escrow-hooks-channel-isolation`
@@ -84,6 +85,7 @@ This issue switches the fan-out to `Promise.allSettled`, logs each channel's out
   - Add JSDoc on the new result type and updated methods.
   - Validate security: confirm no PII (email body, addresses) leaks into logs.
 - Test and commit
+
 
 ### Test and commit
 - Run `npm test` and `npm run lint`.
@@ -98,6 +100,7 @@ This issue switches the fan-out to `Promise.allSettled`, logs each channel's out
 - Clear, reviewer-focused documentation.
 - **Timeframe: 96 hours.**
 
+
 ### Community & contribution rewards
 - 💬 **Join the TalentTrust community on Discord for questions, reviews, and faster merges:** https://discord.gg/WqnGpcPx
 - ⭐ This is a **GrantFox OSS / Official Campaign** task and **may be rewarded**. When your PR is merged you'll be prompted to rate the project — if this issue and the maintainers helped you ship, we'd be grateful for a **5-star rating**. Clear questions in Discord and tidy, well-tested PRs are the fastest path to a merge and a reward.
@@ -108,6 +111,7 @@ title: "Make ChaosPolicy randomness injectable so chaos tests are deterministic"
 labels: type:refactor, area:chaos, stack:nodejs, stack:typescript, priority:medium, MAYBE REWARDED, GRANTFOX OSS, OFFICIAL CAMPAIGN
 assignees: ''
 ---
+
 
 ## Make ChaosPolicy randomness injectable so chaos tests are deterministic
 
@@ -123,6 +127,7 @@ This issue injects the random source as a constructor dependency (defaulting to 
 - Use the injected function in the `'random'` branch of `decide()` without changing observable production behavior.
 - Add boundary handling so `chaosProbability` of 0 never injects and 1 always injects.
 - Keep the `ChaosResult` type and the `decide` signature unchanged for callers.
+
 
 ### Suggested execution
 - Fork the repo and create a branch
