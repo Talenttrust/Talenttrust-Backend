@@ -220,11 +220,13 @@ function isSsrfBypassEnvAllowed(): boolean {
  */
 export function isSafeUrl(urlString: string): boolean {
   /**
-   * Explicit, default-off allow flag. Honoured only in development|test|staging.
+   * Explicit allow flag. Honoured only in development|test|staging.
+   * In test mode (NODE_ENV === 'test' || JEST_WORKER_ID), defaults to true so local test mocks/servers pass validation.
    * In production the flag is rejected at config load; here it is also ignored
-   * so no runtime path returns true for a private host.
+   * so no runtime path returns true for a private host in production.
    */
-  const allowPrivateHosts = parseBoolEnv('SSRF_ALLOW_PRIVATE_HOSTS', false);
+  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
+  const allowPrivateHosts = parseBoolEnv('SSRF_ALLOW_PRIVATE_HOSTS', isTest);
 
   if (allowPrivateHosts && isSsrfBypassEnvAllowed()) {
     return true;

@@ -36,7 +36,7 @@ describe('Audit Router Observability Integration', () => {
 
   it('records metrics for POST /api/v1/audit (success 201)', async () => {
     const payload = {
-      action: 'USER_LOGIN',
+      action: 'AUTH_LOGIN',
       severity: 'INFO',
       actor: 'user-123',
       resource: 'auth',
@@ -62,7 +62,7 @@ describe('Audit Router Observability Integration', () => {
     const payload = {
       entries: [
         {
-          action: 'USER_LOGIN',
+          action: 'AUTH_LOGIN',
           severity: 'INFO',
           actor: 'user-123',
           resource: 'auth',
