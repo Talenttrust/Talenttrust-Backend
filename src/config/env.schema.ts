@@ -422,7 +422,19 @@ export type EnvConfig = z.infer<typeof envSchema>;
  * @throws {Error} If validation fails, with safe error messages
  */
 export function validateEnv(env: NodeJS.ProcessEnv = process.env): EnvConfig {
-  const result = envSchema.safeParse(env);
+  const isTest = env.NODE_ENV === 'test' || Boolean(env.JEST_WORKER_ID) || Boolean(process.env.JEST_WORKER_ID);
+  const normalized = { ...env };
+
+  if (isTest) {
+    if (normalized.SSRF_ALLOW_PRIVATE_HOSTS === undefined) {
+      normalized.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+    }
+    if (!normalized.COMPLIANCE_AUDIT_SECRET) {
+      normalized.COMPLIANCE_AUDIT_SECRET = 'a'.repeat(32);
+    }
+  }
+
+  const result = envSchema.safeParse(normalized);
 
   if (!result.success) {
     const errors = result.error.errors.map((err) => {

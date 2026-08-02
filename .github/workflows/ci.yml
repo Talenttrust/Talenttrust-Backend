@@ -79,6 +79,12 @@ jobs:
         run: npm run test:ci
         env:
           CI: "true"
+          NODE_ENV: test
+          SSRF_ALLOW_PRIVATE_HOSTS: "true"
+          STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org"
+          SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org"
+          STELLAR_RPC_URL: "https://rpc-testnet.stellar.org"
+          COMPLIANCE_AUDIT_SECRET: "0123456789abcdef0123456789abcdef"
           REDIS_HOST: localhost
           REDIS_PORT: "6379"
 
