@@ -1,0 +1,52 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`disputes error-response snapshots 400 validation error shape 1`] = `
+{
+  "error": {
+    "code": "validation_error",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received number",
+        "path": [
+          "disputes",
+          "0",
+          "reason",
+        ],
+      },
+    ],
+    "message": "Request validation failed",
+    "requestId": "req-d-001",
+  },
+}
+`;
+
+exports[`disputes error-response snapshots 404 not-found error shape 1`] = `
+{
+  "error": {
+    "code": "not_found",
+    "message": "Dispute not found",
+    "requestId": "req-d-002",
+  },
+}
+`;
+
+exports[`disputes error-response snapshots 409 conflict error shape 1`] = `
+{
+  "error": {
+    "code": "conflict",
+    "message": "Dispute is already deleted and cannot be restored",
+    "requestId": "req-d-003",
+  },
+}
+`;
+
+exports[`disputes error-response snapshots 500 internal-server-error shape 1`] = `
+{
+  "error": {
+    "code": "internal_error",
+    "message": "An unexpected error occurred",
+    "requestId": "req-d-004",
+  },
+}
+`;
