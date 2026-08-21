@@ -61,19 +61,24 @@ describe('AuthCache', () => {
     });
 
     it('does not increment hit counter on expired entry', () => {
-      const shortTtlCache = new AuthCache({ ttlMs: 10, maxEntries: 100 });
-      shortTtlCache.set('selector-1', mockApiKeyInfo);
-      
-      // Wait for expiration
-      jest.advanceTimersByTime(20);
-      
-      const statsBefore = shortTtlCache.getStats();
-      const result = shortTtlCache.get('selector-1');
-      const statsAfter = shortTtlCache.getStats();
-      
-      expect(result).toBeNull();
-      expect(statsAfter.misses).toBe(statsBefore.misses + 1);
-      expect(statsAfter.hits).toBe(statsBefore.hits);
+      jest.useFakeTimers();
+      try {
+        const shortTtlCache = new AuthCache({ ttlMs: 10, maxEntries: 100 });
+        shortTtlCache.set('selector-1', mockApiKeyInfo);
+
+        // Wait for expiration
+        jest.advanceTimersByTime(20);
+
+        const statsBefore = shortTtlCache.getStats();
+        const result = shortTtlCache.get('selector-1');
+        const statsAfter = shortTtlCache.getStats();
+
+        expect(result).toBeNull();
+        expect(statsAfter.misses).toBe(statsBefore.misses + 1);
+        expect(statsAfter.hits).toBe(statsBefore.hits);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
