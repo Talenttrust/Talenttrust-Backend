@@ -53,7 +53,8 @@ const UNSAFE_PATTERNS: ReadonlyArray<RegExp> = [
   /[A-Z]:\\.*\.\w{1,5}/,                // Windows file paths
   /node_modules\//,                      // dependency paths
   /ECONNREFUSED|ENOTFOUND|ETIMEDOUT/,   // raw syscall errors
-  /SELECT|INSERT|UPDATE|DELETE/i,        // SQL fragments
+  /\b(SELECT|INSERT|UPDATE|DELETE)\b/i,  // SQL fragments (word-bounded so
+                                          //   legit words like "updates" pass)
   /password|secret|token|apikey/i,       // credential field names in messages
 ];
 
