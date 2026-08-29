@@ -1,15 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { ok, fail } from '../utils/apiResponse';
-import { EventAuditService, InMemoryEventAuditRepository } from '../repository/eventAuditRepository';
+import { EventAuditService } from '../repository/eventAuditRepository';
 import { validateContractEventPayload } from '../contracts/validation';
 import { getCorrelationId } from '../utils/correlationId';
 import { validateSchema } from '../middleware/validate.middleware';
-
-const defaultEventAuditService = new EventAuditService(new InMemoryEventAuditRepository());
+import { eventAuditService as sharedEventAuditService } from '../events/registry';
 
 export function createEventsRouter(
-  eventAuditService: EventAuditService = defaultEventAuditService,
+  eventAuditService: EventAuditService = sharedEventAuditService,
 ): Router {
   const router = Router();
 
