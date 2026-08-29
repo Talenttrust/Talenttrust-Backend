@@ -7,6 +7,7 @@
 
 import { EmailNotificationPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { InvalidJobPayloadError } from '../queue-errors';
 import {
   assertSafeEmailHeaders,
   isValidRecipientEmail,
@@ -48,12 +49,12 @@ export async function processEmailNotification(
 
   if (!isValidRecipientEmail(payload.to)) {
     log.warn('Email validation failed: invalid address format');
-    throw new Error(`Invalid email address: ${payload.to}`);
+    throw new InvalidJobPayloadError(`Invalid email address: ${payload.to}`);
   }
 
   if (!payload.subject || !payload.body) {
     log.warn('Email validation failed: missing subject or body');
-    throw new Error('Email subject and body are required');
+    throw new InvalidJobPayloadError('Email subject and body are required');
   }
 
   assertSafeEmailHeaders({

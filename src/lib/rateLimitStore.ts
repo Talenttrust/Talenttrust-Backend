@@ -20,6 +20,12 @@ export interface RateLimitEntry {
   windowStart: number;
   blocked: boolean;
   blockedUntil: number;
+  /**
+   * Request count from the bucket immediately preceding `windowStart`. Used
+   * by the sliding-window-counter approximation to weight trailing traffic
+   * across a bucket boundary without storing per-request timestamps.
+   */
+  prevCount?: number;
 }
 
 export interface TokenBucketEntry {

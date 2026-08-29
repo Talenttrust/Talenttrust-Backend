@@ -4,7 +4,7 @@ import { AppError, mapErrorToPayload } from '../errors/appError';
 import { AuthenticatedRequest } from '../auth/authenticate';
 import { isValidReputationRatingPayload, isValidReputationBulkItem } from './reputation.validation';
 import { profileToResponseDTO, createRatingBodyToPayload } from '../types/reputation';
-import type { GetProfileParamsDTO, CreateRatingBodyDTO, ReputationProfile } from '../types/reputation';
+import type { GetProfileParamsDTO, CreateRatingBodyDTO, ReputationProfile, ReputationCorrectionEntry, CorrectReputationBodyDTO } from '../types/reputation';
 import { parseLimit, resolveCursorQueryParam } from '../contracts/cursor.repository';
 import { CURSOR_DEFAULT_LIMIT } from '../contracts/cursor.types';
 import { logger, Logger } from '../logger';
@@ -37,6 +37,14 @@ function handleError(res: Response, next: NextFunction | undefined, error: unkno
     }
     res.status(statusCode).json(payload);
   }
+}
+
+/**
+ * Error handler for catch blocks (without next parameter).
+ * Used by the original codebase for consistency.
+ */
+function sendError(res: Response, error: unknown): void {
+  handleError(res, undefined, error);
 }
 
 /**
@@ -262,6 +270,97 @@ export class ReputationController {
     } catch (error) {
       log.error('reputation.createBulkRatings: error', { correlationId, err: error });
       sendError(res, error);
+    }
+  }
+
+  /**
+   * POST /api/v1/reputation/:id/correct
+   * Apply a manual reputation correction with full provenance tracking.
+   * 
+   * This endpoint is strictly separated from ordinary event ingestion pathways.
+   * Requires 'reputation.correct' permission (admin, support, moderator roles).
+   */
+  public static async correctReputation(req: AuthenticatedRequest, res: Response, next?: NextFunction): Promise<void> {
+    const log = resolveLogger(res);
+    const correlationId = res.locals.correlationId;
+    log.info('reputation.correctReputation: start', { freelancerId: req.params.id, correlationId });
+
+    try {
+      const { id } = req.params;
+      const body: CorrectReputationBodyDTO = req.body as CorrectReputationBodyDTO;
+
+      // Validate required fields
+      if (!body.reason || !body.reference || !body.contextId) {
+        handleError(res, next, new AppError(400, 'bad_request', 'reason, reference, and contextId are required'));
+        return;
+      }
+
+      // Get operator identity from authenticated request
+      const operatorId = req.user?.userId;
+      const operatorRole = req.user?.role || 'unknown';
+
+      if (!operatorId) {
+        handleError(res, next, new AppError(401, 'unauthorized', 'Operator identity not found'));
+        return;
+      }
+
+      const correction = ReputationService.correctReputation(
+        id,
+        body.contextId,
+        body.reason,
+        body.reference,
+        operatorId,
+        operatorRole,
+        correlationId
+      );
+
+      // Evict any stale cached profile
+      reputationCache.invalidate(id);
+
+      const response = {
+        status: 'success',
+        data: correction,
+        ...(correlationId !== undefined && { correlationId }),
+      };
+
+      log.info('reputation.correctReputation: success', { freelancerId: req.params.id, correctionId: correction.id, correlationId });
+      res.status(201).json(response);
+    } catch (error) {
+      log.error('reputation.correctReputation: error', { freelancerId: req.params.id, correlationId, err: error });
+      handleError(res, next, error);
+    }
+  }
+
+  /**
+   * GET /api/v1/reputation/:id/corrections
+   * Retrieve all reputation corrections for a freelancer.
+   */
+  public static async getCorrections(req: Request, res: Response, next?: NextFunction): Promise<void> {
+    const log = resolveLogger(res);
+    const correlationId = res.locals.correlationId;
+    log.info('reputation.getCorrections: start', { freelancerId: req.params.id, correlationId });
+
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        handleError(res, next, new AppError(400, 'bad_request', 'Freelancer ID is required'));
+        return;
+      }
+
+      const corrections = ReputationService.getCorrections(id);
+
+      const response = {
+        status: 'success',
+        data: corrections,
+        ...(correlationId !== undefined && { correlationId }),
+      };
+
+      log.info('reputation.getCorrections: success', { freelancerId: req.params.id, count: corrections.length, correlationId });
+      res.status(200).json(response);
+    } catch (error) {
+      log.error('reputation.getCorrections: error', { freelancerId: req.params.id, correlationId, err: error });
+      handleError(res, next, error);
     }
   }
 }

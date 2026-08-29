@@ -7,16 +7,25 @@
 
 import { BlockchainSyncPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { InvalidJobPayloadError } from '../queue-errors';
 
 /**
  * Process blockchain synchronization job
  *
+ * After a successful sync the provisional events for the synced network
+ * are re-evaluated against the current chain head (promotion). Because
+ * promotion is one-way and idempotent, retrying the job is always safe;
+ * a reorg before finality simply keeps affected events provisional.
+ *
  * @param payload - Blockchain sync configuration
+ * @param finalityPromoter - Optional promotion callback (tests inject
+ *                           their own; defaults to the registry service)
  * @returns Job result with sync statistics
- * @throws Error if sync fails
+ * @throws Error if sync fails (the queue retries per its policy)
  */
 export async function processBlockchainSync(
   payload: BlockchainSyncPayload,
+  finalityPromoter: FinalityPromoter = defaultFinalityPromoter,
 ): Promise<JobResult> {
   const log = createLogger({
     processor: 'blockchain',
@@ -29,7 +38,7 @@ export async function processBlockchainSync(
   const validNetworks = ['stellar', 'soroban'];
   if (!validNetworks.includes(payload.network)) {
     log.warn('Blockchain sync rejected: invalid network', { network: payload.network });
-    throw new Error(`Invalid network: ${payload.network}`);
+    throw new InvalidJobPayloadError(`Invalid network: ${payload.network}`);
   }
 
   // Validate block range
@@ -39,7 +48,7 @@ export async function processBlockchainSync(
         startBlock: payload.startBlock,
         endBlock: payload.endBlock,
       });
-      throw new Error('Start block must be less than or equal to end block');
+      throw new InvalidJobPayloadError('Start block must be less than or equal to end block');
     }
   }
 
@@ -50,6 +59,20 @@ export async function processBlockchainSync(
 
   const syncResult = await syncBlockchainData(payload, log);
 
+  // Promote provisional events that have now reached the network's
+  // finality depth. Failures propagate so the queue retries the job
+  // (sync is idempotent, so a retry is safe).
+  let finalityPromotion: { promoted: number; remaining: number } | undefined;
+  try {
+    finalityPromotion = await finalityPromoter(payload.network);
+    log.info('Blockchain sync: finality promotion applied', finalityPromotion);
+  } catch (error) {
+    log.error('Blockchain sync: finality promotion failed; will retry on next sync', {
+      error: error instanceof Error ? error.message : 'Unknown promotion error',
+    });
+    throw error;
+  }
+
   log.info('Blockchain sync completed', {
     blocksProcessed: syncResult.blocksProcessed,
     transactionsFound: syncResult.transactionsFound,
@@ -58,7 +81,10 @@ export async function processBlockchainSync(
   return {
     success: true,
     message: `Blockchain sync completed for ${payload.network}`,
-    data: syncResult,
+    data: {
+      ...syncResult,
+      ...(finalityPromotion !== undefined && { finalityPromotion }),
+    },
   };
 }
 

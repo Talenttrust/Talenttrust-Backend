@@ -58,4 +58,59 @@ describe('validateContractEventPayload', () => {
 
     expect(result).toEqual({ ok: false, reason: 'payload must be an object' });
   });
+
+  describe('on-chain attribution (network/ledger)', () => {
+    it('passes through valid network and ledger', () => {
+      const result = validateContractEventPayload(
+        createValidPayload({ network: 'soroban', ledger: 100 }),
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.event.network).toBe('soroban');
+        expect(result.event.ledger).toBe(100);
+      }
+    });
+
+    it('omits the fields when absent (off-chain event)', () => {
+      const result = validateContractEventPayload(createValidPayload());
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.event.network).toBeUndefined();
+        expect(result.event.ledger).toBeUndefined();
+      }
+    });
+
+    it('trims network values', () => {
+      const result = validateContractEventPayload(
+        createValidPayload({ network: '  soroban  ' }),
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.event.network).toBe('soroban');
+      }
+    });
+
+    it('rejects an invalid ledger (fail-closed, never downgraded to off-chain)', () => {
+      for (const ledger of [-1, 1.5, '100', NaN]) {
+        const result = validateContractEventPayload(createValidPayload({ ledger }));
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe('ledger must be a non-negative integer');
+        }
+      }
+    });
+
+    it('rejects an invalid network (fail-closed)', () => {
+      for (const network of ['', '   ', 42]) {
+        const result = validateContractEventPayload(createValidPayload({ network }));
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe('network must be a non-empty string');
+        }
+      }
+    });
+  });
 });

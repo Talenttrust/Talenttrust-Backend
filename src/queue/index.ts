@@ -44,6 +44,23 @@ export {
 } from './queue-metrics';
 export { queueConfig, getRedisConfig } from './config';
 export {
+	TerminalJobError,
+	InvalidJobPayloadError,
+	StaleJobReferenceError,
+	classifyFailure,
+	terminalKindOf,
+} from './queue-errors';
+export {
+	JobQuarantineEntry,
+	JobQuarantineQuery,
+	QuarantineReplayResult,
+	JobQuarantineConfig,
+	getJobQuarantineStorage,
+	clearJobQuarantineInstance,
+	initializeJobQuarantineMetrics,
+	resetJobQuarantineMetrics,
+} from './job-quarantine';
+export {
 	WebhookDLQEntry,
 	WebhookDLQQuery,
 	DLQConfig as WebhookDLQConfig,

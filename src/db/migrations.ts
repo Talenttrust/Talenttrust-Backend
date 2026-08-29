@@ -614,3 +614,81 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 14: add call_count to api_keys
+MIGRATIONS.push({
+  version: 14,
+  name: "add_call_count_to_api_keys",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS api_keys (",
+    "ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0",
+  ].join("\n"),
+  up: (db) => {
+    // Create api_keys table if it doesn't exist
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id              TEXT    PRIMARY KEY,
+        name            TEXT    NOT NULL,
+        key_hash        TEXT    NOT NULL,
+        role            TEXT    NOT NULL,
+        expires_at      TEXT,
+        created_at      TEXT    NOT NULL,
+        last_used_at    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+    `);
+
+    // Check if the column already exists to prevent errors during repeated migrations
+    const columns = db.pragma("table_info(api_keys)") as Array<{
+      name: string;
+    }>;
+    const hasCallCount = columns.some((column) => column.name === "call_count");
+
+    if (!hasCallCount) {
+      db.exec("ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0");
+    }
+  },
+});
+
+// Version 15: create reputation_corrections table for manual reputation corrections with provenance
+MIGRATIONS.push({
+  version: 15,
+  name: "create_reputation_corrections_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS reputation_corrections (",
+    "UNIQUE(target_id, context_id, reference)",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reputation_corrections (
+        id              TEXT    PRIMARY KEY,
+        target_id       TEXT    NOT NULL REFERENCES users(id),
+        context_id      TEXT    NOT NULL REFERENCES contracts(id),
+        reason          TEXT    NOT NULL CHECK (length(reason) >= 10 AND length(reason) <= 5000),
+        reference       TEXT    NOT NULL,
+        before_score    REAL    NOT NULL,
+        after_score     REAL    NOT NULL,
+        before_weighted REAL    NOT NULL,
+        after_weighted  REAL    NOT NULL,
+        before_total    INTEGER NOT NULL,
+        after_total     INTEGER NOT NULL,
+        operator_id     TEXT    NOT NULL REFERENCES users(id),
+        operator_role   TEXT    NOT NULL,
+        created_at      TEXT    NOT NULL,
+        UNIQUE(target_id, context_id, reference)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_target_id
+        ON reputation_corrections(target_id);
+
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_context_id
+        ON reputation_corrections(context_id);
+
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_operator_id
+        ON reputation_corrections(operator_id);
+
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_created_at
+        ON reputation_corrections(created_at);
+    `);
+  },
+});

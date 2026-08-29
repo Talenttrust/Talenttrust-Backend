@@ -10,6 +10,7 @@ export type {
   CircuitBreakerOptions,
   CircuitState,
   CircuitStats,
+  ExecuteOptions,
 } from "./CircuitBreaker";
 export { CircuitOpenError } from "./errors";
 export { circuitBreakerRegistry } from "./registry";

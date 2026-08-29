@@ -149,9 +149,10 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
   // ── Requirement 3.2 / 5.1 / 5.2 / 5.4: stale version → 409 ERR_CONFLICT ──
 
   describe('version conflict (stale version)', () => {
-    // Service always throws VersionConflictError (simulates stale version)
+    // Service always throws VersionConflictError (simulates stale version),
+    // carrying the current stored version so the client can retry.
     const app = createTestApp(async () => {
-      throw new VersionConflictError();
+      throw new VersionConflictError(5);
     });
 
     it('returns 409 ERR_CONFLICT when version is stale', async () => {
@@ -163,7 +164,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
       expect(res.body.error.code).toBe('ERR_CONFLICT');
     });
 
-    it('conflict response body contains only error fields (no contract data)', async () => {
+    it('conflict response body contains only error fields plus the current version (no contract data)', async () => {
       const res = await request(app)
         .patch(`/api/v1/contracts/${CONTRACT_ID}`)
         .send({ version: 99, title: 'Updated Title Here' });
@@ -173,6 +174,8 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
       expect(res.body.error).toBeDefined();
       expect(res.body.error.code).toBe('ERR_CONFLICT');
       expect(res.body.error.message).toBe('Version conflict');
+      // Must expose the current version so the client can retry
+      expect(res.body.error.currentVersion).toBe(5);
       // Must NOT contain contract fields
       expect(res.body.id).toBeUndefined();
       expect(res.body.title).toBeUndefined();

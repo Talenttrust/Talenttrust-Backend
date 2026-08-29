@@ -120,10 +120,16 @@ export class ContractEventIndexer {
           duplicateCount++;
           maxSequence = this.updateMaxSequence(event, maxSequence);
         } else if (result.status === 'invalid') {
-          errors.push(result.reason || 'Event validation failed');
+          errors.push(`[application] ${result.reason || 'Event validation failed'}`);
         }
       } catch (error) {
-        errors.push(`Event processing error: ${error instanceof Error ? error.message : 'unknown'}`);
+        const errorClass = this.classifyRpcError(error);
+        const message = error instanceof Error ? error.message : 'unknown';
+        const retryAfter = this.extractRetryAfter(error);
+        const providerCode = this.extractProviderCode(error);
+        const retryInfo = retryAfter !== null ? ` (retry after ${retryAfter}s)` : '';
+        const codeInfo = providerCode !== null ? ` (provider code: ${providerCode})` : '';
+        errors.push(`[${errorClass}] ${message}${retryInfo}${codeInfo}`);
       }
     }
 
@@ -209,5 +215,76 @@ export class ContractEventIndexer {
   private updateMaxSequence(event: unknown, currentMax: number): number {
     const seq = this.extractSequence(event);
     return seq >= 0 && seq !== Infinity ? Math.max(currentMax, seq) : currentMax;
+  }
+
+  /**
+   * Classify an RPC error into an explicit retry class.
+   * @private
+   */
+  private classifyRpcError(error: unknown): string {
+    const status = this.extractHttpStatus(error);
+    const message = error instanceof Error ? error.message.toLowerCase() : '';
+
+    if (this.isTimeoutError(error, message)) return 'timeout';
+    if (status === 429 || message.includes('rate limit') || message.includes('too many requests')) return 'rate_limit';
+    if (this.isMalformedResponse(message)) return 'malformed_response';
+    if (this.isTransportError(error, message)) return 'transport';
+    if (status !== null && status >= 400) return 'application';
+    return 'unknown';
+  }
+
+  private extractHttpStatus(error: unknown): number | null {
+    if (error && typeof error === 'object') {
+      const err = error as Record<string, unknown>;
+      if (typeof err.status === 'number') return err.status;
+      if (typeof err.statusCode === 'number') return err.statusCode;
+      if (err.response && typeof err.response === 'object') {
+        const resp = err.response as Record<string, unknown>;
+        if (typeof resp.status === 'number') return resp.status;
+      }
+    }
+    return null;
+  }
+
+  private extractRetryAfter(error: unknown): string | null {
+    if (error && typeof error === 'object') {
+      const err = error as Record<string, unknown>;
+      const response = err.response && typeof err.response === 'object' ? err.response as Record<string, unknown> : err;
+      const headers = response.headers;
+      if (headers && typeof headers === 'object') {
+        const h = headers as Record<string, unknown>;
+        const val = h['retry-after'] ?? h['Retry-After'];
+        if (typeof val === 'string' || typeof val === 'number') return String(val);
+      }
+    }
+    return null;
+  }
+
+  private extractProviderCode(error: unknown): string | null {
+    if (error && typeof error === 'object') {
+      const err = error as Record<string, unknown>;
+      const source = err.error && typeof err.error === 'object' ? err.error as Record<string, unknown> : err;
+      if (typeof source.code === 'string' || typeof source.code === 'number') return String(source.code);
+      if (typeof err.code === 'string' || typeof err.code === 'number') return String(err.code);
+    }
+    return null;
+  }
+
+  private isTimeoutError(error: unknown, message: string): boolean {
+    if (error instanceof Error) {
+      const name = error.name.toLowerCase();
+      if (name === 'timeouterror' || name === 'aborterror') return true;
+    }
+    return message.includes('timeout') || message.includes('timed out');
+  }
+
+  private isMalformedResponse(message: string): boolean {
+    return message.includes('json') && (message.includes('unexpected') || message.includes('parse') || message.includes('syntax'));
+  }
+
+  private isTransportError(error: unknown, message: string): boolean {
+    if (message.includes('econnreset') || message.includes('econnrefused') || message.includes('network') || message.includes('socket')) return true;
+    if (error instanceof TypeError && message.includes('fetch')) return true;
+    return false;
   }
 }

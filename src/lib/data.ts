@@ -14,13 +14,17 @@ import { Action, Permission, Resource } from "./types";
  */
 export const PERMISSION_MATRIX: readonly Permission[] = [
   // ── admin (full access, no ownOnly restrictions) ──────────────────────────
-  ...( ["users","jobs","proposals","contracts","payments","reviews","reports","settings"] as Resource[]).flatMap(
+  ...( ["users","jobs","proposals","contracts","payments","reviews","reports","settings","reputation"] as Resource[]).flatMap(
     (resource) =>
-      (["create","read","update","delete","list"] as Action[]).map(
+      (["create","read","update","delete","list","correct"] as Action[]).map(
         (action): Permission => ({ role: "admin", resource, action })
       )
   ),
- 
+  
+  // ── auditor (read-only access to reputation corrections) ──────────────────
+  { role: "auditor", resource: "reputation", action: "read"   },
+  { role: "auditor", resource: "reputation", action: "list"   },
+  
   // ── client ────────────────────────────────────────────────────────────────
   { role: "client", resource: "jobs",      action: "create"                  },
   { role: "client", resource: "jobs",      action: "read"                    },
@@ -42,7 +46,7 @@ export const PERMISSION_MATRIX: readonly Permission[] = [
   { role: "client", resource: "reviews",   action: "list"                    },
   { role: "client", resource: "settings",  action: "read",    ownOnly: true  },
   { role: "client", resource: "settings",  action: "update",  ownOnly: true  },
- 
+  
   // ── freelancer ────────────────────────────────────────────────────────────
   { role: "freelancer", resource: "jobs",      action: "read"                    },
   { role: "freelancer", resource: "jobs",      action: "list"                    },
