@@ -274,7 +274,9 @@ describe('auth rate limit — window reset', () => {
       expect(first.status).toBe(200);
       expect(inWindowBlocked.status).toBe(429);
 
-      jest.setSystemTime(1_700_000_001_001);
+      // The sliding-window counter keeps a weighted residue from the previous
+      // bucket for one full window, so advance past two windows for a clean reset.
+      jest.setSystemTime(1_700_000_002_001);
 
       const afterReset = await request(app).post('/api/v1/auth/register').set('X-Forwarded-For', ip);
 

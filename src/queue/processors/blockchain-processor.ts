@@ -8,6 +8,22 @@
 import { BlockchainSyncPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
 import { InvalidJobPayloadError } from '../queue-errors';
+import { eventAuditService } from '../../events/registry';
+
+/**
+ * Finality promotion callback invoked after a successful sync. Flips
+ * provisional events that have reached the network's finality depth.
+ */
+export type FinalityPromoter = (
+  network: string,
+) => Promise<{ promoted: number; remaining: number }>;
+
+/**
+ * Default promoter backed by the shared event audit service. Idempotent
+ * and safe to run on every successful sync (retries are harmless).
+ */
+const defaultFinalityPromoter: FinalityPromoter = (network) =>
+  eventAuditService.promoteProvisionalEvents(network);
 
 /**
  * Process blockchain synchronization job

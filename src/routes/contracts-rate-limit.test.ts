@@ -110,7 +110,9 @@ describe('milestones rate limiting', () => {
       let res = await request(app).get('/api/v1/contracts/bounds').set('X-Forwarded-For', ip);
       expect(res.status).toBe(429);
 
-      jest.advanceTimersByTime(1_001);
+      // The sliding-window counter keeps a weighted residue from the previous
+      // bucket for one full window, so advance past two windows for a clean reset.
+      jest.advanceTimersByTime(2_001);
 
       res = await request(app).get('/api/v1/contracts/bounds').set('X-Forwarded-For', ip);
       expect(res.status).toBe(200);

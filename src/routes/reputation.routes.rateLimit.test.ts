@@ -113,7 +113,9 @@ describe('reputation route rate limiting', () => {
 
       expect(blocked.status).toBe(429);
 
-      jest.setSystemTime(1_700_000_001_001);
+      // The sliding-window counter keeps a weighted residue from the previous
+      // bucket for one full window, so advance past two windows for a clean reset.
+      jest.setSystemTime(1_700_000_002_001);
 
       const afterReset = await getReputation(app, { ip });
       expect(afterReset.status).toBe(200);
