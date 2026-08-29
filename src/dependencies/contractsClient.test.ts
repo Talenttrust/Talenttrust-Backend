@@ -4,7 +4,7 @@ import { circuitBreakerRegistry } from '../circuit-breaker/registry';
 import axios from 'axios';
 
 jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typof axios>;
+const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 const defaultConfig = {
   upstreamContractsUrl: 'http://upstream/contracts',
@@ -77,7 +77,7 @@ describe('ContractsClient', () => {
     );
 
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
-    expect(breaker.getState())).toBe('OPEN');
+    expect(breaker.getState()).toBe('OPEN');
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
   });
 
