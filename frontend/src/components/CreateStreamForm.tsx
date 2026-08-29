@@ -9,6 +9,7 @@ import React, { useState, useEffect } from 'react';
  */
 
 interface StreamFormData {
+  
   recipient: string;
   amount: string;
   assetCode: string;
