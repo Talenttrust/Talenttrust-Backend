@@ -12,6 +12,16 @@ export function createEventsRouter(
 ): Router {
   const router = Router();
 
+  // Expire any held ordering events whose gap never filled before handling
+  // new traffic. Bounded sweep — each call examines only held entries.
+  router.use('/events', (_req: Request, res: Response, next: import('express').NextFunction) => {
+    const expired = eventAuditService.expireHeldOrderingEvents();
+    if (expired.length > 0) {
+      res.locals['expiredOrderingEvents'] = expired;
+    }
+    next();
+  });
+
   router.post('/events', async (req: Request, res: Response) => {
     const validation = validateContractEventPayload(req.body);
     if (!validation.ok) {
@@ -44,15 +54,39 @@ export function createEventsRouter(
         });
       }
 
+      if (result.status === 'held') {
+        return ok(
+          res,
+          {
+            status: 'held',
+            deduplicationKey: result.deduplicationKey,
+            reason: result.reason,
+          },
+          undefined,
+          202,
+        );
+      }
+
       return fail(
         res,
         result.code ?? 'event_rejected',
         result.reason ?? 'Event rejected',
         result.statusCode ?? 400,
       );
-    } catch (error) {
+    } catch (_error) {
       return fail(res, 'internal_error', 'Failed to process event', 500);
     }
+  });
+
+  /**
+   * Read-only ordering snapshot: high-water marks, held (pending) events per
+   * contract, and recent rejections (gap too large, buffer full, hold
+   * timeout). Lets operators see at a glance whether any contract stream is
+   * stalled on a missing sequence.
+   */
+  router.get('/events/ordering', (_req: Request, res: Response) => {
+    const snapshot = eventAuditService.getOrderingSnapshot();
+    return ok(res, snapshot ?? { enabled: false });
   });
 
   router.post('/events/validate', (req: Request, res: Response) => {
