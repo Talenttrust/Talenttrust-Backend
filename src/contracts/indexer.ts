@@ -4,6 +4,22 @@ import { CursorResumeRequest, CursorResumeResult, CursorUpdateResult } from './c
 import { ContractEvent, PersistedContractEvent } from './types';
 
 /**
+ * @notice Optional scope that makes checkpoints independent per contract network.
+ *
+ * The existing sourceId argument remains the ledger/source identifier. When a
+ * scope is supplied, the persisted cursor key becomes
+ * `network:contract:sourceId`, so two contracts/networks never share progress.
+ */
+export interface CheckpointScope {
+  /** Network where the contract is deployed (for example, mainnet or sepolia). */
+  network: string;
+  /** Contract address or unique contract identifier. */
+  contract: string;
+  /** Optional ledger/source identifier; defaults to the sourceId argument. */
+  ledger?: string;
+}
+
+/**
  * @notice Result of indexing a batch of events with replay protection.
  */
 export interface IndexerBatchResult {
@@ -45,10 +61,12 @@ export class ContractEventIndexer {
    * Resume indexing from last known cursor position.
    *
    * @param request - Specify source and optionally override resume position
+   * @param scope - Optional contract-network scope; when supplied the cursor is
+   *                read from the network:contract:sourceId checkpoint.
    * @returns Current cursor state and effective resume sequence
    */
-  async resumeFromCursor(request: CursorResumeRequest): Promise<CursorResumeResult> {
-    const cursor = await this.cursorRepository.getCursor(request.sourceId);
+  async resumeFromCursor(request: CursorResumeRequest, scope?: CheckpointScope): Promise<CursorResumeResult> {
+    const cursor = await this.cursorRepository.getCursor(this.resolveSourceId(request.sourceId, scope));
 
     if (request.fromSequence !== undefined) {
       // Force resume from specific sequence
@@ -81,15 +99,17 @@ export class ContractEventIndexer {
    *
    * Events are sorted by sequence number to ensure deterministic processing order.
    * Duplicate events (same contractId:eventId:sequence) are silently skipped.
-   * Cursor is updated to the highest sequence number successfully indexed.
+   * Cursor is advanced only after projection writes succeed; a failed or invalid
+   * event blocks the checkpoint so a restart retries exactly from that event.
    *
    * Replay Invariants:
    * 1. Re-indexing an identical batch yields 0 new processed events and increments duplicateCount by the batch size.
    * 2. Indexing a partially-overlapping batch processes only new events, tracking overlaps as duplicates.
    * 3. Malformed events are surfaced in the errors array without aborting the batch.
    *
-   * @param sourceId - Identifier for this indexing source (enables multiple concurrent sources)
+   * @param sourceId - Ledger/source identifier for this indexing source
    * @param events - Events to index (may include duplicates or out-of-order submissions)
+   * @param scope - Optional contract-network scope; persists the checkpoint separately per network and contract
    * @returns Result with counts and updated cursor
    *
    * @example
@@ -99,28 +119,49 @@ export class ContractEventIndexer {
    * ]);
    * console.log(`Indexed ${result.processedCount}, duplicates: ${result.duplicateCount}`);
    */
-  async indexBatch(sourceId: string, events: unknown[]): Promise<IndexerBatchResult> {
+  async indexBatch(sourceId: string, events: unknown[], scope?: CheckpointScope): Promise<IndexerBatchResult> {
     const errors: string[] = [];
     let processedCount = 0;
     let duplicateCount = 0;
-    let maxSequence = -1;
+
+    const cursorSourceId = this.resolveSourceId(sourceId, scope);
+    const existingCursor = await this.cursorRepository.getCursor(cursorSourceId);
+    const baseSequence = existingCursor?.lastSequence ?? -1;
+    let contiguousMaxSequence = baseSequence;
+    let expectedSequence: number | null = baseSequence >= 0 ? baseSequence + 1 : null;
 
     // Sort events by sequence for stable ordering
     const sortedEvents = this.sortEventsBySequence(events);
 
     for (const event of sortedEvents) {
+      const sequence = this.extractSequence(event);
+      const alreadyCheckpointed = sequence <= baseSequence;
+
       try {
         const result = await this.eventProcessor.ingest(event);
 
         if (result.status === 'accepted') {
           processedCount++;
-          // Extract sequence if event validation succeeded
-          maxSequence = this.updateMaxSequence(event, maxSequence);
         } else if (result.status === 'duplicate') {
           duplicateCount++;
-          maxSequence = this.updateMaxSequence(event, maxSequence);
         } else if (result.status === 'invalid') {
           errors.push(`[application] ${result.reason || 'Event validation failed'}`);
+          if (!alreadyCheckpointed && Number.isFinite(sequence) && (expectedSequence === null || sequence < expectedSequence)) {
+            expectedSequence = sequence;
+          }
+          continue;
+        }
+
+        if (!alreadyCheckpointed && Number.isFinite(sequence)) {
+          if (expectedSequence === null) {
+            // First successful event in a fresh checkpoint establishes the start
+            // of the contiguous range for this batch.
+            expectedSequence = sequence + 1;
+            contiguousMaxSequence = sequence;
+          } else if (sequence === expectedSequence) {
+            contiguousMaxSequence = sequence;
+            expectedSequence++;
+          }
         }
       } catch (error) {
         const errorClass = this.classifyRpcError(error);
@@ -130,13 +171,19 @@ export class ContractEventIndexer {
         const retryInfo = retryAfter !== null ? ` (retry after ${retryAfter}s)` : '';
         const codeInfo = providerCode !== null ? ` (provider code: ${providerCode})` : '';
         errors.push(`[${errorClass}] ${message}${retryInfo}${codeInfo}`);
+        if (!alreadyCheckpointed && Number.isFinite(sequence) && (expectedSequence === null || sequence < expectedSequence)) {
+          expectedSequence = sequence;
+        }
       }
     }
 
-    // Update cursor with highest indexed sequence
+    // Update cursor only when a contiguous range after the persisted checkpoint
+    // has been successfully projected. This prevents a failed or invalid event
+    // from being skipped on restart, and prevents the cursor from moving
+    // backwards when the batch contains only old events.
     let newCursor = undefined;
-    if (maxSequence >= 0) {
-      const updateResult = await this.cursorRepository.updateCursor(sourceId, maxSequence);
+    if (contiguousMaxSequence > baseSequence) {
+      const updateResult = await this.cursorRepository.updateCursor(cursorSourceId, contiguousMaxSequence);
       if (updateResult.success) {
         newCursor = {
           sourceId: updateResult.cursor.sourceId,
@@ -155,10 +202,10 @@ export class ContractEventIndexer {
   }
 
   /**
-   * Get current cursor state for a source.
+   * Get current cursor state for a source, optionally scoped to a contract network.
    */
-  async getCursor(sourceId: string) {
-    return this.cursorRepository.getCursor(sourceId);
+  async getCursor(sourceId: string, scope?: CheckpointScope) {
+    return this.cursorRepository.getCursor(this.resolveSourceId(sourceId, scope));
   }
 
   /**
@@ -209,12 +256,14 @@ export class ContractEventIndexer {
   }
 
   /**
-   * Update max sequence tracker for cursor.
+   * Build the cursor key used for checkpoint persistence.
+   *
+   * When a scope is supplied, the checkpoint is isolated by network, contract,
+   * and ledger sourceId. Without a scope the legacy sourceId key is preserved.
    * @private
    */
-  private updateMaxSequence(event: unknown, currentMax: number): number {
-    const seq = this.extractSequence(event);
-    return seq >= 0 && seq !== Infinity ? Math.max(currentMax, seq) : currentMax;
+  private resolveSourceId(sourceId: string, scope?: CheckpointScope): string {
+    return scope ? `${scope.network}:${scope.contract}:${scope.ledger ?? sourceId}` : sourceId;
   }
 
   /**
