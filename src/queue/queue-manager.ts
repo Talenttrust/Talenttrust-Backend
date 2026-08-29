@@ -34,7 +34,14 @@ import {
 } from './queue-metrics';
 import { jobProcessors } from './processors';
 import { RetryPolicyManager } from './retry-manager';
-import { logger } from '../logger';
+import { classifyFailure, terminalKindOf, TerminalJobError } from './queue-errors';
+import {
+  getJobQuarantineStorage,
+  JobQuarantineEntry,
+  JobQuarantineQuery,
+  QuarantineReplayResult,
+} from './job-quarantine';
+import { logger, Logger } from '../logger';
 
 /**
  * Queue health information - safe for admin exposure
@@ -486,8 +493,71 @@ export class QueueManager {
       return await this.runProcessorWithTimeout(jobType, job, processor);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      // A terminal failure must not keep consuming retries. Quarantine the
+      // job and rethrow a TerminalJobError so BullMQ stops retrying it and the
+      // poisoned job stops stalling unrelated work. Quarantining is a bounded
+      // side effect: a storage failure is logged and the job still fails
+      // (without silent deletion) rather than crashing the worker.
+      if (classifyFailure(error) === 'terminal') {
+        const quarantineSucceeded = await this.quarantineJob(
+          jobType,
+          job,
+          error,
+          errorMessage,
+          jobLogger,
+        );
+        jobLogger.warn('Job quarantined for terminal failure', {
+          jobId: job.id,
+          error: errorMessage,
+          quarantineSucceeded,
+        });
+        throw new TerminalJobError(errorMessage);
+      }
+
       jobLogger.error('Job processing failed', { error: errorMessage });
       throw new Error(`Job processing failed: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Persist a terminal job failure into the quarantine store as a bounded side
+   * effect. The payload is redacted by the store and the reason sanitized; a
+   * storage failure is logged and reported via the return flag so the job is
+   * still handled safely (never silently deleted).
+   *
+   * @returns `true` when the entry was persisted, `false` when the store failed.
+   */
+  private async quarantineJob(
+    jobType: JobType,
+    job: Job,
+    error: unknown,
+    errorMessage: string,
+    jobLogger: Logger,
+  ): Promise<boolean> {
+    const tenantId = this.resolveTenantId(job as Job);
+    const payload = job.data as JobPayload;
+
+    try {
+      const storage = getJobQuarantineStorage();
+      await storage.addEntry({
+        jobType,
+        jobId: String(job.id),
+        tenantId,
+        payload,
+        reason: errorMessage,
+        kind: terminalKindOf(error) ?? 'terminal',
+        attemptsMade: job.attemptsMade ?? 0,
+      });
+      return true;
+    } catch (quarantineError) {
+      const quarantineMessage =
+        quarantineError instanceof Error ? quarantineError.message : 'Unknown error';
+      jobLogger.error('Failed to quarantine job', {
+        jobId: job.id,
+        error: quarantineMessage,
+      });
+      return false;
     }
   }
 
@@ -791,5 +861,80 @@ export class QueueManager {
     return failures
       .sort((a, b) => b.failedAt - a.failedAt)
       .slice(0, limit);
+  }
+
+  /**
+   * List quarantined jobs for authorised inspection.
+   *
+   * @param query - Optional filters (job type / tenant) and pagination.
+   * @returns Matching quarantined entries (payloads are redacted at the store).
+   */
+  public async getQuarantinedJobs(query: JobQuarantineQuery = {}): Promise<JobQuarantineEntry[]> {
+    return getJobQuarantineStorage().listEntries(query);
+  }
+
+  /**
+   * Get a single quarantined entry by its quarantine id.
+   *
+   * @returns The entry, or `null` when it does not exist.
+   */
+  public async getQuarantinedJob(id: string): Promise<JobQuarantineEntry | null> {
+    return getJobQuarantineStorage().getEntry(id);
+  }
+
+  /**
+   * Re-enqueue a quarantined job so it can re-run after the underlying issue
+   * is fixed. The original payload (redacted) is restored onto a deduped
+   * replay job id, so a second call is an idempotent no-op. Binding a replay
+   * id keeps running replay jobs from colliding with the original.
+   *
+   * @param quarantineId - Identifier of the quarantined entry.
+   * @throws If the entry is missing, the queue is not initialized, or the
+   *         corresponding BullMQ queue cannot enqueue.
+   */
+  public async replayQuarantinedJob(quarantineId: string): Promise<QuarantineReplayResult> {
+    const storage = getJobQuarantineStorage();
+    const entry = storage.getEntry(quarantineId);
+    if (!entry) {
+      throw new Error(`Quarantined job not found: ${quarantineId}`);
+    }
+
+    const { jobType, jobId, tenantId, payload } = storage.getPayload(quarantineId)!;
+    const queue = this.queues.get(jobType);
+    if (!queue) {
+      throw new Error(`Queue for ${jobType} not initialized`);
+    }
+
+    const replayJobId = this.buildReplayJobId(jobType, `quarantine:${quarantineId}`);
+    const existingReplayJob = await queue.getJob(replayJobId);
+    if (existingReplayJob) {
+      return {
+        entryId: quarantineId,
+        replayedJobId: replayJobId,
+        deduplicated: true,
+        jobType,
+      };
+    }
+
+    const enrichedPayload = {
+      ...payload,
+      ...(tenantId && { tenantId }),
+      quarantineOriginalJobId: jobId,
+    };
+
+    await queue.add(jobType, enrichedPayload as JobPayload, { jobId: replayJobId });
+
+    // Bounded side effect: mark replay after re-enqueue. A storage failure
+    // here is logged but must not prevent the job from running.
+    storage.incrementReplayAttempts(quarantineId);
+
+    logger.info('Quarantined job replayed', { jobType, jobId, quarantineId, replayJobId });
+
+    return {
+      entryId: quarantineId,
+      replayedJobId: replayJobId,
+      deduplicated: false,
+      jobType,
+    };
   }
 }

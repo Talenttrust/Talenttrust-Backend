@@ -7,6 +7,7 @@
 
 import { BlockchainSyncPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { InvalidJobPayloadError } from '../queue-errors';
 
 /**
  * Process blockchain synchronization job
@@ -29,7 +30,7 @@ export async function processBlockchainSync(
   const validNetworks = ['stellar', 'soroban'];
   if (!validNetworks.includes(payload.network)) {
     log.warn('Blockchain sync rejected: invalid network', { network: payload.network });
-    throw new Error(`Invalid network: ${payload.network}`);
+    throw new InvalidJobPayloadError(`Invalid network: ${payload.network}`);
   }
 
   // Validate block range
@@ -39,7 +40,7 @@ export async function processBlockchainSync(
         startBlock: payload.startBlock,
         endBlock: payload.endBlock,
       });
-      throw new Error('Start block must be less than or equal to end block');
+      throw new InvalidJobPayloadError('Start block must be less than or equal to end block');
     }
   }
 
