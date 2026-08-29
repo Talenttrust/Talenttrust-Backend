@@ -193,6 +193,18 @@ Queue workers enforce a wall-clock timeout for every job attempt. When a job exc
 
 Processors receive an `AbortSignal` as optional context and should stop outbound work when it is aborted. The manager still fails the attempt on timeout when a processor ignores the signal, and it prevents the same job from being executed again while the timed-out processor is still active.
 
+### Weighted Fair Scheduling
+
+Queue workers no longer run a strict priority ladder. A **weighted fair scheduler** ensures a high-priority stream cannot starve reconciliation, notification, or cleanup jobs indefinitely:
+
+- **Weighted fairness** — each priority level has a weight (`critical` 4, `high` 3, `normal` 2, `low` 1) and service is proportional to weight.
+- **Maximum wait bound** — a job waiting longer than `QUEUE_FAIR_MAX_WAIT_MS` (default 5 min) is promoted to the front unconditionally.
+- **Per-tenant isolation** — pass an optional `tenantId` to `addJob`; a tenant flood cannot block other tenants.
+- **Worker-restart safe** — scheduling is a pure function of durable job metadata, so a restarted worker computes the same order.
+- **Observable** — scheduling decisions are exposed as `queue_fair_*` Prometheus metrics.
+
+Configuration: `QUEUE_FAIR_MAX_WAIT_MS`, `QUEUE_FAIR_REBALANCE_INTERVAL_MS`. See [docs/backend/queue-fair-scheduling.md](docs/backend/queue-fair-scheduling.md) for the full design and edge cases.
+
 For full configuration details, see [docs/backend/config.md](docs/backend/config.md).
 
 ## Audit Log Export

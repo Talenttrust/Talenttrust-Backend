@@ -46,56 +46,6 @@ export function resetAuthCache(): void {
   authCache = null;
 }
 
-// Throttled API key usage tracking
-const usageBuffer = new Map<string, { count: number; lastUsedAt: Date }>();
-let flushTimeout: NodeJS.Timeout | null = null;
-const FLUSH_INTERVAL_MS = 5000;
-
-export function recordApiKeyUsage(keyId: string): void {
-  const now = new Date();
-  const existing = usageBuffer.get(keyId);
-  if (existing) {
-    existing.count += 1;
-    existing.lastUsedAt = now;
-  } else {
-    usageBuffer.set(keyId, { count: 1, lastUsedAt: now });
-  }
-
-  if (!flushTimeout) {
-    flushTimeout = setTimeout(() => {
-      void flushApiKeyUsage();
-    }, FLUSH_INTERVAL_MS);
-    if (flushTimeout.unref) {
-      flushTimeout.unref();
-    }
-  }
-}
-
-export async function flushApiKeyUsage(): Promise<void> {
-  if (flushTimeout) {
-    clearTimeout(flushTimeout);
-    flushTimeout = null;
-  }
-
-  if (usageBuffer.size === 0) {
-    return;
-  }
-
-  // Copy and clear buffer
-  const entries = Array.from(usageBuffer.entries());
-  usageBuffer.clear();
-
-  try {
-    const promises = entries.map(([id, usage]) => 
-      database.incrementApiKeyUsage(id, usage.count, usage.lastUsedAt)
-    );
-    await Promise.allSettled(promises);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('Error flushing API key usage:', err);
-  }
-}
-
 export interface ApiKeyInfo {
   id: string;
   name: string;
@@ -104,8 +54,6 @@ export interface ApiKeyInfo {
   createdAt: Date;
   expiresAt?: Date;
   isActive: boolean;
-  callCount: number;
-  lastUsedAt?: Date;
 }
 
 export interface ApiKeyRequest {
@@ -217,9 +165,7 @@ export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: st
       createdBy: dbKey.created_by,
       createdAt: dbKey.created_at,
       expiresAt: dbKey.expires_at,
-      isActive: dbKey.is_active,
-      callCount: dbKey.call_count,
-      lastUsedAt: dbKey.last_used_at
+      isActive: dbKey.is_active
     }
   };
 }
@@ -334,8 +280,8 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
     await database.updateApiKey(dbKey.id, { key_selector: selector });
   }
   
-  // Update last used timestamp and call count (throttled)
-  recordApiKeyUsage(dbKey.id);
+  // Update last used timestamp
+  await database.updateApiKey(dbKey.id, { last_used_at: new Date() });
   
   // Check if key has expired
   if (dbKey.expires_at && new Date() > dbKey.expires_at) {
@@ -350,9 +296,7 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
     createdBy: dbKey.created_by,
     createdAt: dbKey.created_at,
     expiresAt: dbKey.expires_at,
-    isActive: dbKey.is_active,
-    callCount: dbKey.call_count,
-    lastUsedAt: dbKey.last_used_at
+    isActive: dbKey.is_active
   };
 
   // Cache the successful validation result
@@ -400,9 +344,7 @@ export async function rotateApiKey(keyId: string): Promise<{ apiKey: string; inf
       createdBy: updatedKey.created_by,
       createdAt: updatedKey.created_at,
       expiresAt: updatedKey.expires_at,
-      isActive: updatedKey.is_active,
-      callCount: updatedKey.call_count,
-      lastUsedAt: updatedKey.last_used_at
+      isActive: updatedKey.is_active
     }
   };
 }

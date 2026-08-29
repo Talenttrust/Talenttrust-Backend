@@ -47,14 +47,16 @@ When a webhook is triggered, the following JSON payload is sent to the subscribe
 - **Maximum payload size**: 1 MB (1,048,576 bytes) by default
 - **Configurable via**: `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES` environment variable
 - **Range**: 1 KB to 10 MB
-- Payloads exceeding this limit will be rejected before delivery attempts.### Event Types
-The system supports the following event types:
+- Payloads exceeding this limit will be rejected before delivery attempts.
+
+### Event Types
+
+The system supports the following event types (examples):
 
 - `contract.created` — Fired when a new contract is created
 - `contract.updated` — Fired when a contract is updated
 - `contract.deleted` — Fired when a contract is deleted
 - `talent.verified` — Fired when a talent identity is verified
-- `audit.event` — Fired when an audit log entry is created (see [Audit Webhook Events](#audit-webhook-events))
 
 Event types are defined by the `eventType` field in webhook subscriptions. Subscribers only receive events for the event types they have subscribed to.
 
@@ -73,90 +75,6 @@ All webhook deliveries include:
 
 - **`Content-Type`** — `application/json`
 - **`X-Correlation-Id`** — Optional correlation ID for distributed tracing (if provided)
-
----
-
-### Audit Webhook Events
-
-The `audit.event` event type fires whenever a new entry is written to the
-immutable audit log. The webhook payload's `data` field contains the
-redacted audit entry.
-
-#### Audit Event Data Schema
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string (UUID) | Unique identifier of the audit entry. |
-| `timestamp` | string (ISO 8601) | When the audited action occurred. |
-| `action` | string | Audit action (e.g. `CONTRACT_CREATED`, `AUTH_FAILED`). See [Audit Actions](audit.md#audit-actions). |
-| `severity` | string | `INFO`, `WARNING`, or `CRITICAL`. |
-| `actor` | string | User ID, service name, or `system`. |
-| `resource` | string | Resource type (e.g. `contract`, `user`, `payment`). |
-| `resourceId` | string | Specific resource instance identifier. |
-| `metadata` | object | Structured, redacted metadata about the change. Sensitive keys (`secret`, `token`, `password`, `credential`, `apikey`, `private`) are replaced with `[REDACTED]`. Email addresses are partially masked. |
-| `ipAddress` | string | Request origin IP (optional). |
-| `correlationId` | string | Cross-service tracing ID (optional). |
-
-**Note:** The internal hash-chain fields (`hash`, `previousHash`) are **not**
-included in the webhook payload. Use the audit API (`GET /api/v1/audit/:id`)
-to verify hash-chain integrity.
-
-#### Example Audit Webhook Payload
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "event": "audit.event",
-  "timestamp": "2026-07-29T12:00:00.000Z",
-  "data": {
-    "id": "550e8400-e29b-41d4-a716-446655440001",
-    "timestamp": "2026-07-29T12:00:00.000Z",
-    "action": "CONTRACT_CREATED",
-    "severity": "INFO",
-    "actor": "user-abc",
-    "resource": "contract",
-    "resourceId": "contract-123",
-    "metadata": {
-      "title": "Web Design Project",
-      "amount": 5000
-    },
-    "ipAddress": "192.168.1.1",
-    "correlationId": "corr-abc-123"
-  }
-}
-```
-
-#### Payload Size Bounding
-
-Audit webhook payloads respect the global `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES`
-limit (default 1 MB). If serialising the audit entry exceeds this limit,
-the `metadata` field is replaced with a truncation stub:
-
-```json
-{
-  "_truncated": true,
-  "_originalKeys": ["title", "amount"]
-}
-```
-
-If the payload still exceeds the limit after truncation, the event is
-silently skipped (no webhook is delivered). The audit entry itself is
-always safely persisted regardless.
-
-#### Subscribing to Audit Events
-
-Create a webhook subscription with `eventType: "audit.event"`:
-
-```bash
-curl -X POST http://localhost:3001/api/v1/webhook-subscriptions \
-  -H "Authorization: Bearer demo-admin-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://webhook.example.com/audit",
-    "eventType": "audit.event",
-    "secret": "my-shared-secret"
-  }'
-```
 
 ---
 

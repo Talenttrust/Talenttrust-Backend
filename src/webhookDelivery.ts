@@ -21,11 +21,6 @@ import {
   PROVIDERS,
   WebhookMetrics,
 } from './webhookMetrics';
-import {
-  webhookDeliveryProviderSchema,
-  webhookDeliveryBodySchema,
-} from './modules/webhooks/dto/webhook-payload.dto';
-import { ZodError } from 'zod';
 
 export interface DeliveryPayload {
   provider: string;
@@ -127,20 +122,6 @@ export class WebhookDeliveryService {
     payload: DeliveryPayload,
     httpClient: (url: string, body: Record<string, unknown>) => Promise<{ statusCode: number }>,
   ): Promise<DeliveryResult> {
-    // ── Schema-validate the delivery payload at the boundary ─────────────
-    // Only validate the provider and body; URL validation is handled by
-    // isSafeUrl / new URL() downstream and empty-url pass-through is an
-    // existing behaviour documented in the regression suite.
-    try {
-      webhookDeliveryProviderSchema.parse(payload.provider);
-      webhookDeliveryBodySchema.parse(payload.body);
-    } catch (err) {
-      if (err instanceof ZodError) {
-        return { success: false, durationSeconds: 0, enqueueToDoLQ: false };
-      }
-      throw err;
-    }
-
     const provider = sanitizeProvider(payload.provider);
     const breaker = this.getOrCreateBreaker(provider);
 

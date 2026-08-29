@@ -177,14 +177,13 @@ describe('WebhookService (iterative retry)', () => {
     );
   });
 
-  it('rejects invalid correlation ID values at the schema boundary', async () => {
-    // With declarative schema validation, invalid correlation IDs are now
-    // rejected at the send() boundary with a structured validation error
-    // instead of being silently dropped by buildWebhookHeaders().
-    await expect(
-      service.send(makePayload({ correlationId: 'trace\nX-Injected: true' })),
-    ).rejects.toThrow('Webhook send payload validation failed');
-    expect(axios.post).not.toHaveBeenCalled();
+  it('omits invalid correlation ID header values', async () => {
+    (axios.post as jest.Mock).mockResolvedValueOnce({ status: 200 });
+
+    await service.send(makePayload({ correlationId: 'trace\nX-Injected: true' }));
+
+    const call = (axios.post as jest.Mock).mock.calls[0];
+    expect(call[2].headers).not.toHaveProperty('X-Correlation-Id');
   });
 
   it('adds signature headers when webhookSecret provided', async () => {

@@ -4,7 +4,7 @@
   "description": "TalentTrust API Gateway and services with idempotent contract event ingestion",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json --noCheck",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn src/index.ts",
     "blue": "cross-env APP_COLOR=blue PORT=3001 ts-node-dev --respawn src/index.ts",

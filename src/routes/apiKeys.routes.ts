@@ -69,8 +69,7 @@ router.use(apiKeysRateLimiter);
  *     "createdBy": "user-id",
  *     "createdAt": "2024-01-01T00:00:00Z",
  *     "expiresAt": "2024-12-31T23:59:59Z",
- *     "isActive": true,
- *     "callCount": 0
+ *     "isActive": true
  *   }
  * }
  */
@@ -107,7 +106,6 @@ router.post(
  *       "updatedAt": "2024-01-01T00:00:00Z",
  *       "expiresAt": "2024-12-31T23:59:59Z",
  *       "lastUsedAt": "2024-01-15T10:30:00Z",
- *       "callCount": 42,
  *       "isActive": true
  *     }
  *   ],
@@ -138,7 +136,6 @@ router.get(
  *   "updatedAt": "2024-01-01T00:00:00Z",
  *   "expiresAt": "2024-12-31T23:59:59Z",
  *   "lastUsedAt": "2024-01-15T10:30:00Z",
- *   "callCount": 42,
  *   "isActive": true
  * }
  */
@@ -166,9 +163,7 @@ router.get(
  *     "createdAt": "2024-01-01T00:00:00Z",
  *     "updatedAt": "2024-01-15T10:30:00Z",
  *     "expiresAt": "2024-12-31T23:59:59Z",
- *     "isActive": true,
- *     "callCount": 42,
- *     "lastUsedAt": "2024-01-15T10:30:00Z"
+ *     "isActive": true
  *   }
  * }
  */

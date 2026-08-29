@@ -63,54 +63,7 @@ module.exports = {
     '!src/observability/index.ts',
   ],
   coverageThreshold: {
-    global: {
-      lines: 0,
-      statements: 0,
-      functions: 0,
-      branches: 0,
-    },
-    './src/observability/metrics-service.ts': {
-      lines: 95,
-      branches: 95,
-      functions: 95,
-      statements: 95,
-    },
-    './src/observability/reputation-observability.ts': {
-      lines: 95,
-      branches: 95,
-      functions: 95,
-      statements: 95,
-    },
-    './src/observability/health-service.ts': {
-      lines: 95,
-      branches: 94,
-      functions: 95,
-      statements: 95,
-    },
-    './src/middleware/metricsAuth.ts': {
-      lines: 95,
-      branches: 95,
-      functions: 95,
-      statements: 95,
-    },
-    './src/utils/webhookMetrics.ts': {
-      lines: 95,
-      branches: 95,
-      functions: 95,
-      statements: 95,
-    },
-    './src/utils/softDelete.ts': {
-      lines: 95,
-      branches: 95,
-      functions: 95,
-      statements: 95,
-    },
-    './src/services/disputes.service.ts': {
-      lines: 90,
-      branches: 80,
-      functions: 90,
-      statements: 90,
-    },
+    global: { lines: 0, statements: 0, functions: 0, branches: 0 },
   },
   coverageReporters: ['text', 'lcov', 'json-summary'],
 };

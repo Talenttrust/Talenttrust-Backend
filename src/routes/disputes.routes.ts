@@ -56,6 +56,19 @@ export interface DisputesRouterOptions {
   log?: Logger;
 }
 
+// ── Feature flag — gate all disputes routes ───────────────────────────────────
+router.use((_req: Request, res: Response, next: NextFunction) => {
+  if (!features.disputesEnabled) {
+    fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
+    return;
+  }
+  if (error instanceof SoftDeleteRetentionError) {
+    fail(res, error.code, error.message, error.statusCode);
+    return true;
+  }
+  return false;
+});
+
 /**
  * Build the disputes router.
  *
@@ -236,6 +249,8 @@ export function createDisputesObservabilityMiddleware(options: DisputesRouterOpt
 
     next();
   };
+
+  return router;
 }
 
 function formatExpressPath(path: unknown): string | null {

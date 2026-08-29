@@ -25,19 +25,12 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { createHash } from 'crypto';
-import { LRUCache } from 'lru-cache';
 import { registry } from '../docs/openapi-registry';
 import { validateRequest, validateQuery } from '../middleware/validation';
 import { HealthWriteBodySchema, HealthQuerySchema } from '../health/validation';
 import { createRateLimiter } from '../middleware/rateLimiter';
 import { rateLimitConfig } from '../config/rateLimit';
 import { healthRateLimitKeyFn } from '../health/rateLimitKey';
-
-const idempotencyStore = new LRUCache<string, { bodyHash: string; response: any }>({
-  max: 1000,
-  ttl: 1000 * 60 * 60 * 24, // 24 hours
-});
 
 export const healthRouter = Router();
 
@@ -110,35 +103,7 @@ healthRouter.get('/', validateQuery(HealthQuerySchema), (_req: Request, res: Res
   });
 });
 
-healthRouter.post('/', validateRequest(HealthWriteBodySchema), (req: Request, res: Response) => {
-  const idempotencyKey = req.header('idempotency-key');
-
-  if (idempotencyKey) {
-    const bodyHash = createHash('sha256').update(JSON.stringify(req.body)).digest('hex');
-    const cached = idempotencyStore.get(idempotencyKey);
-
-    if (cached) {
-      if (cached.bodyHash !== bodyHash) {
-        return res.status(409).json({
-          error: {
-            code: 'conflict',
-            message: 'Idempotency key already used for a different request',
-          },
-        });
-      }
-      return res.status(200).json(cached.response);
-    }
-
-    const response = {
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version ?? '0.1.0',
-    };
-
-    idempotencyStore.set(idempotencyKey, { bodyHash, response });
-    return res.status(200).json(response);
-  }
-
+healthRouter.post('/', validateRequest(HealthWriteBodySchema), (_req: Request, res: Response) => {
   res.status(200).json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
