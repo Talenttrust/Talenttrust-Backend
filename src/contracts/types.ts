@@ -14,6 +14,16 @@ export interface ContractEvent {
     | 'CONTRACT_COMPLETED'
     | 'CONTRACT_CANCELLED';
   payload: Record<string, unknown>;
+  /**
+   * On-chain network the event was observed on (e.g. `soroban`,
+   * `stellar`). Optional — off-chain events carry no finality risk.
+   */
+  network?: string;
+  /**
+   * Ledger/block sequence the event was observed at. Drives finality
+   * evaluation for on-chain events.
+   */
+  ledger?: number;
 }
 
 /**

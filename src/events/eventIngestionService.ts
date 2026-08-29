@@ -1,10 +1,7 @@
 import { EventAuditService } from '../repository/eventAuditRepository';
 import { ContractEvent } from './types';
-import {
-  EnvelopeValidationOptions,
-  isRecord,
-  validateEventEnvelopePreamble,
-} from '../shared/eventEnvelopeValidation';
+import { EnvelopeValidationOptions, isRecord, validateEventEnvelopePreamble } from '../shared/eventEnvelopeValidation';
+import { getContext } from '../context';
 
 export interface EventIngestionConfig {
   enableStrictValidation: boolean;
@@ -32,25 +29,14 @@ export interface EventIngestionResult {
 }
 
 function toTimestampNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim().length > 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   }
-
   return null;
 }
 
-/**
- * Preamble options for the event-ingestion-service validator.
- * Mirrors the inline behaviour that used to live here:
- * - collect every failing field (`abortEarly: false`)
- * - accept numeric or numeric-string timestamps (`timestampRule: 'numeric'`)
- * - messages suffixed with a trailing `.`
- */
 const INGESTION_PREAMBLE_OPTIONS = {
   rootErrorMessage: 'Event must be a JSON object.',
   messageSuffix: '.',
@@ -78,6 +64,10 @@ export class EventIngestionService {
       };
     }
 
+    if (correlationId === undefined) {
+      correlationId = getContext()?.correlationId;
+    }
+
     try {
       const response = await this.auditService.processEvent(event, contractType, correlationId);
 
@@ -89,7 +79,7 @@ export class EventIngestionService {
         return {
           deduplicationKey: response.deduplicationKey,
           status: 'rejected',
-          reason: 'Payload integrity check failed: event payload does not match previously processed event.',
+          reason: 'Payload integrity check failed',
           processedAt: response.processedAt,
           code: response.code,
         };
@@ -127,18 +117,11 @@ export class EventIngestionService {
 
   public validateEvent(event: unknown, contractType: string): EventValidationResult {
     const errors: EventValidationError[] = [];
-
-    // Delegate the shared preamble to the helper. This produces the same
-    // set of field errors as the previous inline implementation, with the
-    // same messages and field names.
     const preambleErrors = validateEventEnvelopePreamble(event, INGESTION_PREAMBLE_OPTIONS);
     for (const err of preambleErrors) {
       errors.push({ field: err.field, message: err.message });
     }
 
-    // Caller-specific follow-up: age check (numeric timestamp only) and
-    // contract-type-specific payload shape. Both early-exit when `event`
-    // is not a record, which the helper has already established.
     if (isRecord(event)) {
       const timestampNumber = toTimestampNumber(event.timestamp);
       if (
@@ -154,18 +137,10 @@ export class EventIngestionService {
       }
     }
 
-    return {
-      isValid: errors.length === 0,
-      errors,
-    };
+    return { isValid: errors.length === 0, errors };
   }
 
-  public async getStatistics(): Promise<{
-    total: number;
-    accepted: number;
-    rejected: number;
-    duplicates: number;
-  }> {
+  public async getStatistics(): Promise<{ total: number; accepted: number; rejected: number; duplicates: number }> {
     return this.auditService.getStatistics();
   }
 
@@ -173,14 +148,8 @@ export class EventIngestionService {
     return this.auditService.getEventHistory(contractId);
   }
 
-  private validateContractSpecificPayload(
-    contractType: string,
-    payload: unknown,
-  ): EventValidationError[] {
-    if (!isRecord(payload)) {
-      return [];
-    }
-
+  private validateContractSpecificPayload(contractType: string, payload: unknown): EventValidationError[] {
+    if (!isRecord(payload)) return [];
     if (contractType === 'talent_contract') {
       const errors: EventValidationError[] = [];
       if (typeof payload.talentId !== 'string' || payload.talentId.trim().length === 0) {
@@ -191,7 +160,6 @@ export class EventIngestionService {
       }
       return errors;
     }
-
     return [];
   }
 }

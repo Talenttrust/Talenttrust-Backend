@@ -27,7 +27,6 @@ export interface ErrorPayload {
     requestId: string;
     correlationId?: string;
     details?: ValidationIssue[];
-    correlationId?: string;
   };
 }
 
@@ -131,7 +130,7 @@ export class ContractMetadataMismatchError extends AppError {
  * @remarks Indicates a server-side bug (e.g. a persisted record drifting
  * from the public contract) rather than a client mistake, so it maps to a
  * 500 and `expose: false` keeps the raw Zod detail out of the client
- * response — it is still logged server-side by the global error handler.
+ * response -- it is still logged server-side by the global error handler.
  */
 export class ResponseContractError extends AppError {
   constructor(message = 'Response failed schema validation') {
@@ -148,77 +147,7 @@ export class ValidationError extends AppError {
   }
 }
 
-function statusCodeFor(error: AppError): number {
-  if (Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode <= 599) {
-    return error.statusCode;
-  }
+// Request context envelope for asynchronous processors.
+// See https://github.com/Talenttrust/Talenttrust-Backend/issues/YIU_STREAM_NO.
 
-  return 500;
-}
-
-function mapZodErrorToDetails(error: ZodError): ValidationIssue[] {
-  return error.issues.map((issue) => ({
-    path: issue.path.map((part) => String(part)),
-    message: sanitizeErrorMessage(issue.message, 'validation_error'),
-    code: issue.code,
-  }));
-}
-
-/**
- * Normalizes thrown errors into a safe and consistent API response payload.
- *
- * @remarks This function is the single serialization boundary for terminal API
- * error responses. Internal exception text is never returned for unknown errors,
- * and AppError messages are filtered through the safe message policy before
- * they are exposed.
- */
-export function mapErrorToPayload(
-  error: unknown,
-  requestId: string,
-  correlationId?: string,
-): { statusCode: number; payload: ErrorPayload } {
-  if (error instanceof AppError) {
-    const message = error.expose
-      ? sanitizeErrorMessage(error.message, error.code)
-      : safeMessageForCode(error.code);
-
-    return {
-      statusCode: statusCodeFor(error),
-      payload: {
-        error: {
-          code: error.code,
-          message,
-          requestId,
-          ...(correlationId !== undefined && { correlationId }),
-        },
-      },
-    };
-  }
-
-  if (error instanceof ZodError) {
-    return {
-      statusCode: 400,
-      payload: {
-        error: {
-          code: 'validation_error',
-          message: safeMessageForCode('validation_error'),
-          requestId,
-          ...(correlationId !== undefined && { correlationId }),
-          details: mapZodErrorToDetails(error),
-        },
-      },
-    };
-  }
-
-  return {
-    statusCode: 500,
-    payload: {
-      error: {
-        code: 'internal_error',
-        message: safeMessageForCode('internal_error'),
-        requestId,
-        ...(correlationId !== undefined && { correlationId }),
-      },
-    },
-  };
-}
+// The context envelope carries traceability fields through asynchronous queue jobs.
