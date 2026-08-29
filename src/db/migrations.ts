@@ -692,3 +692,24 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 16: event indexer checkpoints per contract network
+MIGRATIONS.push({
+  version: 16,
+  name: "create_event_indexer_checkpoints_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (",
+    "PRIMARY KEY (network, contract)",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (
+        network         TEXT    NOT NULL,
+        contract        TEXT    NOT NULL,
+        ledger          INTEGER NOT NULL,
+        event_sequence  INTEGER NOT NULL,
+        PRIMARY KEY (network, contract)
+      );
+    `);
+  },
+});
