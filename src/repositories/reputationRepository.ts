@@ -5,11 +5,13 @@
  * - Prepared statements throughout (SQL injection prevention)
  * - DB-level uniqueness enforcement (reviewer_id, target_id, context_id)
  * - Contract participation verification for authorization
+ * - Manual reputation corrections with full provenance tracking
  *
  * Security notes:
  *  - All queries use parameter binding — no string interpolation
  *  - Foreign key constraints ensure referential integrity
  *  - UNIQUE constraint prevents duplicate ratings at DB level
+ *  - UNIQUE constraint prevents duplicate corrections (target_id, context_id, reference)
  */
 
 import type BetterSqlite3 from 'better-sqlite3';
@@ -33,6 +35,24 @@ interface ReputationRow {
   created_at: string;
 }
 
+/** Raw row shape for reputation corrections (snake_case columns). */
+interface ReputationCorrectionRow {
+  id: string;
+  target_id: string;
+  context_id: string;
+  reason: string;
+  reference: string;
+  before_score: number;
+  after_score: number;
+  before_weighted: number;
+  after_weighted: number;
+  before_total: number;
+  after_total: number;
+  operator_id: string;
+  operator_role: string;
+  created_at: string;
+}
+
 /** Domain-level reputation entry (camelCase). */
 export interface ReputationEntry {
   id: string;
@@ -53,6 +73,40 @@ export interface CreateReputationEntry {
   contextId: string;
 }
 
+/** Domain-level reputation correction entry (camelCase). */
+export interface ReputationCorrectionEntry {
+  id: string;
+  targetId: string;
+  contextId: string;
+  reason: string;
+  reference: string;
+  beforeScore: number;
+  afterScore: number;
+  beforeWeighted: number;
+  afterWeighted: number;
+  beforeTotal: number;
+  afterTotal: number;
+  operatorId: string;
+  operatorRole: string;
+  createdAt: string;
+}
+
+/** Input for creating a new reputation correction. */
+export interface CreateReputationCorrection {
+  targetId: string;
+  contextId: string;
+  reason: string;
+  reference: string;
+  beforeScore: number;
+  afterScore: number;
+  beforeWeighted: number;
+  afterWeighted: number;
+  beforeTotal: number;
+  afterTotal: number;
+  operatorId: string;
+  operatorRole: string;
+}
+
 /** Maps a raw DB row to the domain ReputationEntry interface. */
 function toReputationEntry(row: ReputationRow): ReputationEntry {
   return {
@@ -62,6 +116,26 @@ function toReputationEntry(row: ReputationRow): ReputationEntry {
     rating: row.rating,
     comment: row.comment ?? undefined,
     contextId: row.context_id,
+    createdAt: row.created_at,
+  };
+}
+
+/** Maps a raw DB row to the domain ReputationCorrectionEntry interface. */
+function toReputationCorrectionEntry(row: ReputationCorrectionRow): ReputationCorrectionEntry {
+  return {
+    id: row.id,
+    targetId: row.target_id,
+    contextId: row.context_id,
+    reason: row.reason,
+    reference: row.reference,
+    beforeScore: row.before_score,
+    afterScore: row.after_score,
+    beforeWeighted: row.before_weighted,
+    afterWeighted: row.after_weighted,
+    beforeTotal: row.before_total,
+    afterTotal: row.after_total,
+    operatorId: row.operator_id,
+    operatorRole: row.operator_role,
     createdAt: row.created_at,
   };
 }
@@ -279,5 +353,122 @@ export class ReputationRepository {
       .all(limit, offset);
 
     return rows.map(r => r.target_id);
+  }
+
+  /**
+   * Creates a new reputation correction entry with full provenance tracking.
+   *
+   * @param correction - Required fields for the reputation correction.
+   * @returns The newly created ReputationCorrectionEntry.
+   * @throws ConflictError if a duplicate correction exists for the same target, context, and reference.
+   */
+  createCorrection(correction: CreateReputationCorrection): ReputationCorrectionEntry {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+
+    try {
+      this.db
+        .prepare<[string, string, string, string, string, number, number, number, number, number, number, string, string, string]>(
+          `INSERT INTO reputation_corrections 
+           (id, target_id, context_id, reason, reference, before_score, after_score, before_weighted, after_weighted, before_total, after_total, operator_id, operator_role, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          correction.targetId,
+          correction.contextId,
+          correction.reason,
+          correction.reference,
+          correction.beforeScore,
+          correction.afterScore,
+          correction.beforeWeighted,
+          correction.afterWeighted,
+          correction.beforeTotal,
+          correction.afterTotal,
+          correction.operatorId,
+          correction.operatorRole,
+          createdAt
+        );
+    } catch (error: any) {
+      // SQLite UNIQUE constraint violation error code
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.message.includes('UNIQUE constraint failed')) {
+        throw new ConflictError('Correction already exists for this target, context, and reference');
+      }
+      throw error;
+    }
+
+    return {
+      id,
+      targetId: correction.targetId,
+      contextId: correction.contextId,
+      reason: correction.reason,
+      reference: correction.reference,
+      beforeScore: correction.beforeScore,
+      afterScore: correction.afterScore,
+      beforeWeighted: correction.beforeWeighted,
+      afterWeighted: correction.afterWeighted,
+      beforeTotal: correction.beforeTotal,
+      afterTotal: correction.afterTotal,
+      operatorId: correction.operatorId,
+      operatorRole: correction.operatorRole,
+      createdAt,
+    };
+  }
+
+  /**
+   * Finds a reputation correction by the composite unique key.
+   *
+   * @param targetId - The target user's ID.
+   * @param contextId - The contract/context ID.
+   * @param reference - The reference identifier (e.g., ticket number, dispute ID).
+   * @returns The matching ReputationCorrectionEntry or undefined if not found.
+   */
+  findCorrectionByTargetContextReference(
+    targetId: string,
+    contextId: string,
+    reference: string
+  ): ReputationCorrectionEntry | undefined {
+    const row = this.db
+      .prepare<[string, string, string], ReputationCorrectionRow>(
+        `SELECT * FROM reputation_corrections 
+         WHERE target_id = ? AND context_id = ? AND reference = ?`
+      )
+      .get(targetId, contextId, reference);
+    
+    return row ? toReputationCorrectionEntry(row) : undefined;
+  }
+
+  /**
+   * Retrieves all reputation corrections for a specific target user.
+   *
+   * @param targetId - The target user's ID.
+   * @returns Array of ReputationCorrectionEntry objects ordered by creation date descending.
+   */
+  findCorrectionsByTargetId(targetId: string): ReputationCorrectionEntry[] {
+    const rows = this.db
+      .prepare<[string], ReputationCorrectionRow>(
+        `SELECT * FROM reputation_corrections 
+         WHERE target_id = ? 
+         ORDER BY created_at DESC`
+      )
+      .all(targetId);
+    
+    return rows.map(toReputationCorrectionEntry);
+  }
+
+  /**
+   * Retrieves a single reputation correction by its UUID.
+   *
+   * @param id - The reputation correction UUID.
+   * @returns The matching ReputationCorrectionEntry or undefined if not found.
+   */
+  findCorrectionById(id: string): ReputationCorrectionEntry | undefined {
+    const row = this.db
+      .prepare<[string], ReputationCorrectionRow>(
+        `SELECT * FROM reputation_corrections WHERE id = ?`
+      )
+      .get(id);
+    
+    return row ? toReputationCorrectionEntry(row) : undefined;
   }
 }

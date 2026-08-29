@@ -55,6 +55,29 @@ export interface CreateRatingBodyDTO {
   comment?: string;
 }
 
+export interface CorrectReputationBodyDTO {
+  reason: string;
+  reference: string;
+  contextId: string;
+}
+
+export interface ReputationCorrectionEntry {
+  id: string;
+  targetId: string;
+  contextId: string;
+  reason: string;
+  reference: string;
+  beforeScore: number;
+  afterScore: number;
+  beforeWeighted: number;
+  afterWeighted: number;
+  beforeTotal: number;
+  afterTotal: number;
+  operatorId: string;
+  operatorRole: string;
+  createdAt: string;
+}
+
 // ── Response DTOs ────────────────────────────────────────────────────────────
 
 export interface ReviewResponseDTO {

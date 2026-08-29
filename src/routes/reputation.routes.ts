@@ -5,6 +5,8 @@ import {
   updateReputationSchema,
   reputationParamsSchema,
   bulkReputationSchema,
+  correctReputationSchema,
+  reputationCorrectionResponseSchema,
 } from '../modules/reputation/dto/reputation.dto';
 import { validateSchema } from '../middleware/validate.middleware';
 import { createRateLimiter } from '../middleware/rateLimiter';
@@ -199,6 +201,115 @@ router.put(
   validateSchema(z.object({ body: updateReputationSchema, params: reputationParamsSchema })),
   reputationIdempotencyMiddleware,
   ReputationController.createRating
+);
+
+/**
+ * POST /api/v1/reputation/:id/correct
+ * Apply a manual reputation correction with full provenance tracking.
+ * 
+ * Strictly separated from ordinary event ingestion pathways.
+ * Requires 'reputation.correct' permission (admin, support, moderator).
+ */
+registry.registerPath({
+  method: 'post',
+  path: '/reputation/{id}/correct',
+  summary: 'Apply manual reputation correction with provenance',
+  security: [{ bearerAuth: [] }],
+  parameters: [
+    {
+      name: 'id',
+      in: 'path',
+      required: true,
+      schema: { type: 'string', format: 'uuid' }
+    },
+    {
+      name: 'Idempotency-Key',
+      in: 'header',
+      required: false,
+      description: 'Optional retry key. Exact retries replay the original response.',
+      schema: { type: 'string', maxLength: 255 }
+    }
+  ],
+  request: {
+    body: {
+      content: {
+        'application/json': {
+          schema: { $ref: '#/components/schemas/CorrectReputation' }
+        }
+      }
+    }
+  },
+  responses: {
+    201: {
+      description: 'Correction applied successfully',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              status: { type: 'string', example: 'success' },
+              data: { $ref: '#/components/schemas/ReputationCorrectionResponse' }
+            }
+          }
+        }
+      }
+    },
+    400: { description: 'Invalid payload - reason, reference, contextId required' },
+    401: { description: 'Unauthorized - operator identity not found' },
+    403: { description: 'Forbidden - operator role not authorized' },
+    409: { description: 'Conflict - correction with same reference already exists' },
+    422: { description: 'Validation error - reason length, reference format, etc.' }
+  }
+});
+
+router.post(
+  '/:id/correct',
+  requirePermission('reputation', 'correct'),
+  validateSchema(z.object({ body: correctReputationSchema, params: reputationParamsSchema })),
+  ReputationController.correctReputation
+);
+
+/**
+ * GET /api/v1/reputation/:id/corrections
+ * Retrieve all reputation corrections for a freelancer.
+ */
+registry.registerPath({
+  method: 'get',
+  path: '/reputation/{id}/corrections',
+  summary: 'Get reputation corrections for a freelancer',
+  security: [{ bearerAuth: [] }],
+  parameters: [
+    {
+      name: 'id',
+      in: 'path',
+      required: true,
+      schema: { type: 'string', format: 'uuid' }
+    }
+  ],
+  responses: {
+    200: {
+      description: 'List of reputation corrections',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              status: { type: 'string', example: 'success' },
+              data: { type: 'array', items: { $ref: '#/components/schemas/ReputationCorrectionResponse' } }
+            }
+          }
+        }
+      }
+    },
+    400: { description: 'Invalid freelancer ID' }
+  }
+});
+
+router.get(
+  '/:id/corrections',
+  requirePermission('reviews', 'read'),
+  validateSchema(z.object({ params: reputationParamsSchema })),
+  ReputationController.getCorrections
 );
 
 export default router;

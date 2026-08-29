@@ -16,9 +16,10 @@ export type Resource =
   | "reports"
   | "settings"
   | "disputes"
-  | "health";
+  | "health"
+  | "reputation";
 
-export type Action = "create" | "read" | "update" | "delete" | "list";
+export type Action = "create" | "read" | "update" | "delete" | "list" | "correct";
 
 // ─── Permission (one row of the PERMISSION_MATRIX) ───────────────────────────
 
