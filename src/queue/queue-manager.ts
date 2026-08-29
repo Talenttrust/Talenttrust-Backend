@@ -17,6 +17,21 @@ import {
   FailedJobQuery,
   ReplayJobResult,
 } from './types';
+import {
+  DEFAULT_TENANT_ID,
+  FairSchedulerConfig,
+  orderPendingJobs,
+  normalizePriority,
+  PendingJob,
+  PRIORITY_LEVEL_ORDER,
+  PriorityLevel,
+} from './fair-scheduler';
+import {
+  recordAgedBoost,
+  recordPriorityAssigned,
+  recordSchedulingDecision,
+  setOverdueWaiting,
+} from './queue-metrics';
 import { jobProcessors } from './processors';
 import { RetryPolicyManager } from './retry-manager';
 import { logger } from '../logger';
@@ -70,6 +85,19 @@ export class QueueManager {
   private isShuttingDown = false;
   private acceptingJobs = true;
   private retryManager: RetryPolicyManager;
+
+  /**
+   * Per-queue fair-scheduler rebalance timers. Each timer recomputes the
+   * weighted-fair priority of waiting jobs (including max-wait promotion) at a
+   * bounded interval so no priority stream can starve another.
+   */
+  private fairRebalanceTimers: Map<JobType, NodeJS.Timeout> = new Map();
+
+  /**
+   * Upper bound on the number of waiting jobs examined per rebalance pass.
+   * Keeps the fairness pass bounded even under pathological backlog.
+   */
+  private static readonly FAIR_REBALANCE_MAX_JOBS = 1000;
 
   private constructor() {
     this.retryManager = RetryPolicyManager.getInstance();
@@ -131,6 +159,8 @@ export class QueueManager {
     this.queues.set(jobType, queue);
     this.workers.set(jobType, worker);
     this.queueEvents.set(jobType, queueEvents);
+
+    this.startFairRebalance(jobType, queue);
   }
 
   /**
@@ -162,18 +192,30 @@ export class QueueManager {
       throw new Error(`Queue for ${jobType} not initialized`);
     }
 
-    const { priority, delay, attempts, dedupeKey, correlationId, requestId } = options ?? {};
+    const { priority, priorityLevel, tenantId, delay, attempts, dedupeKey, correlationId, requestId } = options ?? {};
     const bullOptions: JobsOptions = { priority, delay, attempts };
 
     if (dedupeKey) {
       bullOptions.jobId = dedupeKey;
     }
 
-    // Merge correlation IDs into payload
+    // Normalize the caller's scheduling intent to a bounded priority level.
+    // The weighted fair scheduler uses this level for fairness accounting; the
+    // numeric `priority` is still passed through for initial BullMQ ordering.
+    const level: PriorityLevel = priorityLevel ?? normalizePriority(priority);
+
+    // Merge correlation IDs and fair-scheduling metadata into payload so the
+    // rebalance pass can reconstruct level/tenant after a worker restart. The
+    // derived `priorityLevel` is always persisted (not just when explicitly
+    // provided) because the rebalance pass rewrites `job.opts.priority` via
+    // `changePriority` — the immutable payload level stays the source of truth
+    // across passes instead of drifting with the mutated option.
     const enrichedPayload = {
       ...payload,
       ...(correlationId && { correlationId }),
       ...(requestId && { requestId }),
+      ...(tenantId && { tenantId }),
+      priorityLevel: level,
     };
 
     // Pre-check: determine if an active/waiting/delayed job already exists.
@@ -189,8 +231,142 @@ export class QueueManager {
     }
 
     const job = await queue.add(jobType, enrichedPayload, bullOptions);
-    logger.info('Job enqueued', { jobType, jobId: job.id, correlationId, requestId, deduplicated });
+    recordPriorityAssigned(jobType, level);
+    logger.info('Job enqueued', { jobType, jobId: job.id, priorityLevel: level, tenantId, correlationId, requestId, deduplicated });
     return { jobId: job.id!, deduplicated };
+  }
+
+  // -------------------------------------------------------------------------
+  // Weighted fair scheduling
+  // -------------------------------------------------------------------------
+
+  /**
+   * Start the periodic fair-scheduler rebalance loop for a queue. The timer is
+   * unref'd so it never keeps the process alive, and is cleared on shutdown.
+   */
+  private startFairRebalance(jobType: JobType, queue: Queue): void {
+    const intervalMs = queueConfig.fairScheduling.rebalanceIntervalMs;
+    const timer = setInterval(() => {
+      void this.rebalanceWaitingJobs(jobType, queue);
+    }, intervalMs);
+    timer.unref?.();
+    this.fairRebalanceTimers.set(jobType, timer);
+  }
+
+  /**
+   * Stop the rebalance loop for a queue (no-op when it was never started).
+   */
+  private stopFairRebalance(jobType: JobType): void {
+    const timer = this.fairRebalanceTimers.get(jobType);
+    if (timer) {
+      clearInterval(timer);
+      this.fairRebalanceTimers.delete(jobType);
+    }
+  }
+
+  /**
+   * Recompute weighted-fair priorities for all waiting jobs of a queue and
+   * apply them via `changePriority`, promoting any job past the maximum wait
+   * bound to the front of the line.
+   *
+   * The policy is a pure function of the waiting set (job id, level, tenant,
+   * enqueue timestamp) — all durable Redis metadata — so a worker restart
+   * reconstructs identical ordering with no in-memory state.
+   *
+   * Side effects are bounded: at most {@link FAIR_REBALANCE_MAX_JOBS} waiting
+   * jobs are examined, and individual `changePriority` failures are caught and
+   * logged without aborting the pass.
+   *
+   * @param jobType - queue to rebalance
+   * @param queue - optional explicit queue handle (used by the timer)
+   * @returns number of priorities changed
+   */
+  public async rebalanceWaitingJobs(jobType: JobType, queue?: Queue): Promise<number> {
+    const target = queue ?? this.queues.get(jobType);
+    if (!target) {
+      return 0;
+    }
+
+    try {
+      const waiting = await target.getWaiting(0, QueueManager.FAIR_REBALANCE_MAX_JOBS - 1);
+      if (!waiting || waiting.length === 0) {
+        setOverdueWaiting(jobType, 0);
+        return 0;
+      }
+
+      const now = Date.now();
+      const pending: PendingJob[] = waiting.map((job) => ({
+        jobId: String(job.id),
+        priorityLevel: this.resolvePriorityLevel(job),
+        tenantId: this.resolveTenantId(job),
+        enqueuedAt: typeof job.timestamp === 'number' ? job.timestamp : now,
+      }));
+
+      const { decisions, overdueCount } = orderPendingJobs(pending, now, this.fairSchedulerConfig());
+      setOverdueWaiting(jobType, overdueCount);
+
+      let changed = 0;
+      for (const decision of decisions) {
+        recordSchedulingDecision(jobType, decision.kind);
+        if (decision.kind === 'aged') {
+          recordAgedBoost(jobType);
+        }
+
+        const job = waiting.find((w) => String(w.id) === decision.jobId);
+        if (!job) {
+          continue;
+        }
+        if (job.opts.priority === decision.effectivePriority) {
+          continue;
+        }
+
+        try {
+          await job.changePriority({ priority: decision.effectivePriority });
+          changed += 1;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          logger.warn('Fair rebalance could not update job priority', {
+            jobType,
+            jobId: decision.jobId,
+            error: errorMessage,
+          });
+        }
+      }
+
+      return changed;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.warn('Fair rebalance failed', { jobType, error: errorMessage });
+      return 0;
+    }
+  }
+
+  /**
+   * Resolve the fair-scheduling level for a waiting job, preferring the level
+   * recorded on the payload at enqueue time and falling back to the numeric
+   * `priority` stored in the job options. Reconstructs correctly after a
+   * worker restart for jobs enqueued before this feature shipped.
+   */
+  private resolvePriorityLevel(job: Job): PriorityLevel {
+    const dataLevel = (job.data as { priorityLevel?: unknown } | undefined)?.priorityLevel;
+    if (typeof dataLevel === 'string' && (PRIORITY_LEVEL_ORDER as readonly string[]).includes(dataLevel)) {
+      return dataLevel as PriorityLevel;
+    }
+    return normalizePriority(job.opts.priority);
+  }
+
+  /**
+   * Resolve the tenant for a waiting job from its payload, defaulting to
+   * {@link DEFAULT_TENANT_ID} so jobs without a tenant share one fair bucket.
+   */
+  private resolveTenantId(job: Job): string {
+    const tenant = (job.data as { tenantId?: unknown } | undefined)?.tenantId;
+    return typeof tenant === 'string' && tenant.length > 0 ? tenant : DEFAULT_TENANT_ID;
+  }
+
+  private fairSchedulerConfig(): FairSchedulerConfig {
+    const { weights, maxWaitMs } = queueConfig.fairScheduling;
+    return { weights, maxWaitMs };
   }
 
   private buildReplayJobId(jobType: JobType, originalJobId: string): string {
@@ -447,6 +623,7 @@ export class QueueManager {
   public stopAccepting(): void {
     this.acceptingJobs = false;
     this.isShuttingDown = true;
+    this.stopAllFairRebalances();
   }
 
   /**
@@ -502,6 +679,7 @@ export class QueueManager {
 
     this.isShuttingDown = true;
     this.acceptingJobs = false;
+    this.stopAllFairRebalances();
     logger.info('Shutting down queue manager...');
 
     const shutdownPromises: Promise<void>[] = [];
@@ -527,6 +705,16 @@ export class QueueManager {
     this.isShuttingDown = false;
 
     logger.info('Queue manager shutdown complete');
+  }
+
+  /**
+   * Stop every per-queue fair rebalance timer. Called on shutdown paths so no
+   * timers outlive the manager.
+   */
+  private stopAllFairRebalances(): void {
+    for (const jobType of Array.from(this.fairRebalanceTimers.keys())) {
+      this.stopFairRebalance(jobType);
+    }
   }
 
   /**
