@@ -58,9 +58,7 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     if (conditions.length) {
       sql += ' WHERE ' + conditions.join(' AND ');
     }
-    console.log("REPOSITORY FINDALL EXEC:", sql, params);
     const rows = this.db.prepare(sql).all(...params) as any[];
-    console.log("REPOSITORY FINDALL ROWS:", rows);
     return rows.map(this.mapRow);
   }
 

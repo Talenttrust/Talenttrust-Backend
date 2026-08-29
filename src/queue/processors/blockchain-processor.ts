@@ -7,16 +7,40 @@
 
 import { BlockchainSyncPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { eventAuditService } from '../../events/registry';
+
+/**
+ * Finality promotion callback invoked after a successful sync. Flips
+ * provisional events that have reached the network's finality depth.
+ */
+export type FinalityPromoter = (
+  network: string,
+) => Promise<{ promoted: number; remaining: number }>;
+
+/**
+ * Default promoter backed by the shared event audit service. Idempotent
+ * and safe to run on every successful sync (retries are harmless).
+ */
+const defaultFinalityPromoter: FinalityPromoter = (network) =>
+  eventAuditService.promoteProvisionalEvents(network);
 
 /**
  * Process blockchain synchronization job
  *
+ * After a successful sync the provisional events for the synced network
+ * are re-evaluated against the current chain head (promotion). Because
+ * promotion is one-way and idempotent, retrying the job is always safe;
+ * a reorg before finality simply keeps affected events provisional.
+ *
  * @param payload - Blockchain sync configuration
+ * @param finalityPromoter - Optional promotion callback (tests inject
+ *                           their own; defaults to the registry service)
  * @returns Job result with sync statistics
- * @throws Error if sync fails
+ * @throws Error if sync fails (the queue retries per its policy)
  */
 export async function processBlockchainSync(
   payload: BlockchainSyncPayload,
+  finalityPromoter: FinalityPromoter = defaultFinalityPromoter,
 ): Promise<JobResult> {
   const log = createLogger({
     processor: 'blockchain',
@@ -50,6 +74,20 @@ export async function processBlockchainSync(
 
   const syncResult = await syncBlockchainData(payload, log);
 
+  // Promote provisional events that have now reached the network's
+  // finality depth. Failures propagate so the queue retries the job
+  // (sync is idempotent, so a retry is safe).
+  let finalityPromotion: { promoted: number; remaining: number } | undefined;
+  try {
+    finalityPromotion = await finalityPromoter(payload.network);
+    log.info('Blockchain sync: finality promotion applied', finalityPromotion);
+  } catch (error) {
+    log.error('Blockchain sync: finality promotion failed; will retry on next sync', {
+      error: error instanceof Error ? error.message : 'Unknown promotion error',
+    });
+    throw error;
+  }
+
   log.info('Blockchain sync completed', {
     blocksProcessed: syncResult.blocksProcessed,
     transactionsFound: syncResult.transactionsFound,
@@ -58,7 +96,10 @@ export async function processBlockchainSync(
   return {
     success: true,
     message: `Blockchain sync completed for ${payload.network}`,
-    data: syncResult,
+    data: {
+      ...syncResult,
+      ...(finalityPromotion !== undefined && { finalityPromotion }),
+    },
   };
 }
 

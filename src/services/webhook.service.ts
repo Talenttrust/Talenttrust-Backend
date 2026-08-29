@@ -1,4 +1,3 @@
-
 import axios from 'axios';
 import { URL } from 'url';
 import crypto from 'crypto';
@@ -10,9 +9,12 @@ import { RateLimitStore } from '../lib/rateLimitStore';
 import { MetricsServiceLike } from '../observability';
 import { validateEnv } from '../config/env.schema';
 import { parseBoolEnv } from '../config/env';
+import { createLogger } from '../logger';
 
 import { getDb } from '../db/database';
 import { SqliteWebhookSubscriptionRepository } from '../repositories/webhook-subscription.repository';
+
+const log = createLogger({ service: 'webhook-delivery' });
 
 /** Max deliveries per destination host per window. Default: 60. */
 const HOST_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_MAX ?? 60);
@@ -22,6 +24,27 @@ const HOST_RATE_LIMIT_WINDOW_MS = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_WIN
 const WEBHOOK_DELIVERY_TIMEOUT_MS = validateEnv().WEBHOOK_DELIVERY_TIMEOUT_MS;
 /** Maximum webhook payload size in bytes, validated through env schema. */
 const WEBHOOK_MAX_PAYLOAD_SIZE_BYTES = validateEnv().WEBHOOK_MAX_PAYLOAD_SIZE_BYTES;
+
+/**
+ * Stable machine-readable error codes for webhook delivery failures.
+ * Clients and DLQ consumers may branch on these values.
+ */
+export const WEBHOOK_ERROR_CODES = {
+  PAYLOAD_TOO_LARGE: 'WEBHOOK_PAYLOAD_TOO_LARGE',
+  SSRF_BLOCKED: 'WEBHOOK_SSRF_BLOCKED',
+  RATE_LIMITED: 'WEBHOOK_RATE_LIMITED',
+  DELIVERY_FAILED: 'WEBHOOK_DELIVERY_FAILED',
+  RETRY_EXHAUSTED: 'WEBHOOK_RETRY_EXHAUSTED',
+  DELIVERY_TIMEOUT: 'WEBHOOK_DELIVERY_TIMEOUT',
+  DELIVERY_4XX: 'WEBHOOK_DELIVERY_4XX',
+  DELIVERY_5XX: 'WEBHOOK_DELIVERY_5XX',
+  SIGNATURE_GENERATION_FAILED: 'WEBHOOK_SIGNATURE_GENERATION_FAILED',
+  DLQ_NOT_FOUND: 'WEBHOOK_DLQ_NOT_FOUND',
+  REPLAY_FAILED: 'WEBHOOK_REPLAY_FAILED',
+  INVALID_CONFIGURATION: 'WEBHOOK_INVALID_CONFIGURATION',
+} as const;
+
+export type WebhookErrorCode = (typeof WEBHOOK_ERROR_CODES)[keyof typeof WEBHOOK_ERROR_CODES];
 
 /**
  * Public, secret-redacted view of a DLQ entry. Exposes the failure reason as
@@ -115,9 +138,14 @@ export class WebhookService {
     }
 
     const subscriptions = await this.repo.findAll({ eventType, active: true });
-    console.log("TRIGGER FINDALL:", subscriptions.length, "subs for", eventType);
+    log.info('Webhook delivery started', {
+      eventType,
+      subscriberCount: subscriptions.length,
+      ...(correlationId && { correlationId }),
+    });
 
-    // Asynchronously deliver to all matching subscriptions
+    // Asynchronously deliver to all matching subscriptions.
+    // Each subscription gets a fresh stable event ID that persists across retries.
     const deliveries = subscriptions.map((sub) => {
       const payload: WebhookPayload = {
         id: crypto.randomUUID(),
@@ -127,11 +155,13 @@ export class WebhookService {
         webhookSecret: sub.secret,
         correlationId,
       };
-      console.log("SENDING TO:", sub.url);
-      return this.send(payload).then(() => {
-        console.log("SEND COMPLETE TO:", sub.url);
-      }).catch((e) => {
-        console.error("SEND ERROR TO:", sub.url, e);
+      return this.send(payload).catch((e) => {
+        log.error('Webhook delivery error for subscription', {
+          eventType,
+          subscriberId: sub.id,
+          eventId: payload.id,
+          err: e,
+        });
       });
     });
 
@@ -141,40 +171,82 @@ export class WebhookService {
   /**
    * Sends a webhook payload with iterative bounded retry and DLQ fallback.
    *
-   * Before each attempt the destination URL is re-validated with `isSafeUrl`
-   * (SSRF guard) and a per-host sliding-window rate limit is applied.  Either
-   * check failing causes an immediate DLQ enqueue without further retries.
-   * Each outbound HTTP attempt also uses a validated per-request timeout so a
-   * slow receiver cannot pin the delivery worker indefinitely.
+   * ## Payload size validation
+   * Before any HTTP attempt, the serialized payload byte length is checked
+   * against `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES`. Oversized payloads are moved
+   * directly to DLQ without retrying.
    *
-   * @remarks
-   * Uses a bounded for-loop so no call stack growth occurs across retries.
-   * Retry policy and DLQ behavior are identical to the previous recursive version.
+   * ## Signing
+   * When `payload.webhookSecret` is set, each attempt generates a fresh
+   * HMAC-SHA256 signature over `"${timestamp}.${JSON.stringify(data)}"` and
+   * sends `X-Signature: sha256=<hex>` and `X-Timestamp: <unix-ms>` headers.
+   * A fresh timestamp is generated for each attempt (including replays).
+   *
+   * ## Retry policy
+   * Retries on 5xx responses and network timeouts only. 4xx, SSRF-blocked, and
+   * rate-limited are non-retryable and go directly to DLQ.
+   *
+   * ## Event ID stability
+   * The `payload.id` is set once by the caller before the first attempt and
+   * remains unchanged across all retry attempts, giving subscribers a stable
+   * identifier for deduplication.
    *
    * @param payload - Webhook payload including URL, data, and retry state
    */
   async send(payload: WebhookPayload): Promise<void> {
-    const maxAttempts = WEBHOOK_RETRY_POLICY.maxRetries + 1;
+    // ── Payload size validation ──────────────────────────────────────────
+    const rawPayload = JSON.stringify(payload.data);
+    const payloadBytes = Buffer.byteLength(rawPayload, 'utf8');
+    if (payloadBytes > WEBHOOK_MAX_PAYLOAD_SIZE_BYTES) {
+      const reason = `${WEBHOOK_ERROR_CODES.PAYLOAD_TOO_LARGE}: payload ${payloadBytes} bytes exceeds limit of ${WEBHOOK_MAX_PAYLOAD_SIZE_BYTES} bytes`;
+      log.warn('Webhook payload too large; moving to DLQ without retry', {
+        eventId: payload.id,
+        payloadBytes,
+        limitBytes: WEBHOOK_MAX_PAYLOAD_SIZE_BYTES,
+      });
+      await this.persistToDLQ(payload, reason);
+      return;
+    }
+
+    const maxAttempts = WEBHOOK_RETRY_POLICY.maxAttempts;
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       // ── SSRF re-check ────────────────────────────────────────────────────
       if (!isSafeUrl(payload.url)) {
-        await this.persistToDLQ(payload, 'SSRF_BLOCKED: destination URL is private or invalid');
+        const reason = `${WEBHOOK_ERROR_CODES.SSRF_BLOCKED}: destination URL is private or invalid`;
+        log.warn('Webhook SSRF check failed; moving to DLQ without retry', {
+          eventId: payload.id,
+          attempt: attempt + 1,
+        });
+        await this.persistToDLQ(payload, reason);
         return;
       }
 
       // ── Per-host rate limit ──────────────────────────────────────────────
       const hostname = new URL(payload.url).hostname;
       if (!this.checkHostRateLimit(hostname)) {
-        await this.persistToDLQ(payload, `RATE_LIMITED: host ${hostname} exceeded delivery limit`);
+        const reason = `${WEBHOOK_ERROR_CODES.RATE_LIMITED}: host ${hostname} exceeded delivery limit`;
+        log.warn('Webhook rate limit exceeded; moving to DLQ without retry', {
+          eventId: payload.id,
+          attempt: attempt + 1,
+        });
+        await this.persistToDLQ(payload, reason);
         return;
       }
+
+      log.info('Webhook delivery attempt', {
+        eventId: payload.id,
+        attempt: attempt + 1,
+        maxAttempts,
+      });
 
       try {
         const headers = buildWebhookHeaders(payload.correlationId);
 
         if (payload.webhookSecret) {
+          // Generate a fresh timestamp and signature for this specific attempt.
+          // Replays always get a new timestamp/signature, never reuse old ones.
           const { signature, timestamp } = createWebhookSignature(
             payload.data,
             payload.webhookSecret,
@@ -187,23 +259,57 @@ export class WebhookService {
           headers,
           timeout: WEBHOOK_DELIVERY_TIMEOUT_MS,
         });
+
+        log.info('Webhook delivery succeeded', {
+          eventId: payload.id,
+          attempt: attempt + 1,
+        });
         return;
       } catch (error: unknown) {
         lastError = error as Error;
         payload.retryCount = attempt + 1;
 
+        // Permanent 4xx client errors are non-retryable: retrying them only
+        // burns attempts and cannot succeed. Move directly to DLQ (no retries).
+        const status = getErrorStatus(error);
+        if (status !== undefined && status >= 400 && status < 500) {
+          const reason = `${WEBHOOK_ERROR_CODES.DELIVERY_4XX}: downstream returned HTTP ${status}`;
+          log.warn('Webhook delivery rejected with 4xx; moving to DLQ without retry', {
+            eventId: payload.id,
+            attempt: attempt + 1,
+            statusCode: status,
+          });
+          await this.persistToDLQ(payload, reason);
+          return;
+        }
+
         const isLastAttempt = attempt === maxAttempts - 1;
         if (!isLastAttempt) {
-          // Under test we collapse the inter-attempt backoff so the bounded
-          // retry loop resolves promptly instead of blocking on multi-second
-          // real-timer sleeps. Production keeps the exponential-with-jitter delay.
           const delay = process.env.NODE_ENV === 'test' ? 0 : calculateWebhookRetryDelay(attempt);
+          log.info('Webhook delivery retry scheduled', {
+            eventId: payload.id,
+            attempt: attempt + 1,
+            nextAttempt: attempt + 2,
+            delayMs: delay,
+          });
           await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          log.warn('Webhook delivery retry failed on final attempt', {
+            eventId: payload.id,
+            attempt: attempt + 1,
+            maxAttempts,
+          });
         }
       }
     }
 
-    await this.persistToDLQ(payload, lastError?.message ?? 'Unknown error');
+    const finalError = lastError?.message ?? 'Unknown error';
+    log.warn('Webhook delivery exhausted retries; moving to DLQ', {
+      eventId: payload.id,
+      retryCount: payload.retryCount,
+      errorCode: WEBHOOK_ERROR_CODES.RETRY_EXHAUSTED,
+    });
+    await this.persistToDLQ(payload, `${WEBHOOK_ERROR_CODES.RETRY_EXHAUSTED}: ${finalError}`);
   }
 
   private async persistToDLQ(payload: WebhookPayload, error: string): Promise<void> {
@@ -216,6 +322,12 @@ export class WebhookService {
         error,
         payload.webhookSecret,
       );
+      log.info('Webhook event moved to DLQ', {
+        eventId: payload.id,
+        retryCount: payload.retryCount,
+        // error code only (not full message) to avoid leaking payload details
+        errorCode: error.split(':')[0],
+      });
     } catch (err: unknown) {
       if ((err as Error).message === 'DUPLICATE_ENTRY') {
         return;
@@ -235,6 +347,15 @@ export class WebhookService {
     return toDLQView(entry);
   }
 
+  /**
+   * Replays a single DLQ entry through the normal delivery pipeline.
+   *
+   * A fresh timestamp and signature are generated for the replay attempt.
+   * The entry is removed from DLQ only after successful delivery.
+   * If replay fails, the entry remains in DLQ with its existing state.
+   *
+   * @param id - DLQ entry ID to replay.
+   */
   async replayDLQEntry(id: string): Promise<{ success: boolean; message: string }> {
     const entry = this.dlqStorage.getEntry(id);
     if (!entry) {
@@ -251,7 +372,11 @@ export class WebhookService {
       return { success: true, message: 'Deduplicated - entry already pending replay' };
     }
 
+    log.info('DLQ replay started', { dlqEntryId: id, eventId: entry.webhookId });
+
     try {
+      // Replay uses the same delivery pipeline: SSRF check, signing, retry, DLQ.
+      // A fresh timestamp and signature are generated inside send() for each attempt.
       await this.send({
         id: entry.webhookId,
         url: entry.url,
@@ -260,8 +385,14 @@ export class WebhookService {
         webhookSecret: entry.webhookSecret,
       });
       this.dlqStorage.markReplayed(id);
+      log.info('DLQ replay succeeded', { dlqEntryId: id, eventId: entry.webhookId });
       return { success: true, message: 'Replay successful' };
     } catch (err) {
+      log.warn('DLQ replay failed', {
+        dlqEntryId: id,
+        eventId: entry.webhookId,
+        errorCode: WEBHOOK_ERROR_CODES.REPLAY_FAILED,
+      });
       return { success: false, message: (err as Error).message };
     }
   }
@@ -292,6 +423,8 @@ export class WebhookService {
     const concurrency = Math.max(1, options.concurrency ?? 5);
     const entries = this.dlqStorage.listEntries({ limit: 10000 }).filter((e) => !e.replayedAt);
 
+    log.info('DLQ bulk replay started', { pendingCount: entries.length, concurrency });
+
     let attempted = 0;
     let succeeded = 0;
     let failed = 0;
@@ -318,6 +451,7 @@ export class WebhookService {
       }
     }
 
+    log.info('DLQ bulk replay completed', { attempted, succeeded, failed, deduped });
     return { attempted, succeeded, failed, deduped };
   }
 }
@@ -339,4 +473,22 @@ function buildWebhookHeaders(correlationId?: string): Record<string, string> {
     headers['X-Correlation-Id'] = correlationId;
   }
   return headers;
+}
+
+/**
+ * Extract an HTTP response status code from a thrown axios/network error, if one
+ * exists. Transient errors (timeouts, connection refused, DNS failures) carry no
+ * `response`, so this returns `undefined` for them. Only errors with an actual
+ * HTTP response expose a status code — used to short-circuit permanent 4xx
+ * failures into the DLQ without retrying.
+ */
+function getErrorStatus(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+  const response = (error as { response?: { status?: unknown } }).response;
+  if (typeof response?.status === 'number') {
+    return response.status;
+  }
+  return undefined;
 }

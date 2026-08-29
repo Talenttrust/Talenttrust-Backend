@@ -5,7 +5,7 @@
  *
  * ## Purpose
  * When a webhook delivery fails after all retries, the event is pushed to the
- * DLQ for manual inspection or delayed retry. This module provides an
+ * DLQ (for manual inspection or delayed retry). This module provides an
  * in-memory implementation suitable for single-process deployments, and a
  * SQLite-backed implementation for durable, restart-safe persistence.
  *
@@ -15,13 +15,19 @@
  * `src/db/database.ts`. The in-memory store is suitable for development
  * and testing only.
  *
- * ## Security
+ *## Security
  * DLQ entries may contain sensitive payload data. Ensure that:
  * - Payloads are redacted before storage via `redactPayload` from
  *   `src/utils/redact.ts` — raw signing secrets are never persisted.
  * - Provider IDs are sanitized before use as metric labels.
  * - The database file is excluded from version control and has
  *   restricted filesystem permissions (chmod 600).
+ *
+ * Context propagation:
+ * Serialize a validated context envelope into DLQ entries so that replay
+ * jobs can restore request id, tenant, and actor information for traceability.
+ * The context is validated on push and limited to a whitelist of known
+ * fields to prevent arbitrary values from becoming labels or authorization.
  */
 
 import { getDb } from './db/database';
@@ -29,9 +35,69 @@ import { redactPayload } from './utils/redact';
 import type Database from './db/betterSqlite3';
 import type * as BetterSqlite3 from 'better-sqlite3';
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
+
+/**
+ * A validated context envelope that is propagated through asynchronous processors
+ * and persisted in DLQ entries for retry/replay traceability.
+ *
+ * Only whitelisted fields are allowed to prevent arbitrary values from
+ * becoming labels or authorization decisions. All values must be
+ * non-empty strings.
+ */
+export interface ContextEnvelope {
+  /** Request ID for tracing. */
+  requestId?: string;
+  /** Tenant ID for isolation. */
+  tenantId?: string;
+  /** Initiating actor ID. */
+  actorId?: string;
+  /** Trace ID (if different from requestID). */
+  traceId?: string;
+}
+
+/**
+ * Maximum serialized size of a context envelope in bytes.
+ * Bounded to prevent oversized context from destabilizing queue storage
+ * and to limit exposure of sensitive data in payloads.
+ */
+const CONTEXT_MAX_BYTES = 1024;
+
+/**
+ * Validate a context envelope. Throws `TypeError` for malformed or too-large
+ * contexts. Returns true if the context is valid or undefined/null.
+ *
+ * @malformed context - A value that is not an object or contains unknown
+ *   keys, will cause aTypeError`.
+ * @too-large context - Serialized size exceeds `CONTEXT_MAX_BYTES`.
+ */
+export function validateContext(context: unknown): context is ContextEnvelope | undefined | null {
+  if (context === undefined || context === null) return true;
+  if (typeof context !== 'object') {
+    throw new TypeError('Context must be an object, null, or undefined');
+  }
+
+  const allowedKeys = ['requestId', 'tenantId', 'actorId', 'traceId'];
+  const keys = Object.keys(context);
+
+  for (const key of keys) {
+    if (!allowedKeys.includes(key)) {
+      throw new TypeError(`Invalid context key: "${key}"` );
+    }
+    const val = (context as Record<string, unknown>)[key];
+    if (typeof val !== 'string' || val.length === 0) {
+      throw new TypeError(`Context "$requestId" value for "${key}" must be a non-empty string`);
+    }
+  }
+
+  if (JSON.stringify(context).length > CONTEXT_MAX_BYTES) {
+    throw new TypeError(`Context exceeds maximum size of $CONTEXT_MAX_BYTES bytes`);
+  }
+
+  return true;
+}
 
 /**
  * A single DLQ entry representing a failed webhook delivery.
@@ -43,63 +109,65 @@ export interface DlqEntry {
   deliveryId: string;
   /** Destination URL that failed. */
   targetUrl: string;
-  /** Arbitrary JSON-serialisable payload body. Stored redacted —
-   *  raw signing secrets are stripped by {@link redactPayload}. */
+  /** Arbitrary JSON-serialisable payload body. Stored redacted -
+  *  raw signing secrets are stripped by {@link redactPayload}. */
   payload: unknown;
-  /** Timestamp (ms since epoch) when the entry was added to the DLQ. */
+  /** Timestamp (ms since epoch) when the entry was added to the DDQ. */
   timestamp: number;
   /** Number of enqueue / replay attempts accumulated for this entry. */
   attemptCount: number;
+  /** Propagated context envelope if available. Validated on push. Optional. */
+  context?: ContextEnvelope;
 }
 
 /**
- * Options accepted by {@link SqliteDlqStore}.
+ * Options accepted by `SqliteDlqStore`.
  *
  * @interface SqliteDlqStoreOptions
  * @property {number} [capacity] - Optional maximum number of entries the
  *   store will hold. When the store is at capacity, the oldest pending
  *   entry is evicted before a new one is inserted (oldest-evict policy).
- *   Defaults to `0` (unbounded).
+ *   Defaults to `0 `(unbounded).
  * @property {BetterSqlite3.Database} [db] - Optional explicit database
  *   handle. When omitted, the singleton from {@link getDb} is used.
- *   Tests typically pass a `:memory:` database for isolation.
+ *   Tests typically pass a `:memory: `database for isolation.
  */
 export interface SqliteDlqStoreOptions {
   capacity?: number;
-  db?: BetterSqlite3.Database;
+  db:: BetterSqlite3.Database;
 }
 
 /**
  * DLQ store interface.
  *
- * Implementations must be **synchronous** (non-blocking) for metrics sampling.
+ * Implementations must be *synchronous* (non-blocking) for metrics sampling.
  * Async operations (e.g., Redis calls) should be batched or cached.
  */
 export interface DlqStore {
   /**
    * Add a failed delivery to the DLQ.
    *
-   * @param entry - The DLQ entry to store.
+   * @ param entry - The DLQ entry to store.
    */
   push(entry: DlqEntry): void;
 
   /**
    * Return the current DLQ depth (number of entries) per provider.
    *
-   * @returns Map of provider ID → entry count.
+   * @returns Map of provider ID — entry count.
    */
   getDepthByProvider(): Map<string, number>;
 
   /**
    * Return the age (in seconds) of the oldest entry per provider.
    *
-   * @returns Map of provider ID → age in seconds. Providers with empty queues
+   * @returns Map of provider ID — age in seconds. Providers with empty queues
    *   are omitted from the map.
    */
   getOldestAgeByProvider(): Map<string, number>;
 
   /**
-   * Remove up to `count` entries from the DLQ for a given provider.
+   * Remove up to `count` entries from the DDQ for a given provider.
    * Used for testing drainage and manual retry workflows.
    *
    * @param providerId - Provider whose entries to drain.
@@ -117,12 +185,12 @@ export interface DlqStore {
   clear(): void;
 }
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 // InMemoryDlqStore
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 
 /**
- * In-memory DLQ store implementation.
+ * In-memory DDQ store implementation.
  *
  * Entries are held in a `Map<providerId, Array<DlqEntry>>`. This is suitable
  * for single-process deployments or development/testing. For production
@@ -132,16 +200,21 @@ export class InMemoryDlqStore implements DlqStore {
   private readonly entries: Map<string, DlqEntry[]> = new Map();
 
   /**
-   * Add a failed delivery to the DLQ.
+   * Add a failed delivery to the DDQ.
+   * The context envelope, if present, is validated and stored with the entry.
+   * @throws TypeError if context is malformed or too large.
    */
   public push(entry: DlqEntry): void {
+    if (entry.context !== undefined) {
+      validateContext(entry.context);
+    }
     const queue = this.entries.get(entry.providerId) ?? [];
     queue.push(entry);
     this.entries.set(entry.providerId, queue);
   }
 
   /**
-   * Return the current DLQ depth per provider.
+   * Return the current DDQ depth per provider.
    */
   public getDepthByProvider(): Map<string, number> {
     const result = new Map<string, number>();
@@ -200,7 +273,7 @@ export class InMemoryDlqStore implements DlqStore {
    *
    * @param providerId - Provider whose entries to drain.
    * @param replayCap - Maximum number of entries to remove in this batch.
-   * @returns Array of removed entries (at most `replayCap`).
+   * @returns Array of removed entries (at most `replayCap`)
    */
   public drainWithCap(providerId: string, replayCap: number): DlqEntry[] {
     if (replayCap <= 0) return [];

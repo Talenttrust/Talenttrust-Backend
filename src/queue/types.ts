@@ -5,6 +5,8 @@
  * Each job type has a specific payload structure for type safety.
  */
 
+import { PriorityLevel } from './fair-scheduler';
+
 /**
  * Available job types in the system
  */
@@ -134,9 +136,18 @@ export interface JobResult {
  * When dedupeKey is provided, BullMQ will not create a new job if one with the
  * same key is already waiting, active, or delayed. Optionally, dedupeTtl keeps
  * the key alive after completion so re-enqueue is suppressed during that window.
+ *
+ * Fair scheduling options:
+ * - `priorityLevel` — explicit weighted-fairness level (see {@link PriorityLevel}).
+ *   When omitted it is derived from the numeric `priority` via `normalizePriority`.
+ * - `tenantId` — logical tenant for per-tenant isolation. When omitted jobs are
+ *   grouped under the `default` tenant. A single tenant flooding a queue cannot
+ *   starve other tenants.
  */
 export interface AddJobOptions {
   priority?: number;
+  priorityLevel?: PriorityLevel;
+  tenantId?: string;
   delay?: number;
   attempts?: number;
   dedupeKey?: string;

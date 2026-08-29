@@ -55,6 +55,26 @@ export function validateContractEventPayload(payload: unknown): ValidationResult
     return { ok: false, reason: 'type is invalid' };
   }
 
+  // Optional on-chain attribution: `network` + `ledger` drive finality
+  // evaluation. A present-but-invalid value is rejected (fail-closed) so
+  // an event can never be silently downgraded to off-chain and exposed
+  // before it is safe.
+  let network: string | undefined;
+  if (checked.network !== undefined) {
+    if (typeof checked.network !== 'string' || checked.network.trim().length === 0) {
+      return { ok: false, reason: 'network must be a non-empty string' };
+    }
+    network = checked.network.trim();
+  }
+
+  let ledger: number | undefined;
+  if (checked.ledger !== undefined) {
+    if (typeof checked.ledger !== 'number' || !Number.isInteger(checked.ledger) || checked.ledger < 0) {
+      return { ok: false, reason: 'ledger must be a non-negative integer' };
+    }
+    ledger = checked.ledger;
+  }
+
   return {
     ok: true,
     event: {
@@ -64,6 +84,8 @@ export function validateContractEventPayload(payload: unknown): ValidationResult
       timestamp: checked.timestamp as string,
       type: checked.type as ContractEvent['type'],
       payload: checked.payload as Record<string, unknown>,
+      ...(network !== undefined && { network }),
+      ...(ledger !== undefined && { ledger }),
     },
   };
 }
