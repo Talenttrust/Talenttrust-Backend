@@ -194,6 +194,23 @@ export interface CircuitBreakerOptions {
   classifyError?: (error: unknown) => SorobanFailureClassification;
 }
 
+/**
+ * Options controlling how a single {@link CircuitBreaker.execute} call records
+ * its outcome.
+ */
+export interface ExecuteOptions {
+  /**
+   * When provided, only errors for which this predicate returns `true` count
+   * as a breaker failure (toward the OPEN threshold and HALF_OPEN probes).
+   * Non-counted errors are still re-thrown to the caller.
+   *
+   * This lets resilience layers exclude deterministic / caller errors
+   * (validation, auth, 4xx) from the failure threshold so the circuit only
+   * trips on genuine upstream degradation. Defaults to counting all failures.
+   */
+  recordFailure?: (error: unknown) => boolean;
+}
+
 /** Point-in-time snapshot of circuit breaker counters. */
 export interface CircuitStats {
   state: CircuitState;
@@ -246,12 +263,13 @@ export class CircuitBreaker {
   /**
    * Executes `fn` if the circuit allows it, otherwise rejects immediately.
    *
-   * @param fn - The async operation to guard (e.g. an RPC call).
+   * @param fn      - The async operation to guard (e.g. an RPC call).
+   * @param options - Optional {@link ExecuteOptions} to control failure accounting.
    * @returns  The resolved value of `fn`.
    * @throws   {@link CircuitOpenError} when the circuit is OPEN.
    * @throws   The original error thrown by `fn` (failure is recorded).
    */
-  async execute<T>(fn: () => Promise<T>): Promise<T> {
+  async execute<T>(fn: () => Promise<T>, options?: ExecuteOptions): Promise<T> {
     this.transitionIfNeeded();
 
     if (this.state === "OPEN") {
@@ -266,13 +284,14 @@ export class CircuitBreaker {
       this.probeInFlight = true;
     }
 
+    const recordFailure = options?.recordFailure ?? (() => true);
+
     try {
       const result = await fn();
       this.onSuccess();
       return result;
     } catch (err) {
-      const classification = this.classifyError(err);
-      if (classification.retryable) {
+      if (recordFailure(err)) {
         this.onFailure();
       }
       throw err;

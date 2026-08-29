@@ -25,6 +25,7 @@ export const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   unauthorized: 'Authentication is required',
   forbidden: 'You do not have permission to perform this action',
   dependency_unavailable: 'A required service is temporarily unavailable',
+  upstream_unavailable: 'A required upstream service is temporarily unavailable',
   rate_limited: 'Too many requests — please try again later',
   conflict: 'The request conflicts with the current state',
   ERR_CONFLICT: 'The request conflicts with the current state',

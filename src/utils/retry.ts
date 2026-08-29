@@ -16,6 +16,16 @@ export interface RetryOptions {
   maxRetryAfterMs?: number;
   /** Optional Retry-After header value from upstream response. */
   retryAfterHeader?: string | null;
+  /**
+   * Optional hook invoked before each retry (for observability).
+   * Receives the triggering error, the 1-based attempt number, and the
+   * computed delay in milliseconds.
+   */
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+  /** Injectable sleep function for deterministic tests. Defaults to {@link sleep}. */
+  sleepFn?: (ms: number) => Promise<void>;
+  /** Injectable RNG for deterministic jitter tests. Defaults to `Math.random`. */
+  random?: () => number;
 }
 
 const DEFAULT_OPTIONS: Required<RetryOptions> = {
@@ -26,6 +36,9 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
   isRetryable: () => true,
   maxRetryAfterMs: 60000,
   retryAfterHeader: null,
+  onRetry: () => undefined,
+  sleepFn: sleep,
+  random: Math.random,
 };
 
 
@@ -33,10 +46,11 @@ export function calculateDelay(
   attempt: number,
   baseDelayMs: number,
   maxDelayMs: number,
-  jitter: boolean
+  jitter: boolean,
+  random: () => number = Math.random
 ): number {
   const exponential = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
-  return jitter ? exponential * (0.5 + Math.random() * 0.5) : exponential;
+  return jitter ? exponential * (0.5 + random() * 0.5) : exponential;
 }
 
 /**
@@ -93,6 +107,8 @@ export async function withRetry<T>(
   options?: RetryOptions
 ): Promise<T> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
+  const sleepFn = opts.sleepFn ?? sleep;
+  const random = opts.random ?? Math.random;
   let lastError: unknown;
 
   for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
@@ -111,8 +127,9 @@ export async function withRetry<T>(
 
       const delay = retryAfterMs !== null
         ? retryAfterMs
-        : calculateDelay(attempt, opts.baseDelayMs, opts.maxDelayMs, opts.jitter);
-      await sleep(delay);
+        : calculateDelay(attempt, opts.baseDelayMs, opts.maxDelayMs, opts.jitter, random);
+      opts.onRetry?.(error, attempt + 1, delay);
+      await sleepFn(delay);
     }
   }
 
