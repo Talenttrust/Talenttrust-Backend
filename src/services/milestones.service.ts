@@ -202,6 +202,27 @@ export class MilestonesService {
    * Past the window → SoftDeleteRetentionError (410).
    * Active (not deleted) → 409.
    */
+  /**
+   * Release a milestone (create a payment intent).
+   */
+  public payout(contractId: string, milestoneId: string): any {
+    const record = milestoneStore.get(milestoneId);
+    if (!record || record.contractId !== contractId) {
+      throw new MilestoneNotFoundError(
+        `Milestone ${milestoneId} not found for contract ${contractId}`,
+      );
+    }
+    if (isSoftDeleted(record.deletedAt)) {
+      throw new MilestoneConflictError(`Milestone ${milestoneId} is soft-deleted`);
+    }
+
+    return {
+      id: `pi_${randomUUID()}`,
+      milestoneId: record.id,
+      amount: record.amount,
+      status: 'created'
+    };
+  }
   public restore(
     contractId: string,
     milestoneId: string,
@@ -265,3 +286,4 @@ export class MilestonesService {
 }
 
 export const milestonesService = new MilestonesService();
+
