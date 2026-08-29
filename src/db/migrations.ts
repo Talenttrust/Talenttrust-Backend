@@ -692,3 +692,62 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 16: event audit + projection tables for atomic event ingestion.
+//
+// `event_audit` is the durable event checkpoint (the accepted/rejected record
+// plus finality metadata). Its primary key is `deduplication_key`, which is
+// **event identity** (`contractId:eventId:sequence`) — it uniquely identifies
+// one incoming event, not the projection it affects.
+//
+// `event_projection` is the accumulated read-model state for an entity and is
+// keyed by **entity identity** (`entity_id`). Multiple events may legally
+// update the same projection, so its primary key is deliberately NOT the
+// event deduplication key. `last_event_id` records which event last advanced
+// the projection, enabling duplicate-replay idempotency (a replay of the same
+// `last_event_id` is a no-op within the projection upsert).
+MIGRATIONS.push({
+  version: 16,
+  name: "create_event_audit_and_projection_tables",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS event_audit (",
+    "deduplication_key TEXT PRIMARY KEY,",
+    "CREATE TABLE IF NOT EXISTS event_projection (",
+    "entity_id TEXT PRIMARY KEY,",
+    "UNIQUE(tenant_id)",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS event_audit (
+        deduplication_key TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
+        contract_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        payload_hash TEXT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT 'default',
+        network TEXT,
+        ledger INTEGER,
+        finality_status TEXT,
+        finalized_at TEXT,
+        processed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        correlation_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_audit_contract_id ON event_audit(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_event_audit_status ON event_audit(status);
+      CREATE INDEX IF NOT EXISTS idx_event_audit_tenant_id ON event_audit(tenant_id);
+
+      CREATE TABLE IF NOT EXISTS event_projection (
+        entity_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL DEFAULT 'default',
+        data TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0,
+        last_event_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_projection_tenant_id ON event_projection(tenant_id);
+    `);
+  },
+});
