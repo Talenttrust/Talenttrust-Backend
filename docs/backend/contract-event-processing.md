@@ -42,6 +42,31 @@ contractId:eventId:sequence
 - `invalid`: payload violated schema or semantic constraints.
 - `error`: unexpected runtime failure in processor/repository interaction.
 
+## Contract Schema Versions
+
+A contract's event payload shape can change when a newer contract version is
+deployed on-chain. An event from a newer contract must not enter projections
+that assume the older payload shape, but it must not be silently dropped
+either:
+
+- `schemaVersion` is optional on the event envelope. Absent = legacy
+  (treated as version 1). Present-and-invalid is rejected at the boundary
+  with 400 `invalid_event_payload` (fail-closed — an ambiguous version is
+  never guessed).
+- A valid-but-unknown version (newer than this backend supports) is
+  **quarantined**: the redacted event is persisted to the
+  `event_quarantine` store (`src/events/eventQuarantine.ts`) and the
+  ingestion endpoint returns 202 `status: quarantined` with a quarantine
+  id. Quarantined events never reach projections.
+- `POST /api/v1/events/batch` ingests one RPC page with per-item
+  isolation: a malformed or unknown-version event never blocks the rest of
+  the page.
+- `GET /api/v1/events/quarantine` (admin) lists quarantined events;
+  `POST /api/v1/events/quarantine/replay` (admin, audited) reprocesses a
+  quarantined event once support ships. A replay whose version is still
+  unknown re-quarantines; replay attempts are bounded (no silent
+  deletion).
+
 ## Threat Scenarios and Security Assumptions
 
 1. Replay events
