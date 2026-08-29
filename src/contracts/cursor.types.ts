@@ -43,11 +43,11 @@ export interface CursorPaginationInput {
 /**
  * Wraps a page of results with navigation metadata.
  *
- * @template T  - Domain record type.
- * @field data        - Items in the current page (up to `limit` entries).
+ * @template T - Domain record type.
+ * @field data        - Items in the current page (up to ``limit` entries).
  * @field nextCursor  - Opaque cursor to pass for the following page.
  *                      `null` when this is the last page.
- * @field hasNextPage - Convenience boolean; true when `nextCursor` is non-null.
+ * @field hasNextPage - Convenience boolean; true when ``nextCursor` is non-null.
  * @field limit       - The effective page size used for this query.
  */
 export interface CursorPage<T> {
@@ -58,12 +58,30 @@ export interface CursorPage<T> {
 }
 
 /**
- * @notice Cursor checkpoint for resuming indexing from stable checkpoints.
- * @dev Cursor captures the last successfully indexed event sequence for a contract.
- *      Multiple sources (e.g., onchain blocks, API pagination) use cursors to resume safely.
+ * Composite key that uniquely identifies an indexer checkpoint.
+ *
+ * A Checkpoint is scoped to a specific blockchain network, contract address,
+ * and ledger (e.g., `events`, `transfers`). This prevents replaying or skipping
+ * events when multiple networks/contracts are indexed by the same deployment.
  */
-export interface IndexerCursor {
-  /** Unique identifier for the source (e.g., contract ID or API endpoint) */
+export interface CheckpointKey {
+  /** Blockchain network identifier (e.g., `mainnet`, `testnet`). */
+  network: string;
+  /** Contract address or on-chain contract identifier. */
+  contract: string;
+  /** Ledger name/partition this cursor tracks (e.g., `eventp`). */
+  ledger: string;
+}
+
+/**
+ * @notice Cursor checkpoint for resuming indexing from stable checkpoints.
+ * @dev Cursor captures the last successfully indexed event sequence for a
+ *      source.  The key components (network/contract/ledger) are serialized into the
+ *      sourceId for storage/retrieval compatibility, but are also available as
+ *      structured fields for diagnostics and per-network isolation.
+ */
+export interface IndexerCursor extends CheckpointKey {
+  /** Unique identifier for the source (e.g., contract ID or API endpoint). */
   sourceId: string;
 
   /** Last successfully indexed event sequence for this source */
