@@ -10,6 +10,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { createApp, attachTerminalHandlers } from './app';
 import { AppError } from './errors/appError';
 import { JobType, JobPayload, QueueManager } from './queue';
+import { createJobQuarantineRouter } from './queue/job-quarantine.routes';
 import { auditService } from './audit/service';
 import { createAuditRouter } from './audit/router';
 import { createRateLimiter } from './middleware/rateLimiter';
@@ -334,6 +335,20 @@ app.post(
       return;
     }
   },
+);
+
+const QUARANTINE_DEFAULT_LIMIT = 50;
+const QUARANTINE_MAX_LIMIT = 100;
+
+// Quarantine inspection and replay (admin-only). Routed through its own
+// factory so the endpoints are integration-testable in isolation.
+app.use(
+  '/api/v1/jobs',
+  createJobQuarantineRouter({
+    queueManager,
+    defaultLimit: QUARANTINE_DEFAULT_LIMIT,
+    maxLimit: QUARANTINE_MAX_LIMIT,
+  }),
 );
 
 app.get('/api/v1/jobs/:type/:jobId', async (req: Request, res: Response, next: NextFunction) => {

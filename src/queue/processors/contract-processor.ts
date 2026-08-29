@@ -7,6 +7,7 @@
 
 import { ContractProcessingPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { InvalidJobPayloadError } from '../queue-errors';
 
 /**
  * Process contract-related operations
@@ -25,10 +26,11 @@ export async function processContractProcessing(
     ...(payload.requestId && { requestId: payload.requestId }),
   });
 
-  // Validate contract ID format
+  // Validate contract ID format — a permanently malformed id cannot be fixed
+  // by retrying, so it is a terminal failure that should be quarantined.
   if (!payload.contractId || payload.contractId.length < 10) {
     log.warn('Contract processing rejected: invalid contractId format');
-    throw new Error('Invalid contract ID');
+    throw new InvalidJobPayloadError('Invalid contract ID');
   }
 
   // contractId is treated as an internal identifier — log at debug only
@@ -45,7 +47,7 @@ export async function processContractProcessing(
       return await finalizeContract(payload, log);
     default: {
       log.warn('Contract processing rejected: unsupported action', { action: payload.action });
-      throw new Error(`Unsupported action: ${payload.action}`);
+      throw new InvalidJobPayloadError(`Unsupported action: ${payload.action}`);
     }
   }
 }
