@@ -8,9 +8,33 @@
 
 import { dbProbe, envProbe, redisProbe, stellarRpcProbe, queueProbe, circuitBreakerProbe } from "./probes";
 import { HealthResponse, Probe } from "./types";
+import { HealthProbeConfig } from "../appConfiguration";
+
+const DEFAULT_QUEUE_CONFIG: Required<HealthProbeConfig> = {
+  queueFailedThreshold: 10,
+  queueBacklogThreshold: 100,
+  queueProbeTimeoutMs: 3_000,
+};
 
 /** Default probe registry. Override via the probes parameter for testing. */
-const DEFAULT_PROBES: Probe[] = [envProbe, dbProbe, redisProbe, stellarRpcProbe, queueProbe, circuitBreakerProbe];
+const DEFAULT_PROBES: Probe[] = [
+  envProbe,
+  dbProbe,
+  redisProbe,
+  stellarRpcProbe,
+  () => queueProbe(DEFAULT_QUEUE_CONFIG),
+  circuitBreakerProbe,
+];
+
+/**
+ * Build a probe list with the given queue health configuration.
+ *
+ * @param config - Optional health probe thresholds; falls back to defaults when omitted.
+ */
+export function buildProbes(config?: HealthProbeConfig): Probe[] {
+  const queue = () => queueProbe(config);
+  return [envProbe, dbProbe, redisProbe, stellarRpcProbe, queue, circuitBreakerProbe];
+}
 
 /**
  * Run all probes concurrently and return a structured health response.

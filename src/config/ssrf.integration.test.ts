@@ -2,7 +2,9 @@ import { envSchema } from './env.schema';
 
 describe('envSchema SSRF Protection', () => {
   const dummySecret = 'a'.repeat(32);
+  const productionSecret = 'a'.repeat(32);
   const originalAllowFlag = process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+  const originalNodeEnv = process.env.NODE_ENV;
 
   beforeEach(() => {
     // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; these tests assert
@@ -15,6 +17,11 @@ describe('envSchema SSRF Protection', () => {
       delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
     } else {
       process.env.SSRF_ALLOW_PRIVATE_HOSTS = originalAllowFlag;
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = originalNodeEnv;
     }
   });
 
@@ -61,5 +68,63 @@ describe('envSchema SSRF Protection', () => {
     });
     expect(result.success).toBe(true);
   });
-});
 
+  it('should reject SSRF_ALLOW_PRIVATE_HOSTS outright in production', () => {
+    process.env.NODE_ENV = 'production';
+    const result = envSchema.safeParse({
+      NODE_ENV: 'production',
+      JWT_SECRET: productionSecret,
+      SSRF_ALLOW_PRIVATE_HOSTS: 'true',
+      API_BASE_URL: 'https://api.talenttrust.io',
+      COMPLIANCE_AUDIT_SECRET: dummySecret,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.errors.map((e) => e.message).join(' ');
+      expect(messages).toContain('SSRF_ALLOW_PRIVATE_HOSTS must not be enabled in production');
+    }
+  });
+
+  it('should reject private URLs in production even when the allow flag is set', () => {
+    // Schema refinements must call isSafeUrl (no short-circuit). isSafeUrl
+    // ignores the flag in production, so private URLs fail SSRF checks.
+    // Production also rejects the flag itself via superRefine.
+    process.env.NODE_ENV = 'production';
+    process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+    const result = envSchema.safeParse({
+      NODE_ENV: 'production',
+      JWT_SECRET: productionSecret,
+      SSRF_ALLOW_PRIVATE_HOSTS: 'true',
+      API_BASE_URL: 'http://127.0.0.1:3000',
+      COMPLIANCE_AUDIT_SECRET: dummySecret,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.errors.map((e) => e.message).join(' ');
+      expect(messages).toMatch(/SSRF protection|SSRF_ALLOW_PRIVATE_HOSTS/);
+    }
+  });
+
+  it('should allow private URLs in non-production when SSRF_ALLOW_PRIVATE_HOSTS is true', () => {
+    process.env.NODE_ENV = 'development';
+    process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+    const result = envSchema.safeParse({
+      NODE_ENV: 'development',
+      SSRF_ALLOW_PRIVATE_HOSTS: 'true',
+      API_BASE_URL: 'http://127.0.0.1:3000',
+      COMPLIANCE_AUDIT_SECRET: dummySecret,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject private URLs in non-production when the allow flag is off', () => {
+    process.env.NODE_ENV = 'development';
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+    const result = envSchema.safeParse({
+      NODE_ENV: 'development',
+      API_BASE_URL: 'http://10.0.0.5/api',
+      COMPLIANCE_AUDIT_SECRET: dummySecret,
+    });
+    expect(result.success).toBe(false);
+  });
+});

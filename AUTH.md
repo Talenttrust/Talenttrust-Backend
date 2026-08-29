@@ -349,6 +349,11 @@ Legend: `✓` = allow, `✗` = deny, `own` = allow only when `resourceOwnerId ==
 | delete   | ✓     | ✗       | ✗      | ✗          |
 | list     | ✓     | ✓       | own    | own        |
 
+Ownership for `own` cells is resolved from `contract.clientId` (not `freelancerId`).
+There is no separate `tenantId` / org scope — “cross-tenant” denial means cross-owner denial.
+Collection routes (`GET /`, `/stats`, `/bounds`) do not pass an owner resolver, so client/freelancer `own` list/read cells become **403**.
+Focused HTTP coverage: `src/controllers/contracts.auth.test.ts` (issue #729).
+
 #### `payments`
 
 | Action   | admin | auditor | client | freelancer |

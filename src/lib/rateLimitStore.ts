@@ -61,6 +61,8 @@ export interface RateLimitStoreInterface {
   readonly tokenBucketSize: number;
   /** Remove stale fixed-window entries. */
   sweep(windowMs?: number): void;
+  /** Clear all stored state without destroying the store. */
+  clear(): void;
   /** Stop background work and clear all stored state. */
   destroy(): void;
 }
@@ -74,8 +76,11 @@ export class RateLimitStore implements RateLimitStoreInterface {
   constructor(options: StoreOptions = {}) {
     const interval = options.sweepIntervalMs ?? 60_000;
     if (interval > 0) {
-      this.sweepTimer = setInterval(() => this.sweep(), interval);
-      if (this.sweepTimer.unref) this.sweepTimer.unref();
+      const timer: ReturnType<typeof setInterval> = setInterval(() => this.sweep(), interval);
+      if (typeof (timer as unknown as { unref?: () => void }).unref === 'function') {
+        (timer as unknown as { unref: () => void }).unref();
+      }
+      this.sweepTimer = timer;
     }
   }
 
@@ -147,6 +152,12 @@ export class RateLimitStore implements RateLimitStoreInterface {
     }
   }
 
+  /** Clear all stored state. */
+  clear(): void {
+    this.counters.clear();
+    this.tokenBuckets.clear();
+  }
+
   /** Stop the background sweep and clear all entries. */
   destroy(): void {
     this._destroyed = true;
@@ -154,7 +165,6 @@ export class RateLimitStore implements RateLimitStoreInterface {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    this.counters.clear();
-    this.tokenBuckets.clear();
+    this.clear();
   }
 }

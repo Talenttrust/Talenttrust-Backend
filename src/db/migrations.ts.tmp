@@ -1,0 +1,215 @@
+import Database from 'better-sqlite3';
+
+export interface Migration {
+  version: number;
+  name: string;
+  checksumSource?: string;
+  up: (db: Database) => void;
+}
+
+const MIGRATIONS: Migration[] = [
+  // ... existing migrations 1-12 ...
+  
+  {
+    version: 13,
+    name: 'create_webhook_dlq_tables',
+    checksumSource: [
+      "CREATE TABLE IF NOT EXISTS webhook_dlq (",
+      "id TEXT PRIMARY KEY,",
+      "webhook_id TEXT NOT NULL,",
+      "url TEXT NOT NULL,",
+      "body TEXT NOT NULL,",
+      "retry_count INTEGER NOT NULL DEFAULT 0,",
+      "webhook_secret TEXT,",
+      "failed_at TEXT NOT NULL,",
+      "last_error TEXT NOT NULL,",
+      "dedupe_key TEXT NOT NULL,",
+      "replayed_at TEXT,",
+      "replay_attempts INTEGER NOT NULL DEFAULT 0,",
+      "created_at TEXT NOT NULL,",
+      "updated_at TEXT NOT NULL",
+      "UNIQUE(dedupe_key)"
+    ].join('\n'),
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS webhook_dlq (
+          id TEXT PRIMARY KEY,
+          webhook_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          body TEXT NOT NULL,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          webhook_secret TEXT,
+          failed_at TEXT NOT NULL,
+          last_error TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          replayed_at TEXT,
+          replay_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at ON webhook_dlq(failed_at);
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_webhook_dlq_dedupe_key 
+        ON webhook_dlq(dedupe_key)
+      `);
+  },
+  checksumSource: undefined,
+  up: (db) => {
+    // Check if table already exists
+    const columns = db.pragma('table_info(webhook_dlq)') as Array<{ name: string }>;
+    const hasDedupeKey = columns.some(col => col.name === 'dedupe_key');
+    const hasReplayAttempts = columns.some(col => col.name === 'replay_attempts');
+    
+    if (!hasDedupeKey || !hasReplayAttempts) {
+      db.exec(`
+        ALTER TABLE webhook_dlq ADD COLUMN dedupe_key TEXT,
+        replay_attempts INTEGER NOT NULL DEFAULT 0
+      `);
+    }
+  }
+];
+
+// Version 12 (notifications table) - keep as is
+MIGRATIONS.push({
+  version: 12,
+  name: 'create_notifications_table',
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS notifications (",
+    "id TEXT PRIMARY KEY,",
+    "user_id TEXT NOT NULL,",
+    "title TEXT NOT NULL,",
+    "message TEXT NOT NULL,",
+    "created_at TEXT NOT NULL",
+    "UNIQUE(user_id, created_at)"
+  ].join('\n'),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+    `);
+  }
+];
+
+// Version 12: deployment_history table
+MIGRATIONS.push({
+  version: 6,
+  name: "create_deployment_history_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS deployment_history (",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_from",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_history_env_to",
+  ].join('\n'),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS deployment_history (
+        id TEXT PRIMARY KEY,
+        environment_from TEXT NOT NULL,
+        environment_to TEXT,
+        target_version TEXT NOT NULL,
+        promotion_id TEXT,
+        rollback_id TEXT,
+        initiated_by TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'FAILURE')),
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_deployment_history_env_from ON deployment_history(environment_from);
+      CREATE INDEX IF NOT EXISTS idx_deployment_history_env_to ON deployment_history(environment_to);
+    `);
+  }
+});
+
+// Version 12: notifications table backing the NotificationRepository
+MIGRATIONS.push({
+  version: 12,
+  name: 'create_notifications_table',
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS notifications (",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_user_id",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_created_at",
+  ].join('\n'),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+    `);
+  }
+});
+
+export function ensureMigrationTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      checksum TEXT,
+      applied_at TEXT NOT NULL
+    );
+  `);
+  
+  const columns = db.pragma('table_info(schema_version)') as Array<{ name: string }>;
+  const hasChecksum = columns.some(col => column.name === 'checksum');
+  
+  if (!hasChecksum) {
+    db.exec('ALTER TABLE schema_version ADD COLUMN checksum TEXT');
+  }
+}
+
+function getAppliedMigrations(db: Database): Map<number, AppliedMigration> {
+  const rows = db.prepare(
+    'SELECT version, name, checksum FROM schema_version ORDER BY version ASC'
+  ).all();
+  
+  return new Map<number, AppliedMigration>(
+    rows.map(row => [row.version, row.name, row.checksum])
+  );
+}
+
+function verifyAppliedMigrations(
+  db: Database,
+  appliedMigrations: Map<number, AppliedMigration>,
+  migrations: Migration[]
+) {
+  const migrationsByVersion = new Map<number, Migration>();
+  for (const migration of migrations) {
+    migrationsByVersion.set(migration.version, migration);
+  }
+  
+  for (const applied of appliedMigrations) {
+    const migration = migrationsByVersion.get(applied.version);
+    
+    if (!migration) {
+      throw new Error(
+        `Applied migration ${applied.version} (${applied.name}) is not present in migration list`
+      );
+    }
+    
+    const expectedChecksum = computeMigrationChecksum(migration);
+    
+    if (applied.checksum === null) {
+      // Backfill: migration predates checksumSource
+      db.prepare(
+        'UPDATE schema_version SET checksum = ? WHERE version = ?'
+      ).run(expectedChecksum, applied.version);
+      applied.checksum = expectedChecksum;
+    } else if (applied.checksum !== expectedChecksum) {
+      throw new Error(
+        `Applied migration ${applied.version} checksum mismatch; refusing to start`
+      );
+  }

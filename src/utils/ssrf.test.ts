@@ -48,6 +48,17 @@ describe('SSRF Protection Utility', () => {
       expect(isPrivateHost('[::ffff:10.0.0.1]')).toBe(true);
     });
 
+    it('should identify hex-form IPv4-mapped IPv6 as private', () => {
+      expect(isPrivateHost('::ffff:7f00:1')).toBe(true); // 127.0.0.1
+      expect(isPrivateHost('[::ffff:7f00:1]')).toBe(true);
+      expect(isPrivateHost('::ffff:0a00:1')).toBe(true); // 10.0.0.1
+    });
+
+    it('should identify expanded IPv4-mapped IPv6 as private', () => {
+      expect(isPrivateHost('0000:0000:0000:0000:0000:ffff:127.0.0.1')).toBe(true);
+      expect(isPrivateHost('0000:0000:0000:0000:0000:ffff:10.0.0.1')).toBe(true);
+    });
+
     it('should identify decimal-encoded IPv4 as private', () => {
       expect(isPrivateHost('2130706433')).toBe(true); // 127.0.0.1
       expect(isPrivateHost('167772161')).toBe(true); // 10.0.0.1
@@ -100,6 +111,10 @@ describe('SSRF Protection Utility', () => {
         process.env.NODE_ENV = 'production';
         process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
         expect(isSafeUrl('http://localhost:3000')).toBe(false);
+        expect(isSafeUrl('http://127.0.0.1')).toBe(false);
+        expect(isSafeUrl('http://[::1]:3000')).toBe(false);
+        expect(isSafeUrl('http://0177.0.0.1')).toBe(false);
+        expect(isSafeUrl('http://2130706433')).toBe(false);
       });
 
       it('should allow URLs with public hostnames', () => {
@@ -148,16 +163,72 @@ describe('SSRF Protection Utility', () => {
       });
     });
 
+    describe('in staging mode', () => {
+      it('should block private hosts by default', () => {
+        process.env.NODE_ENV = 'staging';
+        expect(isSafeUrl('http://localhost:3000')).toBe(false);
+      });
+
+      it('should allow private hosts when SSRF_ALLOW_PRIVATE_HOSTS is true', () => {
+        process.env.NODE_ENV = 'staging';
+        process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+        expect(isSafeUrl('http://localhost:3000')).toBe(true);
+      });
+    });
+
     describe('with unset NODE_ENV', () => {
       it('should block private hosts by default', () => {
         delete process.env.NODE_ENV;
         expect(isSafeUrl('http://localhost:3000')).toBe(false);
       });
 
-      it('should allow private hosts when SSRF_ALLOW_PRIVATE_HOSTS is true', () => {
+      it('should block private hosts even when SSRF_ALLOW_PRIVATE_HOSTS is true', () => {
+        // Unknown/unset environment must fail closed — bypass requires an
+        // explicit allowlisted NODE_ENV (development|test|staging).
         delete process.env.NODE_ENV;
         process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
-        expect(isSafeUrl('http://localhost:3000')).toBe(true);
+        expect(isSafeUrl('http://localhost:3000')).toBe(false);
+        expect(isSafeUrl('http://127.0.0.1')).toBe(false);
+      });
+
+      it('should still allow public hosts', () => {
+        delete process.env.NODE_ENV;
+        expect(isSafeUrl('https://google.com')).toBe(true);
+      });
+    });
+
+    describe('with misspelled / unknown NODE_ENV', () => {
+      it('should block private hosts even when SSRF_ALLOW_PRIVATE_HOSTS is true', () => {
+        process.env.NODE_ENV = 'prodution'; // misspelled production
+        process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+        expect(isSafeUrl('http://localhost:3000')).toBe(false);
+        expect(isSafeUrl('http://[::1]:3000')).toBe(false);
+        expect(isSafeUrl('http://169.254.169.254/latest/meta-data/')).toBe(false);
+      });
+
+      it('should block private hosts for arbitrary unknown env values', () => {
+        process.env.NODE_ENV = 'local';
+        process.env.SSRF_ALLOW_PRIVATE_HOSTS = 'true';
+        expect(isSafeUrl('http://10.0.0.1')).toBe(false);
+      });
+    });
+
+    describe('encoded and mapped IP bypass attempts', () => {
+      beforeEach(() => {
+        process.env.NODE_ENV = 'production';
+      });
+
+      it('should block decimal-encoded IPv4', () => {
+        expect(isSafeUrl('http://2130706433/')).toBe(false);
+      });
+
+      it('should block octal-encoded IPv4', () => {
+        expect(isSafeUrl('http://0177.0.0.1/')).toBe(false);
+      });
+
+      it('should block IPv4-mapped IPv6 dotted and hex forms', () => {
+        expect(isSafeUrl('http://[::ffff:127.0.0.1]/')).toBe(false);
+        expect(isSafeUrl('http://[::ffff:7f00:1]/')).toBe(false);
       });
     });
   });

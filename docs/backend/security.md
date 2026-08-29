@@ -101,25 +101,27 @@ The following are blocked by default:
 - IPv6 loopback (::1)
 - IPv6 Unique Local Addresses (fc00::/7)
 - IPv6 link-local addresses (fe80::/10)
-- IPv4-mapped IPv6 addresses
+- IPv4-mapped IPv6 addresses (dotted-quad and compressed-hex forms)
 - Decimal/octal/hex encoded IP addresses
 
 ### Configuration
 
 #### `SSRF_ALLOW_PRIVATE_HOSTS`
 
-- **Default**: `false`
+- **Default**: `false` (fail closed)
 - **Allowed values**: `true`/`false` (or `1`/`0`)
+- **Opt-in environments**: only when `NODE_ENV` is explicitly `development`, `test`, or `staging`
 - **Behavior**:
-  - **Production**: *always blocks* private hosts, this flag is **ignored**
-  - **Non-production**: If set to `true`, allows access to private hosts (for development/testing)
+  - **Production**: the flag is **rejected outright** at config load (`env.schema` superRefine). Runtime `isSafeUrl` also ignores it — private hosts are always blocked.
+  - **development / test / staging**: if set to `true`, allows private hosts for local probes and fixtures.
+  - **Unset or misspelled `NODE_ENV`**: treated as unknown — the bypass is ignored and private hosts are blocked (fail closed).
 
 ### Examples
 
 **Production (strict)**:
 ```bash
 NODE_ENV=production
-# SSRF_ALLOW_PRIVATE_HOSTS has no effect here
+# Do not set SSRF_ALLOW_PRIVATE_HOSTS — startup validation will fail if it is true
 ```
 
 **Development with private hosts allowed**:
@@ -136,9 +138,10 @@ SSRF_ALLOW_PRIVATE_HOSTS=true
 
 ### Security Notes
 
-- **Fail Closed**: Unparseable URLs or hosts are always considered unsafe
-- **Production Hardening**: The bypass flag is never respected in production, preventing accidental leaks
-- **Test Coverage**: Comprehensive tests verify all edge cases (encoded IPs, IPv6, etc.)
+- **Fail Closed**: Unparseable URLs, empty hosts, and unknown/`unset` `NODE_ENV` values are always considered unsafe for the bypass path.
+- **Production Hardening**: The bypass flag cannot be enabled in production (config validation fails) and cannot return `true` for a private host at runtime.
+- **Single policy**: Env URL fields (`API_BASE_URL`, Horizon, Soroban, Stellar RPC) always call `isSafeUrl` — there is no separate schema short-circuit.
+- **Test Coverage**: Comprehensive tests verify encoded IPs, IPv6, metadata endpoints, production flag rejection, and unknown-env fail-closed behavior.
 
 Run tests using:
 ```bash

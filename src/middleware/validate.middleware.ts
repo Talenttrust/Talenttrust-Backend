@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { ZodTypeAny, ZodError } from 'zod';
-import { AppError } from '../errors/appError';
+import { ZodTypeAny, ZodError, z } from 'zod';
 
 export interface ValidationErrorDetail {
   path: string[];
@@ -17,7 +16,7 @@ export interface ValidationErrorResponse {
   };
 }
 
-const mapZodErrorToDetails = (error: ZodError): ValidationErrorDetail[] => {
+export const mapZodErrorToDetails = (error: ZodError): ValidationErrorDetail[] => {
   return error.issues.map((issue) => ({
     path: issue.path.map((p) => String(p)),
     message: issue.message,
@@ -25,6 +24,14 @@ const mapZodErrorToDetails = (error: ZodError): ValidationErrorDetail[] => {
   }));
 };
 
+/**
+ * Canonical request validation middleware.
+ *
+ * Parses `{ body, query, params }` together through the provided schema,
+ * then mutates the matching `req` properties with validated data.
+ * Rejects invalid input with a 400 response using a standard error shape
+ * aligned with {@link AppError}.
+ */
 export const validateSchema = (schema: ZodTypeAny) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -40,11 +47,13 @@ export const validateSchema = (schema: ZodTypeAny) => {
     } catch (error) {
       if (error instanceof ZodError) {
         const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-        const response: ValidationErrorResponse = {
+        const correlationId = typeof res.locals.correlationId === 'string' ? res.locals.correlationId : undefined;
+        const response: ValidationErrorResponse & { error: { correlationId?: string } } = {
           error: {
             code: 'validation_error',
             message: 'Request validation failed',
             requestId,
+            ...(correlationId !== undefined && { correlationId }),
             details: mapZodErrorToDetails(error),
           },
         };
@@ -54,3 +63,24 @@ export const validateSchema = (schema: ZodTypeAny) => {
     }
   };
 };
+
+/**
+ * Validates only `req.body` against the given schema.
+ * Thin convenience wrapper around {@link validateSchema}.
+ */
+export const validateRequest = (schema: ZodTypeAny) =>
+  validateSchema(z.object({ body: schema }));
+
+/**
+ * Validates only `req.params` against the given schema.
+ * Thin convenience wrapper around {@link validateSchema}.
+ */
+export const validateParams = (schema: ZodTypeAny) =>
+  validateSchema(z.object({ params: schema }));
+
+/**
+ * Validates only `req.query` against the given schema.
+ * Thin convenience wrapper around {@link validateSchema}.
+ */
+export const validateQuery = (schema: ZodTypeAny) =>
+  validateSchema(z.object({ query: schema }));

@@ -163,6 +163,9 @@ export function getRedisConfig(): ConnectionOptions {
   };
 }
 
+/** Default per-job attempt timeout in milliseconds (30 seconds). */
+const DEFAULT_JOB_TIMEOUT_MS = 30_000;
+
 function parsePositiveTimeout(value: string | undefined, fallback: number): number {
   if (value === undefined) {
     return fallback;

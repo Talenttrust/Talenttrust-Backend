@@ -161,10 +161,6 @@ function evaluateHeapStatus(
 }
 
 function mergeStatuses(statuses: ServiceStatus[]): ServiceStatus {
-  if (statuses.length === 0) {
-    return 'up';
-  }
-
   return statuses.reduce((current, next) =>
     STATUS_ORDER[next] > STATUS_ORDER[current] ? next : current,
   );

@@ -1,5 +1,5 @@
 import path from 'path';
-import type { AuditEntry, AuditQuery, CreateAuditEntryInput, IntegrityReport } from './types';
+import type { AuditEntry, AuditQuery, CreateAuditEntryInput, IntegrityReport, AuditQueryResult } from './types';
 import { auditStore } from './store';
 import { SqliteAuditRepository } from './sqliteRepository';
 import Database from '../db/betterSqlite3';
@@ -8,6 +8,10 @@ export interface AuditLogRepository {
   append(input: CreateAuditEntryInput): AuditEntry;
   getById(id: string): AuditEntry | undefined;
   query(query?: AuditQuery): AuditEntry[];
+  /**
+   * Query with cursor-based pagination.
+   */
+  queryWithCursor(query?: AuditQuery): AuditQueryResult;
   /**
    * Streams entries without materialising the full result set in memory.
    */

@@ -1,4 +1,8 @@
 import { ContractEvent } from './types';
+import {
+  EnvelopeValidationOptions,
+  validateEventEnvelopePreamble,
+} from '../shared/eventEnvelopeValidation';
 
 type ValidationResult =
   | { ok: true; event: ContractEvent }
@@ -12,53 +16,54 @@ const EVENT_TYPES = new Set<ContractEvent['type']>([
   'CONTRACT_CANCELLED',
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+/**
+ * Preamble options for the contract-event validator.
+ * Mirrors the inline behaviour that used to live here:
+ * - short-circuit on first failure (`abortEarly: true`)
+ * - ISO-string timestamps only (`timestampRule: 'iso'`)
+ * - no trailing-period punctuation on messages
+ */
+const CONTRACT_PREAMBLE_OPTIONS = {
+  rootErrorMessage: 'Payload must be a JSON object',
+  messageSuffix: '',
+  timestampRule: 'iso',
+  abortEarly: true,
+} satisfies EnvelopeValidationOptions;
 
 /**
  * @notice Validates and normalizes unknown payloads into a strict contract event.
+ * @dev    The per-field preamble is delegated to the shared envelope validator
+ *         so the dispute-event ingestion path can reuse the exact same checks.
+ *         The `type` whitelist and event-payload shape remain specific to
+ *         contract ingestion.
  */
 export function validateContractEventPayload(payload: unknown): ValidationResult {
-  if (!isRecord(payload)) {
-    return { ok: false, reason: 'Payload must be a JSON object' };
+  const errors = validateEventEnvelopePreamble(payload, CONTRACT_PREAMBLE_OPTIONS);
+  if (errors.length > 0) {
+    return { ok: false, reason: errors[0].message };
   }
 
-  const { contractId, eventId, sequence, timestamp, type, payload: eventPayload } = payload;
+  // `validateEventEnvelopePreamble` already enforces isRecord + per-field
+  // types. The casts below are safe because the helper has just validated
+  // each destructured field against its expected predicate.
+  const checked = payload as Record<string, unknown>;
 
-  if (typeof contractId !== 'string' || contractId.trim().length === 0) {
-    return { ok: false, reason: 'contractId is required' };
-  }
-
-  if (typeof eventId !== 'string' || eventId.trim().length === 0) {
-    return { ok: false, reason: 'eventId is required' };
-  }
-
-  if (typeof sequence !== 'number' || !Number.isInteger(sequence) || sequence < 0) {
-    return { ok: false, reason: 'sequence must be a non-negative integer' };
-  }
-
-  if (typeof timestamp !== 'string' || Number.isNaN(Date.parse(timestamp))) {
-    return { ok: false, reason: 'timestamp must be a valid ISO string' };
-  }
-
-  if (typeof type !== 'string' || !EVENT_TYPES.has(type as ContractEvent['type'])) {
+  if (
+    typeof checked.type !== 'string' ||
+    !EVENT_TYPES.has(checked.type as ContractEvent['type'])
+  ) {
     return { ok: false, reason: 'type is invalid' };
-  }
-
-  if (!isRecord(eventPayload)) {
-    return { ok: false, reason: 'payload must be an object' };
   }
 
   return {
     ok: true,
     event: {
-      contractId: contractId.trim(),
-      eventId: eventId.trim(),
-      sequence,
-      timestamp,
-      type: type as ContractEvent['type'],
-      payload: eventPayload,
+      contractId: (checked.contractId as string).trim(),
+      eventId: (checked.eventId as string).trim(),
+      sequence: checked.sequence as number,
+      timestamp: checked.timestamp as string,
+      type: checked.type as ContractEvent['type'],
+      payload: checked.payload as Record<string, unknown>,
     },
   };
 }

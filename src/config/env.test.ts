@@ -46,4 +46,36 @@ describe('Environment validation', () => {
 
     expect(() => validateEnv()).toThrow(/WEBHOOK_DELIVERY_TIMEOUT_MS/);
   });
+
+  describe('AUDIT_ENABLED feature flag', () => {
+    beforeEach(() => {
+      process.env.NODE_ENV = 'test';
+      process.env.COMPLIANCE_AUDIT_SECRET = 'a'.repeat(32);
+    });
+
+    it('defaults to true when AUDIT_ENABLED is not set', () => {
+      delete process.env.AUDIT_ENABLED;
+      expect(validateEnv().AUDIT_ENABLED).toBe(true);
+    });
+
+    it('is true when AUDIT_ENABLED=true', () => {
+      process.env.AUDIT_ENABLED = 'true';
+      expect(validateEnv().AUDIT_ENABLED).toBe(true);
+    });
+
+    it('is false when AUDIT_ENABLED=false', () => {
+      process.env.AUDIT_ENABLED = 'false';
+      expect(validateEnv().AUDIT_ENABLED).toBe(false);
+    });
+
+    it('treats non-"false" strings as true', () => {
+      process.env.AUDIT_ENABLED = '1';
+      expect(validateEnv().AUDIT_ENABLED).toBe(true);
+    });
+
+    it('treats empty string as true (safe default)', () => {
+      process.env.AUDIT_ENABLED = '';
+      expect(validateEnv().AUDIT_ENABLED).toBe(true);
+    });
+  });
 });

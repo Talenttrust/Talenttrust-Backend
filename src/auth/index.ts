@@ -8,3 +8,5 @@ export {
   authenticateMiddleware,
 } from './authenticate';
 export { requirePermission } from './middleware';
+export { AuthCache } from './authCache';
+export { getAuthCache, resetAuthCache } from './apiKeys';

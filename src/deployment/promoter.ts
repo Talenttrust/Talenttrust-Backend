@@ -1,20 +1,19 @@
 /**
  * Environment Promotion Module
- * 
-/**
- * Environment Promotion Module
- * 
+ *
  * Manages promotion of deployments across environments (dev -> staging -> production)
  * with validation, rollback capabilities, and audit logging.
- * 
+ * Orchestrates the blue-green deployment state machine from {@link ../deploy}.
+ *
  * @module deployment/promoter
  */
 
 import { Environment, loadEnvironmentConfig } from '../config/environment';
 import { ValidationResult, validateDeploymentReadiness, performHealthCheck } from './validator';
 import { auditService } from '../audit/service';
-import { recordPromotion, recordRollback } from './historyStore';
+import { recordPromotion, recordRollback, fetchHistory } from './historyStore';
 import { randomUUID } from 'crypto';
+import { switchToGreen, rollback as blueGreenRollback, getStatus } from '../deploy';
 
 export interface PromotionRequest {
   /** Source environment */
@@ -73,27 +72,26 @@ export interface RollbackResult {
 export function validatePromotionPath(from: Environment, to: Environment): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
-  
+
   // Define valid promotion paths
   const validPaths: Record<Environment, Environment[]> = {
     development: ['staging'],
     staging: ['production'],
-    production: [], // Cannot promote from production
+    production: [],
     test: [],
   };
-  
+
   if (!validPaths[from].includes(to)) {
     errors.push(
       `Invalid promotion path: ${from} -> ${to}. ` +
       `Valid paths from ${from}: ${validPaths[from].join(', ') || 'none'}`
     );
   }
-  
-  // Add warnings for direct production promotions
+
   if (to === 'production' && from === 'development') {
     warnings.push('Direct promotion from development to production is not recommended');
   }
-  
+
   return {
     valid: errors.length === 0,
     errors,
@@ -118,18 +116,12 @@ function generateRollbackId(): string {
 }
 
 /**
- * Dummy deployer function simulating an external deployment pipeline.
- */
-async function deploy(environment: Environment, version: string): Promise<void> {
-  // Simulate network latency
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  if (version === 'fail' || version === 'trigger-failure') {
-    throw new Error('Simulation of deployment failure');
-  }
-}
-
-/**
  * Rolls back a deployment to a previous version
+ *
+ * Uses the blue-green {@link ../deploy.ts rollback} state machine to revert
+ * the active deployment colour, then persists the rollback record and emits
+ * an audit event.
+ *
  * @param {RollbackRequest} request - Rollback request details
  * @returns {Promise<RollbackResult>} Rollback result
  */
@@ -137,8 +129,7 @@ export async function rollbackDeployment(
   request: RollbackRequest
 ): Promise<RollbackResult> {
   const rollbackId = generateRollbackId();
-  
-  // Validate rollback request
+
   if (!request.targetVersion) {
     return {
       success: false,
@@ -147,7 +138,7 @@ export async function rollbackDeployment(
       rollbackId,
     };
   }
-  
+
   if (request.environment === 'development') {
     return {
       success: false,
@@ -156,12 +147,10 @@ export async function rollbackDeployment(
       rollbackId,
     };
   }
-  
+
   try {
-    // Call the dummy deployer
-    await deploy(request.environment, request.targetVersion);
-    
-    // Record successful rollback in history
+    await blueGreenRollback();
+
     recordRollback({
       id: randomUUID(),
       environment: request.environment,
@@ -172,7 +161,6 @@ export async function rollbackDeployment(
       status: 'SUCCESS',
     });
 
-    // Audit log successful rollback
     auditService.log({
       action: 'DEPLOYMENT_ROLLED_BACK',
       severity: 'WARNING',
@@ -188,7 +176,6 @@ export async function rollbackDeployment(
       rollbackId,
     };
   } catch (err: any) {
-    // Record failed rollback in history
     recordRollback({
       id: randomUUID(),
       environment: request.environment,
@@ -200,7 +187,6 @@ export async function rollbackDeployment(
       error: err.message,
     });
 
-    // Audit log failed rollback
     auditService.log({
       action: 'DEPLOYMENT_ROLLED_BACK',
       severity: 'CRITICAL',
@@ -221,13 +207,24 @@ export async function rollbackDeployment(
 
 /**
  * Promotes a deployment from one environment to another
- * @param request Promotion request details
+ *
+ * Orchestrates the full promotion lifecycle:
+ * 1. Validates the promotion path (dev→staging, staging→production)
+ * 2. Loads and validates target environment configuration
+ * 3. Runs deployment readiness validation
+ * 4. Performs a health/smoke check against the target
+ * 5. Executes the blue-green switch via {@link ../deploy.ts switchToGreen}
+ * 6. Persists the promotion record and emits an audit event
+ *
+ * Failed promotion steps are recorded with FAILURE status and a CRITICAL
+ * audit severity so operators can investigate.
+ *
+ * @param request - Promotion request details
  * @returns PromotionResult indicating success or failure
  */
 export async function promoteDeployment(request: PromotionRequest): Promise<PromotionResult> {
   const promotionId = generatePromotionId();
 
-  // Validate promotion path
   const validation = validatePromotionPath(request.from, request.to);
   if (!validation.valid) {
     return {
@@ -239,25 +236,20 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
     };
   }
 
-  // Load environment config for target environment transiently to pass validation
   const originalNodeEnv = process.env.NODE_ENV;
   const originalCorsOrigins = process.env.CORS_ALLOWED_ORIGINS;
   const originalApiBaseUrl = process.env.API_BASE_URL;
   const originalStellarNetwork = process.env.STELLAR_NETWORK;
   const originalJwtSecret = process.env.JWT_SECRET;
-  
+
   let envConfig;
   try {
     process.env.NODE_ENV = request.to;
-    
-    // Set realistic defaults for target environment to pass validation during promotion/tests
+
     if (request.to === 'production') {
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       process.env.API_BASE_URL = 'https://api.example.com';
       process.env.STELLAR_NETWORK = 'mainnet';
-      // Production env validation requires a JWT_SECRET of at least 32 chars.
-      // Supply a placeholder so promotion validation passes when the caller has
-      // not injected one; the original value is restored in the finally block.
       if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
         process.env.JWT_SECRET = 'promotion-validation-placeholder-secret-key';
       }
@@ -270,7 +262,7 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
       process.env.API_BASE_URL = 'https://dev-api.example.com';
       process.env.STELLAR_NETWORK = 'testnet';
     }
-    
+
     envConfig = loadEnvironmentConfig();
   } finally {
     process.env.NODE_ENV = originalNodeEnv;
@@ -295,6 +287,7 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
       delete process.env.JWT_SECRET;
     }
   }
+
   const readiness = await validateDeploymentReadiness(envConfig);
   if (!readiness.valid) {
     return {
@@ -306,18 +299,18 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
     };
   }
 
-  // Optional health check (ignore failures for now but log)
   try {
     await performHealthCheck(envConfig.apiBaseUrl);
-  } catch (_) {
-    // continue; health check failures will be caught in deployment step
+  } catch {
+    // Health check failure is non-fatal; the blue-green switch will
+    // perform its own readiness probe.
   }
 
   try {
-    // Deploy the requested version
-    await deploy(request.to, request.version);
+    // Retrieve the state before switching so we can record it
+    const stateBefore = await getStatus();
+    await switchToGreen();
 
-    // Record promotion in history
     recordPromotion({
       id: randomUUID(),
       environmentFrom: request.from,
@@ -329,14 +322,17 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
       status: 'SUCCESS',
     });
 
-    // Audit log
     auditService.log({
       action: 'DEPLOYMENT_PROMOTED',
       severity: 'INFO',
       actor: request.initiatedBy,
       resource: 'deployment',
       resourceId: request.version,
-      metadata: { from: request.from, to: request.to },
+      metadata: {
+        from: request.from,
+        to: request.to,
+        previousColor: stateBefore.activeColor,
+      },
     });
 
     return {
@@ -346,7 +342,6 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
       promotionId,
     };
   } catch (err: any) {
-    // Record failure
     recordPromotion({
       id: randomUUID(),
       environmentFrom: request.from,
@@ -359,7 +354,6 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
       error: err.message,
     });
 
-    // Audit failure
     auditService.log({
       action: 'DEPLOYMENT_PROMOTED',
       severity: 'CRITICAL',
@@ -380,15 +374,24 @@ export async function promoteDeployment(request: PromotionRequest): Promise<Prom
 }
 
 /**
- * Gets the promotion history for an environment
+ * Returns the promotion history for a given environment
+ *
+ * Queries the persisted deployment_history table (via {@link fetchHistory})
+ * for all rows where the environment appears as either source or target.
+ * Results are ordered by timestamp descending (most recent first).
+ *
  * @param {Environment} environment - Environment to query
- * @returns {Promise<PromotionRequest[]>} List of promotion requests
+ * @returns {Promise<PromotionRequest[]>} Chronologically descending list of promotion records
  */
 export async function getPromotionHistory(
-  _environment: Environment
+  environment: Environment
 ): Promise<PromotionRequest[]> {
-  // Promotion history is persisted for audit purposes via recordPromotion, but a
-  // queryable, caller-facing history API is not yet exposed. Return an empty list
-  // until a dedicated read model (independent of the raw audit store) is wired up.
-  return [];
+  const records = fetchHistory(environment);
+  return records.map((r) => ({
+    from: r.environmentFrom as Environment,
+    to: (r.environmentTo ?? r.environmentFrom) as Environment,
+    version: r.targetVersion,
+    initiatedBy: r.initiatedBy,
+    timestamp: new Date(r.timestamp),
+  }));
 }

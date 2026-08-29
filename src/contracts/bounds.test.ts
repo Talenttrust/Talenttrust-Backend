@@ -137,4 +137,146 @@ describe('validateContractBounds', () => {
       if (!result.valid) expect(result.error).toMatch(/Budget exceeds/);
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Regression tests — issue #923
+  //
+  // These lock in fixes for cases that were previously either uncaught
+  // exceptions (crashed instead of returning a validation result) or
+  // silently accepted malformed input as valid. validateContractBounds is
+  // the function whose entire job is defending against malformed input, so
+  // it must not depend on an upstream caller (e.g. the DTO/Zod layer) having
+  // already validated types first — a future internal caller that bypasses
+  // that layer (bulk import, admin override, migration script) must still
+  // get a graceful validation error, not a crash or a false "valid".
+  // ──────────────────────────────────────────────────────────────────────────
+  describe('regression: malformed budget (issue #923)', () => {
+    it('rejects NaN budget instead of silently passing (NaN > x is always false)', () => {
+      const result = validateContractBounds(NaN, []);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error).toMatch(/finite/i);
+    });
+
+    it('rejects Infinity budget', () => {
+      const result = validateContractBounds(Infinity, []);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error).toMatch(/finite/i);
+    });
+
+    it('rejects -Infinity budget', () => {
+      const result = validateContractBounds(-Infinity, []);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects undefined budget at runtime (bypassing the TS type)', () => {
+      const result = validateContractBounds(undefined as unknown as number, []);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a string budget at runtime (bypassing the TS type)', () => {
+      const result = validateContractBounds('1000' as unknown as number, []);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects null budget at runtime (bypassing the TS type)', () => {
+      const result = validateContractBounds(null as unknown as number, []);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('regression: malformed milestones array (issue #923)', () => {
+    it('treats null milestones the same as undefined (valid, no milestones) instead of throwing', () => {
+      // Previously: TypeError: Cannot read properties of null (reading 'length')
+      const result = validateContractBounds(1000, null);
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a non-array milestones value instead of throwing on .length', () => {
+      const result = validateContractBounds(1000, 'not-an-array' as unknown as Milestone[]);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error).toMatch(/array/i);
+    });
+
+    it('rejects a plain-object (non-array) milestones value', () => {
+      const result = validateContractBounds(1000, { title: 'x', amount: 1 } as unknown as Milestone[]);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an array containing a null entry instead of throwing on .amount', () => {
+      // Previously: TypeError: Cannot read properties of null (reading 'amount')
+      const milestones = [null, { title: 'ok', amount: 1 }] as unknown as Milestone[];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error).toMatch(/finite numeric amount/i);
+    });
+
+    it('rejects an array containing an undefined entry', () => {
+      const milestones = [{ title: 'ok', amount: 1 }, undefined] as unknown as Milestone[];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an array containing a primitive entry (e.g. a bare number)', () => {
+      const milestones = [42] as unknown as Milestone[];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a milestone with a NaN amount instead of letting it corrupt the running total', () => {
+      const milestones = [{ title: 'x', amount: NaN }] as unknown as Milestone[];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error).toMatch(/finite numeric amount/i);
+    });
+
+    it('rejects a milestone with an Infinity amount', () => {
+      const milestones = [{ title: 'x', amount: Infinity }];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a milestone with a non-numeric amount at runtime (bypassing the TS type)', () => {
+      const milestones = [{ title: 'x', amount: '100' }] as unknown as Milestone[];
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('regression: empty-input edge cases (issue #923)', () => {
+    it('accepts an empty milestones array with a zero budget (fully empty contract)', () => {
+      expect(validateContractBounds(0, []).valid).toBe(true);
+    });
+
+    it('is valid when both budget is 0 and milestones is undefined', () => {
+      expect(validateContractBounds(0, undefined).valid).toBe(true);
+    });
+
+    it('is valid when both budget is 0 and milestones is null', () => {
+      expect(validateContractBounds(0, null).valid).toBe(true);
+    });
+  });
+
+  describe('regression: boundary edge cases (issue #923)', () => {
+    it('accepts a single milestone whose amount exactly equals the budget', () => {
+      const result = validateContractBounds(500, [{ title: 'x', amount: 500 }]);
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects the smallest possible over-cap total (cap + Number.EPSILON-scale unit)', () => {
+      const result = validateContractBounds(1000, [
+        { title: 'x', amount: MAX_CONTRACT_AMOUNT_STROOPS },
+        { title: 'y', amount: 1 },
+      ]);
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts MAX_MILESTONES_PER_CONTRACT milestones each with a tiny fractional amount summing under the cap', () => {
+      const milestones: Milestone[] = Array.from({ length: MAX_MILESTONES_PER_CONTRACT }, (_, i) => ({
+        title: `M${i}`,
+        amount: 0.1,
+      }));
+      const result = validateContractBounds(1000, milestones);
+      expect(result.valid).toBe(true);
+    });
+  });
 });

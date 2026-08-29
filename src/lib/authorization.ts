@@ -35,7 +35,12 @@ type CellValue = false | true | { ownOnly: true };
  * TypeScript to flag a compile-time error whenever a new `Resource` or
  * `Action` value is added to `types.ts` without a corresponding entry here.
  */
-type PermissionMatrix = Record<Resource, Record<Action, Record<Role, CellValue>>>;
+type RoleCells = Record<Role, CellValue>;
+type PermissionMatrix = {
+  [R in Resource]: R extends "health"
+    ? { read: RoleCells }
+    : Record<Action, RoleCells>;
+};
 
 // Convenience aliases
 const DENY = false as const;
@@ -132,6 +137,19 @@ export const PERMISSION_MATRIX: PermissionMatrix = {
     update: { admin: ALLOW,  auditor: DENY,  client: OWN,      freelancer: OWN },
     delete: { admin: ALLOW,  auditor: DENY,  client: DENY,     freelancer: DENY },
     list:   { admin: ALLOW,  auditor: ALLOW, client: DENY,     freelancer: DENY },
+  },
+
+  // ── disputes ───────────────────────────────────────────────────────────────
+  disputes: {
+    create: { admin: ALLOW,  auditor: DENY,  client: ALLOW,    freelancer: ALLOW },
+    read:   { admin: ALLOW,  auditor: ALLOW, client: OWN,      freelancer: OWN },
+    update: { admin: ALLOW,  auditor: DENY,  client: OWN,      freelancer: DENY },
+    delete: { admin: ALLOW,  auditor: DENY,  client: DENY,     freelancer: DENY },
+    list:   { admin: ALLOW,  auditor: ALLOW, client: OWN,      freelancer: OWN },
+  },
+
+  health: {
+    read: { admin: ALLOW, auditor: ALLOW, client: ALLOW, freelancer: ALLOW },
   },
 } satisfies PermissionMatrix;
 

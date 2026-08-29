@@ -245,9 +245,9 @@ Response:
 { "success": true, "name": "stellar-rpc" }
 ```
 
-Requires the `admin` role (`src/routes/admin.routes.ts:90-107`). A failed reset (breaker not found) returns `400` with `AppError`.
+Requires the `admin` role or admin API key scope (`src/routes/admin.routes.ts:90-108`). Protected by `adminAuthGuard`. A failed reset (breaker not found) returns `400` with safe error formatting.
 
-The `resetBreaker` method in `registry.ts:71-87` also records an audit entry via `auditService.log()` with action `ADMIN_ACTION` and resource type `circuit_breaker`.
+The `resetBreaker` method in `registry.ts:71-87` also records an audit entry via `auditService.log()` with action `ADMIN_ACTION`, severity `INFO`, actor identifier, and resource type `circuit_breaker`.
 
 ### Programmatic reset (test/admin scripts only)
 
@@ -268,7 +268,7 @@ const ok = circuitBreakerRegistry.reset("stellar-rpc");
 | Cascading failures | Circuit trips to OPEN after `failureThreshold` consecutive failures, halting further calls. |
 | Error ambiguity | `CircuitOpenError` is a distinct typed class — callers can return 503 vs 500 correctly (see `src/circuit-breaker/errors.ts`). |
 | Probe concurrency | `probeInFlight` flag prevents multiple simultaneous HALF_OPEN probes from resetting state (see `CircuitBreaker.ts:118-123`). |
-| Admin reset | `reset()` exposes a force-close. The admin endpoints at `/api/v1/admin/circuit-breaker/:name/reset` are protected by `adminAuthGuard` and `requireRole('admin')`. `resetBreaker()` additionally logs an audit entry. |
+| Admin reset | `reset()` exposes a force-close. The admin endpoint at `POST /api/v1/admin/circuit-breaker/:name/reset` is protected by `adminAuthGuard` (JWT admin role or API key scope). `resetBreaker()` logs an audit entry. |
 | RPC endpoint | `STELLAR_RPC_URL` is read from environment — never hard-code production URLs in source. |
 | X-Circuit-Name | The circuit name is exposed in error headers so ops can identify the failing upstream. The name itself is a simple identifier (e.g. `"stellar-rpc"`); no sensitive data is leaked. |
 

@@ -1,5 +1,10 @@
 import { EventAuditService } from '../repository/eventAuditRepository';
 import { ContractEvent } from './types';
+import {
+  EnvelopeValidationOptions,
+  isRecord,
+  validateEventEnvelopePreamble,
+} from '../shared/eventEnvelopeValidation';
 
 export interface EventIngestionConfig {
   enableStrictValidation: boolean;
@@ -26,10 +31,6 @@ export interface EventIngestionResult {
   code?: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function toTimestampNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -42,6 +43,20 @@ function toTimestampNumber(value: unknown): number | null {
 
   return null;
 }
+
+/**
+ * Preamble options for the event-ingestion-service validator.
+ * Mirrors the inline behaviour that used to live here:
+ * - collect every failing field (`abortEarly: false`)
+ * - accept numeric or numeric-string timestamps (`timestampRule: 'numeric'`)
+ * - messages suffixed with a trailing `.`
+ */
+const INGESTION_PREAMBLE_OPTIONS = {
+  rootErrorMessage: 'Event must be a JSON object.',
+  messageSuffix: '.',
+  timestampRule: 'numeric',
+  abortEarly: false,
+} satisfies EnvelopeValidationOptions;
 
 export class EventIngestionService {
   constructor(
@@ -113,40 +128,30 @@ export class EventIngestionService {
   public validateEvent(event: unknown, contractType: string): EventValidationResult {
     const errors: EventValidationError[] = [];
 
-    if (!isRecord(event)) {
-      return {
-        isValid: false,
-        errors: [{ field: 'event', message: 'Event must be a JSON object.' }],
-      };
+    // Delegate the shared preamble to the helper. This produces the same
+    // set of field errors as the previous inline implementation, with the
+    // same messages and field names.
+    const preambleErrors = validateEventEnvelopePreamble(event, INGESTION_PREAMBLE_OPTIONS);
+    for (const err of preambleErrors) {
+      errors.push({ field: err.field, message: err.message });
     }
 
-    const { contractId, eventId, sequence, timestamp, payload } = event;
+    // Caller-specific follow-up: age check (numeric timestamp only) and
+    // contract-type-specific payload shape. Both early-exit when `event`
+    // is not a record, which the helper has already established.
+    if (isRecord(event)) {
+      const timestampNumber = toTimestampNumber(event.timestamp);
+      if (
+        timestampNumber !== null &&
+        !preambleErrors.some((e) => e.field === 'timestamp') &&
+        Date.now() - timestampNumber > this.config.maxEventAgeMs
+      ) {
+        errors.push({ field: 'timestamp', message: 'Event too old.' });
+      }
 
-    if (typeof contractId !== 'string' || contractId.trim().length === 0) {
-      errors.push({ field: 'contractId', message: 'contractId is required.' });
-    }
-
-    if (typeof eventId !== 'string' || eventId.trim().length === 0) {
-      errors.push({ field: 'eventId', message: 'eventId is required.' });
-    }
-
-    if (typeof sequence !== 'number' || !Number.isInteger(sequence) || sequence < 0) {
-      errors.push({ field: 'sequence', message: 'sequence must be a non-negative integer.' });
-    }
-
-    const timestampNumber = toTimestampNumber(timestamp);
-    if (timestampNumber === null) {
-      errors.push({ field: 'timestamp', message: 'timestamp must be a valid epoch number or numeric string.' });
-    } else if (Date.now() - timestampNumber > this.config.maxEventAgeMs) {
-      errors.push({ field: 'timestamp', message: 'Event too old.' });
-    }
-
-    if (!isRecord(payload)) {
-      errors.push({ field: 'payload', message: 'payload must be an object.' });
-    }
-
-    if (this.config.enableStrictValidation) {
-      errors.push(...this.validateContractSpecificPayload(contractType, payload));
+      if (this.config.enableStrictValidation) {
+        errors.push(...this.validateContractSpecificPayload(contractType, event.payload));
+      }
     }
 
     return {

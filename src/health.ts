@@ -1,6 +1,9 @@
 import { Router, Request, Response } from "express";
 import { dbProbe, redisProbe, stellarRpcProbe } from "./health/probes";
 import { isReadinessDraining } from "./shutdown";
+import { createRateLimiter } from "./middleware/rateLimiter";
+import { rateLimitConfig } from "./config/rateLimit";
+import { healthRateLimitKeyFn } from "./health/rateLimitKey";
 
 const READY_PROBE_TIMEOUT_MS = 3_000;
 const SERVICE_NAME = process.env.SERVICE_NAME ?? "talenttrust-backend";
@@ -35,11 +38,24 @@ function sanitizeProbe(probe: ProbeSnapshot): ProbeSnapshot {
 }
 
 /**
+ * Re-export the key function so callers that previously imported it from
+ * this module continue to work without change.
+ */
+export { healthRateLimitKeyFn } from "./health/rateLimitKey";
+
+/**
  * Health checks for blue-green deployments.
  * /health/live: process liveness only.
  * /health/ready: dependency readiness for traffic gating.
  */
 export const healthRouter = Router();
+
+const healthLimiter = createRateLimiter({
+  ...rateLimitConfig.health,
+  keyFn: healthRateLimitKeyFn,
+});
+
+healthRouter.use(healthLimiter);
 
 healthRouter.get("/live", (_req: Request, res: Response) => {
   res.setHeader("Cache-Control", "no-store");

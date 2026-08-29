@@ -319,6 +319,13 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional retry key. Exact retries replay the original response.
+          schema:
+            type: string
+            maxLength: 255
       requestBody:
         content:
           application/json:
@@ -354,6 +361,13 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional retry key. Exact retries replay the original response.
+          schema:
+            type: string
+            maxLength: 255
       requestBody:
         content:
           application/json:

@@ -6,6 +6,8 @@
  */
 
 import { CircuitBreaker, CircuitBreakerOptions, CircuitStats } from './CircuitBreaker';
+import { AppError } from '../errors/appError';
+import { auditService } from '../audit/service';
 
 export interface BreakerStatus extends CircuitStats {
   name: string;
@@ -63,19 +65,16 @@ export class CircuitBreakerRegistry {
   }
 
   /**
-   * Resets a breaker and records an audit entry.
+   * Resets a breaker by name and records an audit log entry.
+   *
    * @param name - Breaker name to reset.
    * @param performedBy - Identifier of the admin performing the reset (e.g., userId).
-   * @throws AppError with status 400 if breaker does not exist.
+   * @throws {@link AppError} with status 400 if breaker does not exist.
    */
   resetBreaker(name: string, performedBy: string): void {
     if (!this.reset(name)) {
-      // Import AppError from errors/appError.ts
-      const { AppError } = require('../errors/appError');
       throw new AppError(400, 'bad_request', `Circuit breaker "${name}" not found`);
     }
-    // Record audit entry
-    const { auditService } = require('../audit/service');
     auditService.log({
       action: 'ADMIN_ACTION',
       severity: 'INFO',

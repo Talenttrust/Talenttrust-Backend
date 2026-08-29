@@ -60,11 +60,17 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
     : isCorsPolicyError(error)
       ? new AppError(403, 'forbidden', 'Origin not allowed by CORS policy')
       : error;
-  const mapped = mapErrorToPayload(errorForPolicy, requestId);
+  const mapped = mapErrorToPayload(errorForPolicy, requestId, correlationId);
 
   const log = res.locals.log && typeof res.locals.log.error === 'function'
     ? res.locals.log
     : logger;
+
+  res.locals.errorCause = mapped.payload.error.code;
+
+  if (correlationId !== undefined) {
+    mapped.payload.error.correlationId = correlationId;
+  }
 
   log.error('API request failed', {
     err: {

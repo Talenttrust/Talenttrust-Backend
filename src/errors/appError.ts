@@ -17,6 +17,7 @@ export const APP_ERROR_CODES = {
   CONFLICT: 'conflict',
   CONTRACT_METADATA_MISMATCH: 'contract_metadata_mismatch',
   VALIDATION_ERROR: 'validation_error',
+  RESPONSE_CONTRACT_ERROR: 'response_contract_error',
 } as const;
 
 export interface ErrorPayload {
@@ -24,7 +25,9 @@ export interface ErrorPayload {
     code: string;
     message: string;
     requestId: string;
+    correlationId?: string;
     details?: ValidationIssue[];
+    correlationId?: string;
   };
 }
 
@@ -123,6 +126,20 @@ export class ContractMetadataMismatchError extends AppError {
 }
 
 /**
+ * Thrown when an outgoing response payload fails its declared schema.
+ *
+ * @remarks Indicates a server-side bug (e.g. a persisted record drifting
+ * from the public contract) rather than a client mistake, so it maps to a
+ * 500 and `expose: false` keeps the raw Zod detail out of the client
+ * response — it is still logged server-side by the global error handler.
+ */
+export class ResponseContractError extends AppError {
+  constructor(message = 'Response failed schema validation') {
+    super(500, APP_ERROR_CODES.RESPONSE_CONTRACT_ERROR, message, false);
+  }
+}
+
+/**
  * Validation error - business rule validation failure.
  */
 export class ValidationError extends AppError {
@@ -158,6 +175,7 @@ function mapZodErrorToDetails(error: ZodError): ValidationIssue[] {
 export function mapErrorToPayload(
   error: unknown,
   requestId: string,
+  correlationId?: string,
 ): { statusCode: number; payload: ErrorPayload } {
   if (error instanceof AppError) {
     const message = error.expose
@@ -171,6 +189,7 @@ export function mapErrorToPayload(
           code: error.code,
           message,
           requestId,
+          ...(correlationId !== undefined && { correlationId }),
         },
       },
     };
@@ -184,6 +203,7 @@ export function mapErrorToPayload(
           code: 'validation_error',
           message: safeMessageForCode('validation_error'),
           requestId,
+          ...(correlationId !== undefined && { correlationId }),
           details: mapZodErrorToDetails(error),
         },
       },
@@ -197,6 +217,7 @@ export function mapErrorToPayload(
         code: 'internal_error',
         message: safeMessageForCode('internal_error'),
         requestId,
+        ...(correlationId !== undefined && { correlationId }),
       },
     },
   };

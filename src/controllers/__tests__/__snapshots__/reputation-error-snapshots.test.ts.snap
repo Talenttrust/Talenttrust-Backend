@@ -1,0 +1,50 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`reputation error-response snapshots 400 validation error shape 1`] = `
+{
+  "error": {
+    "code": "validation_error",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": [
+          "rating",
+        ],
+      },
+    ],
+    "message": "Request validation failed",
+    "requestId": "req-001",
+  },
+}
+`;
+
+exports[`reputation error-response snapshots 404 not-found error shape 1`] = `
+{
+  "error": {
+    "code": "not_found",
+    "message": "Reputation profile not found",
+    "requestId": "req-002",
+  },
+}
+`;
+
+exports[`reputation error-response snapshots 409 conflict error shape 1`] = `
+{
+  "error": {
+    "code": "conflict",
+    "message": "Reputation rating already exists for this contract",
+    "requestId": "req-003",
+  },
+}
+`;
+
+exports[`reputation error-response snapshots 500 internal-server-error shape 1`] = `
+{
+  "error": {
+    "code": "internal_error",
+    "message": "An unexpected error occurred",
+    "requestId": "req-004",
+  },
+}
+`;

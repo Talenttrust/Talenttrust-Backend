@@ -14,11 +14,14 @@ export interface IdempotencyStore {
   size(): number;
   clear(): void;
   purgeExpired(now?: Date): number;
+  destroy(): void;
 }
 
 export interface IdempotencyStoreConfig {
   ttlMs?: number;
   clock?: () => Date;
+  sweepIntervalMs?: number;
+  maxSize?: number;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
@@ -39,10 +42,22 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly records = new Map<string, IdempotencyRecord>();
   private readonly ttlMs: number;
   private readonly clock: () => Date;
+  private readonly maxSize: number;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: IdempotencyStoreConfig = {}) {
     this.ttlMs = config.ttlMs ?? DEFAULT_TTL_MS;
     this.clock = config.clock ?? (() => new Date());
+    this.maxSize = config.maxSize ?? 10000;
+    
+    const sweepIntervalMs = config.sweepIntervalMs ?? 60_000;
+    if (sweepIntervalMs > 0) {
+      const timer = setInterval(() => this.purgeExpired(), sweepIntervalMs);
+      if (typeof (timer as any).unref === 'function') {
+        (timer as any).unref();
+      }
+      this.sweepTimer = timer;
+    }
   }
 
   get<TResult = unknown>(key: string): IdempotencyRecord<TResult> | undefined {
@@ -72,6 +87,17 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   }
 
   set<TResult>(record: IdempotencyRecord<TResult>): void {
+    if (this.records.size >= this.maxSize && !this.records.has(record.key)) {
+      this.purgeExpired();
+      if (this.records.size >= this.maxSize) {
+        // Fallback: remove oldest entry (first in map iteration)
+        const firstKey = this.records.keys().next().value;
+        if (firstKey !== undefined) {
+          this.records.delete(firstKey);
+        }
+      }
+    }
+
     const now = this.clock();
     const expiresAt = record.expiresAt ?? new Date(now.getTime() + this.ttlMs);
     this.records.set(record.key, {
@@ -94,6 +120,14 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
       }
     }
     return purged;
+  }
+
+  destroy(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+    this.records.clear();
   }
 }
 

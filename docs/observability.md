@@ -186,6 +186,12 @@ All label values on every exported series originate exclusively from one of thes
 - Timestamps or sequence numbers
 - Any unbounded runtime strings
 
+Reputation instrumentation follows the same rule. Its labels are limited to the
+two operation names, three status classes, HTTP status codes, and a finite error
+cause enumeration. Its structured completion event is `reputation_request` and
+contains method, operation, status, status code, error cause, and duration only;
+the request path and body are intentionally absent.
+
 ---
 
 ## Exported Metrics Catalog
@@ -196,11 +202,19 @@ All label values on every exported series originate exclusively from one of thes
 |-------------|------|--------|------|-------------|---------------|-------------------|
 | `http_requests_total` | Counter | `method`, `route`, `status_code` | total (dimensionless count) | Total number of HTTP requests. | `src/observability/metrics-service.ts` | N/A |
 | `http_request_duration_seconds` | Histogram | `method`, `route`, `status_code` | seconds | Duration of HTTP requests in seconds. Measures end-to-end request latency. | `src/observability/metrics-service.ts` | `0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, +Inf` |
+| `auth_requests_total` | Counter | `operation`, `status_code` | total (dimensionless count) | Authentication endpoint requests grouped by a bounded operation and HTTP status. | `src/observability/metrics-service.ts` | N/A |
+| `auth_request_duration_seconds` | Histogram | `operation`, `status_code` | seconds | End-to-end authentication endpoint request duration. | `src/observability/metrics-service.ts` | `0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, +Inf` |
+| `auth_errors_total` | Counter | `operation`, `cause` | total (dimensionless count) | Authentication endpoint errors grouped by a finite, non-PII cause. | `src/observability/metrics-service.ts` | N/A |
+| `reputation_requests_total` | Counter | `operation`, `status`, `status_code`, `error_cause` | total (dimensionless count) | Reputation endpoint requests classified into success, client error, or server error with bounded causes. | `src/observability/metrics-service.ts` | N/A |
+| `reputation_request_duration_seconds` | Histogram | `operation`, `status`, `status_code`, `error_cause` | seconds | End-to-end reputation endpoint request duration. | `src/observability/metrics-service.ts` | `0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, +Inf` |
+| `reputation_errors_total` | Counter | `operation`, `error_cause` | total (dimensionless count) | Reputation endpoint errors grouped by bounded cause. | `src/observability/metrics-service.ts` | N/A |
 | `service_health_status` | Gauge | `service` | dimensionless (encoded: `2=up`, `1=degraded`, `0=down`) | Current service health status based on runtime signals and dependency checks. See Health Status section for encoding details. | `src/observability/health-service.ts` | N/A |
 | `webhook_deliveries_total` | Counter | `outcome` | total (dimensionless count) | Total webhook delivery attempts by outcome. Possible outcomes: `success`, `failure`, `dlq`. Incremented by MetricsService. | `src/observability/metrics-service.ts` | N/A |
 | `webhook_dlq_depth` | Gauge | (no labels) | entries | Current number of entries in the webhook dead-letter queue. Represents absolute count, not a delta. Set by MetricsService. | `src/observability/metrics-service.ts` | N/A |
 | `webhook_rate_limit_tokens` | Gauge | `provider_id` | tokens | Current token count per provider in the rate-limiter bucket. Provider IDs are redacted to first 4 characters + `****`. | `src/observability/metrics-service.ts` | N/A |
 | `webhook_rate_limit_queue_depth` | Gauge | `provider_id` | entries | Current queue depth (number of waiting deliveries) per provider in the rate-limiter. Provider IDs are redacted to first 4 characters + `****`. | `src/observability/metrics-service.ts` | N/A |
+| `disputes_requests_total` | Counter | `method`, `route`, `status_code`, `error_cause` | total (dimensionless count) | Total disputes API requests. `error_cause` is a finite enum: `success`, `4xx_client_error`, `5xx_server_error`, `unknown`. Route labels use Express templates (never concrete IDs). | `src/observability/metrics-service.ts` | N/A |
+| `disputes_request_duration_seconds` | Histogram | `method`, `route`, `status_code`, `error_cause` | seconds | Duration of disputes API requests in seconds. | `src/observability/metrics-service.ts` | `0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, +Inf` |
 | `webhook_dlq_operations_total` | Counter | `operation` | total (dimensionless count) | Total number of webhook DLQ core operations. Possible operations: `enqueue`, `drop_overflow`, `drop_poison`. Incremented by `src/utils/webhookMetrics.ts`. | `src/utils/webhookMetrics.ts` | N/A |
 | `webhook_dlq_replays_total` | Counter | `outcome` | total (dimensionless count) | Total tracking counts of webhook DLQ manual or batch replay jobs executed. Possible outcomes: `success`, `failed`, `idempotent_noop`, `error`. Incremented by `src/utils/webhookMetrics.ts`. | `src/utils/webhookMetrics.ts` | N/A |
 | `webhook_delivery_attempts_total` | Counter | `status`, `provider`, `reason` | total (dimensionless count) | Total number of webhook delivery attempts. Registered via `createWebhookMetrics()` factory in `src/webhookMetrics.ts`. | `src/webhookMetrics.ts` | N/A |

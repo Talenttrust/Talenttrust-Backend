@@ -6,31 +6,35 @@
  * the entire table into memory at once.
  */
 
-import { ReputationRecomputePayload, JobResult } from '../types';
-import { ReputationService } from '../../services/reputation.service';
-import { reputationStore } from '../../models/reputation.store';
-import { reputationCheckpointStore, RecomputeCheckpoint } from '../../models/reputation-checkpoint.store';
-import { ReputationRepository } from '../../repositories/reputationRepository';
-import { createLogger } from '../../logger';
+import { ReputationRecomputePayload, JobResult } from "../types";
+import { ReputationService } from "../../services/reputation.service";
+import { reputationStore } from "../../models/reputation.store";
+import {
+  reputationCheckpointStore,
+  RecomputeCheckpoint,
+} from "../../models/reputation-checkpoint.store";
+import { ReputationRepository } from "../../repositories/reputationRepository";
+import { createLogger } from "../../logger";
 
 /**
- * Async generator that yields one page of distinct subject IDs at a time from
- * the reputation_entries table, stopping when the store returns an empty page.
+ * Async generator that yields one page of distinct target IDs at a time from
+ * the reputation_entries table, stopping when the repository returns an empty page.
  *
  * @param repo      - Instantiated ReputationRepository.
  * @param pageSize  - Rows per page (matches job batchSize).
  */
-async function* freelancerIdPages(
+async function* targetIdPages(
   repo: ReputationRepository,
-  pageSize: number
+  pageSize: number,
 ): AsyncGenerator<string[]> {
-  let offset = 0;
+  let pageNumber = 0;
   while (true) {
+    const offset = pageNumber * pageSize;
     const page = repo.getDistinctTargetIdPage(pageSize, offset);
     if (page.length === 0) break;
     yield page;
     if (page.length < pageSize) break; // last page
-    offset += pageSize;
+    pageNumber += 1;
   }
 }
 
@@ -48,27 +52,28 @@ async function* freelancerIdPages(
  */
 export async function processReputationRecompute(
   payload: ReputationRecomputePayload,
-  repo: ReputationRepository
+  repo: ReputationRepository,
 ): Promise<JobResult> {
   const jobId = `recompute-${Date.now()}`;
   const batchSize = payload.batchSize ?? 100;
   const forceRecompute = payload.forceRecompute ?? false;
 
   const log = createLogger({
-    processor: 'reputation-recompute',
+    processor: "reputation-recompute",
     ...(payload.correlationId && { correlationId: payload.correlationId }),
     ...(payload.requestId && { requestId: payload.requestId }),
   });
 
-  log.info('Starting reputation recompute job', { jobId });
+  log.info("Starting reputation recompute job", { jobId });
 
   // --- checkpoint wiring ---
   let checkpoint: RecomputeCheckpoint | undefined;
   if (payload.resumeFromCheckpoint !== false) {
     const active = reputationCheckpointStore.getActiveCheckpoints();
-    checkpoint = active.length > 0
-      ? active[0]
-      : reputationCheckpointStore.createCheckpoint(jobId, 0);
+    checkpoint =
+      active.length > 0
+        ? active[0]
+        : reputationCheckpointStore.createCheckpoint(jobId, 0);
   } else {
     checkpoint = reputationCheckpointStore.createCheckpoint(jobId, 0);
   }
@@ -76,7 +81,7 @@ export async function processReputationRecompute(
   let totalProcessed = 0;
   let hasAnyId = false;
 
-  for await (const page of freelancerIdPages(repo, batchSize)) {
+  for await (const page of targetIdPages(repo, batchSize)) {
     hasAnyId = true;
 
     for (const targetId of page) {
@@ -84,7 +89,7 @@ export async function processReputationRecompute(
         const profile = ReputationService.getProfile(targetId);
 
         if (!forceRecompute && isProfileUpToDate(profile.lastUpdated)) {
-          log.info('Profile up to date, skipping', { targetId });
+          log.info("Profile up to date, skipping", { targetId });
           continue;
         }
 
@@ -95,26 +100,28 @@ export async function processReputationRecompute(
         reputationCheckpointStore.updateProgress(checkpoint.jobId, targetId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.warn('Failed to recompute reputation for subject; skipping', { msg });
+        log.warn("Failed to recompute reputation for subject; skipping", {
+          msg,
+        });
         // per-subject isolation — continue with next subject
       }
     }
 
-    log.info('Batch processed', { totalProcessed });
+    log.info("Batch processed", { totalProcessed });
   }
 
   if (!hasAnyId) {
-    log.info('No subjects found to recompute');
+    log.info("No subjects found to recompute");
     reputationCheckpointStore.markCompleted(checkpoint.jobId);
     return {
       success: true,
-      message: 'No freelancers found to recompute',
+      message: "No freelancers found to recompute",
       data: { totalProcessed: 0, totalFreelancers: 0 },
     };
   }
 
   reputationCheckpointStore.markCompleted(checkpoint.jobId);
-  log.info('Reputation recompute job completed', { jobId, totalProcessed });
+  log.info("Reputation recompute job completed", { jobId, totalProcessed });
 
   return {
     success: true,

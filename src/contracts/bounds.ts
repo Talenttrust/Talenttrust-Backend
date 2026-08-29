@@ -8,6 +8,9 @@ import { z } from 'zod';
 // Change via code review; no runtime toggle to avoid misconfiguration risk.
 export const MAX_MILESTONES_PER_CONTRACT = 20;
 export const MAX_CONTRACT_AMOUNT_STROOPS = 100_000_000_000_000; // 10 000 000 XLM
+// Bounds free-text contract terms to a reasonable size, preventing oversized
+// payloads (e.g. on dispute-triggering updates) from reaching the store.
+export const MAX_CONTRACT_TERMS_LENGTH = 5000;
 
 export interface ContractBounds {
   maxMilestonesPerContract: number;
@@ -47,8 +50,21 @@ export type Milestone = z.infer<typeof milestoneSchema>;
  */
 export function validateContractBounds(
   budget: number,
-  milestones?: Milestone[],
+  milestones?: Milestone[] | null,
 ): { valid: true } | { valid: false; error: string } {
+  // Defensive guard: this function's entire purpose is to protect against
+  // malformed/malicious input reaching the escrow contract, so it must not
+  // rely on an upstream caller (e.g. the DTO/Zod layer) having already
+  // validated types. A NaN/Infinity/non-numeric budget must never be
+  // reported as valid — `NaN > x` and `undefined > x` are always false in
+  // JS, which previously let these silently pass the cap check below.
+  if (typeof budget !== 'number' || !Number.isFinite(budget)) {
+    return {
+      valid: false,
+      error: 'Budget must be a finite number',
+    };
+  }
+
   if (budget > MAX_CONTRACT_AMOUNT_STROOPS) {
     return {
       valid: false,
@@ -56,7 +72,16 @@ export function validateContractBounds(
     };
   }
 
-  if (milestones !== undefined) {
+  // `null` is treated the same as `undefined` (no milestones to validate) —
+  // a common, reasonable shape for an explicit "no milestones" JSON payload.
+  if (milestones !== undefined && milestones !== null) {
+    if (!Array.isArray(milestones)) {
+      return {
+        valid: false,
+        error: 'Milestones must be an array',
+      };
+    }
+
     if (milestones.length > MAX_MILESTONES_PER_CONTRACT) {
       return {
         valid: false,
@@ -66,6 +91,16 @@ export function validateContractBounds(
 
     let total = 0;
     for (const m of milestones) {
+      // Regression guard: a null/undefined/non-object array entry (e.g.
+      // `[null, undefined, 42]`) previously threw `Cannot read properties
+      // of null (reading 'amount')` instead of returning a validation error.
+      if (m === null || typeof m !== 'object' || !Number.isFinite(m.amount)) {
+        return {
+          valid: false,
+          error: 'Each milestone must be an object with a finite numeric amount',
+        };
+      }
+
       total += m.amount;
       if (!Number.isFinite(total) || total > MAX_CONTRACT_AMOUNT_STROOPS) {
         return {

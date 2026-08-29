@@ -38,12 +38,14 @@
 import { AuditService, auditService } from './service';
 import { redactBody, REDACTED } from './redact';
 import type { AuditLogRepository } from './repository';
+import type { AuditExportService, AuditExportResult } from './exportService';
 import type {
   AuditAction,
   AuditEntry,
   AuditQuery,
   CreateAuditEntryInput,
   IntegrityReport,
+  AuditQueryResult,
 } from './types';
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
@@ -112,6 +114,14 @@ function makeMockRepository(): MockRepository {
         valid: true,
         totalEntries: repo.appendedInputs.length,
         checkedAt: FROZEN_TIMESTAMP,
+      };
+    },
+    queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
+      const entries = repo.query(query);
+      return {
+        entries,
+        count: entries.length,
+        limit: query.limit ?? 50,
       };
     },
   };
@@ -472,6 +482,42 @@ describe('AuditService — convenience wrappers', () => {
       correlationId: 'trace-42',
     });
   });
+
+  it('logDisputeEvent: DISPUTE_CREATED uses INFO severity, resource="dispute"', () => {
+    service.logDisputeEvent('DISPUTE_CREATED', 'user-1', 'dispute-1', { reason: 'Test' });
+    expect(repo.appendedInputs[0]).toMatchObject({
+      action: 'DISPUTE_CREATED',
+      severity: 'INFO',
+      actor: 'user-1',
+      resource: 'dispute',
+      resourceId: 'dispute-1',
+      metadata: { reason: 'Test' },
+    });
+  });
+
+  it('logDisputeEvent: DISPUTE_UPDATED uses WARNING severity', () => {
+    service.logDisputeEvent('DISPUTE_UPDATED', 'admin-1', 'dispute-2', {});
+    expect(repo.appendedInputs[0].severity).toBe('WARNING');
+  });
+
+  it('logDisputeEvent: DISPUTE_DELETED uses INFO severity', () => {
+    service.logDisputeEvent('DISPUTE_DELETED', 'admin-1', 'dispute-3', {});
+    expect(repo.appendedInputs[0].severity).toBe('INFO');
+  });
+
+  it('logDisputeEvent propagates context (ipAddress, correlationId)', () => {
+    service.logDisputeEvent(
+      'DISPUTE_CREATED',
+      'user-1',
+      'dispute-1',
+      {},
+      { ipAddress: '10.0.0.1', correlationId: 'trace-dispute' },
+    );
+    expect(repo.appendedInputs[0]).toMatchObject({
+      ipAddress: '10.0.0.1',
+      correlationId: 'trace-dispute',
+    });
+  });
 });
 
 // ─── 5. Read-side delegation ────────────────────────────────────────────────
@@ -528,5 +574,257 @@ describe('auditService singleton', () => {
     expect(typeof auditService.stream).toBe('function');
     expect(typeof auditService.count).toBe('function');
     expect(typeof auditService.verifyIntegrity).toBe('function');
+    expect(typeof auditService.createEntry).toBe('function');
+    expect(typeof auditService.validateAndParseQuery).toBe('function');
+    expect(typeof auditService.queryLogs).toBe('function');
+    expect(typeof auditService.exportAuditLogs).toBe('function');
+    expect(typeof auditService.checkIntegrity).toBe('function');
+    expect(typeof auditService.getEntry).toBe('function');
   });
 });
+
+// ─── 7. Extracted Business Logic Methods ────────────────────────────────────
+
+describe('AuditService — extracted business logic & query parsing', () => {
+  describe('createEntry', () => {
+    it('throws error when required fields are missing', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      const invalidInputs: Partial<CreateAuditEntryInput>[] = [
+        { severity: 'INFO', actor: 'user1', resource: 'contract', resourceId: 'c1' },
+        { action: 'CONTRACT_CREATED', actor: 'user1', resource: 'contract', resourceId: 'c1' },
+        { action: 'CONTRACT_CREATED', severity: 'INFO', resource: 'contract', resourceId: 'c1' },
+        { action: 'CONTRACT_CREATED', severity: 'INFO', actor: 'user1', resourceId: 'c1' },
+        { action: 'CONTRACT_CREATED', severity: 'INFO', actor: 'user1', resource: 'contract' },
+      ];
+
+      for (const input of invalidInputs) {
+        expect(() => service.createEntry(input as CreateAuditEntryInput)).toThrow(
+          'Missing required fields: action, severity, actor, resource, resourceId',
+        );
+      }
+    });
+
+    it('persists and returns entry when all required fields are present', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      const input: CreateAuditEntryInput = {
+        action: 'CONTRACT_CREATED',
+        severity: 'INFO',
+        actor: 'user1',
+        resource: 'contract',
+        resourceId: 'c1',
+        metadata: {},
+      };
+
+      const entry = service.createEntry(input);
+      expect(entry.action).toBe('CONTRACT_CREATED');
+      expect(repo.appendedInputs).toHaveLength(1);
+    });
+  });
+
+  describe('validateAndParseQuery', () => {
+    const service = new AuditService(makeMockRepository());
+
+    it('validates action field', () => {
+      expect(() =>
+        service.validateAndParseQuery({ action: 'INVALID_ACTION' }, { maxLimit: 100 }),
+      ).toThrow('Invalid action: INVALID_ACTION');
+
+      const parsed = service.validateAndParseQuery({ action: 'CONTRACT_CREATED' }, { maxLimit: 100 });
+      expect(parsed.query.action).toBe('CONTRACT_CREATED');
+    });
+
+    it('validates severity field', () => {
+      expect(() =>
+        service.validateAndParseQuery({ severity: 'SUPER_CRITICAL' }, { maxLimit: 100 }),
+      ).toThrow('Invalid severity: SUPER_CRITICAL');
+
+      const parsed = service.validateAndParseQuery({ severity: 'CRITICAL' }, { maxLimit: 100 });
+      expect(parsed.query.severity).toBe('CRITICAL');
+    });
+
+    it('parses limit and clamps to maxLimit', () => {
+      expect(() =>
+        service.validateAndParseQuery({ limit: '0' }, { maxLimit: 100 }),
+      ).toThrow('Invalid limit');
+
+      expect(() =>
+        service.validateAndParseQuery({ limit: '-5' }, { maxLimit: 100 }),
+      ).toThrow('Invalid limit');
+
+      expect(() =>
+        service.validateAndParseQuery({ limit: 'abc' }, { maxLimit: 100 }),
+      ).toThrow('Invalid limit');
+
+      const parsedClamped = service.validateAndParseQuery({ limit: '200' }, { maxLimit: 100 });
+      expect(parsedClamped.limit).toBe(100);
+
+      const parsedDefault = service.validateAndParseQuery({}, { defaultLimit: 50, maxLimit: 100 });
+      expect(parsedDefault.limit).toBe(50);
+    });
+
+    it('parses offset', () => {
+      expect(() =>
+        service.validateAndParseQuery({ offset: '-1' }, { maxLimit: 100 }),
+      ).toThrow('Invalid offset');
+
+      expect(() =>
+        service.validateAndParseQuery({ offset: 'xyz' }, { maxLimit: 100 }),
+      ).toThrow('Invalid offset');
+
+      const parsed = service.validateAndParseQuery({ offset: '25' }, { maxLimit: 100 });
+      expect(parsed.offset).toBe(25);
+    });
+
+    it('parses optional ISO date timestamps', () => {
+      expect(() =>
+        service.validateAndParseQuery({ from: 'invalid-date' }, { maxLimit: 100 }),
+      ).toThrow('Invalid from timestamp');
+
+      expect(() =>
+        service.validateAndParseQuery({ to: 'invalid-date' }, { maxLimit: 100 }),
+      ).toThrow('Invalid to timestamp');
+
+      const parsed = service.validateAndParseQuery(
+        { from: '2026-01-01T00:00:00Z', to: '2026-01-31T23:59:59Z' },
+        { maxLimit: 100 },
+      );
+      expect(parsed.query.from).toBe('2026-01-01T00:00:00.000Z');
+      expect(parsed.query.to).toBe('2026-01-31T23:59:59.000Z');
+    });
+
+    it('validates cursor format', () => {
+      expect(() =>
+        service.validateAndParseQuery({ cursor: 'not-a-valid-cursor' }, { maxLimit: 100 }),
+      ).toThrow('Invalid cursor format');
+    });
+  });
+
+  describe('queryLogs', () => {
+    it('returns offset-based result when cursor is not provided', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      const mockEntry = service.log({
+        action: 'CONTRACT_CREATED',
+        severity: 'INFO',
+        actor: 'user1',
+        resource: 'contract',
+        resourceId: 'c1',
+        metadata: {},
+      });
+
+      jest.spyOn(repo, 'query').mockReturnValue([mockEntry]);
+
+      const result = service.queryLogs({ limit: '10', offset: '0' });
+      expect(result).toMatchObject({
+        count: 1,
+        limit: 10,
+        offset: 0,
+      });
+      expect(result.entries).toHaveLength(1);
+    });
+
+    it('returns cursor-based result when cursor is provided', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      jest.spyOn(repo, 'queryWithCursor').mockReturnValue({
+        entries: [],
+        count: 0,
+        limit: 10,
+        nextCursor: undefined,
+      });
+
+      const validCursor = Buffer.from(JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', id: '123' })).toString('base64url');
+      const result = service.queryLogs({ cursor: validCursor });
+
+      expect(result).toHaveProperty('nextCursor');
+      expect(result.limit).toBe(10);
+    });
+  });
+
+  describe('exportAuditLogs', () => {
+    it('orchestrates NDJSON export and logs compliance ADMIN_ACTION entry', async () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      const mockReadStream = {} as any;
+      const mockExportResult: AuditExportResult = {
+        filePath: '/tmp/export.ndjson',
+        fileName: 'export.ndjson',
+        bytesWritten: 1234,
+        recordCount: 5,
+        openReadStream: jest.fn().mockReturnValue(mockReadStream),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const mockExportService: AuditExportService = {
+        createNdjsonExport: jest.fn().mockResolvedValue(mockExportResult),
+      } as any;
+
+      const result = await service.exportAuditLogs(
+        { action: 'CONTRACT_CREATED', limit: '100' },
+        { actor: 'admin-user', ipAddress: '192.168.1.1', correlationId: 'req-123' },
+        mockExportService,
+      );
+
+      expect(result).toBe(mockExportResult);
+      expect(mockExportService.createNdjsonExport).toHaveBeenCalledWith({
+        action: 'CONTRACT_CREATED',
+        limit: 100,
+      });
+
+      expect(repo.appendedInputs).toHaveLength(1);
+      const auditLog = repo.appendedInputs[0];
+      expect(auditLog.action).toBe('ADMIN_ACTION');
+      expect(auditLog.severity).toBe('CRITICAL');
+      expect(auditLog.actor).toBe('admin-user');
+      expect(auditLog.resource).toBe('audit-log');
+      expect(auditLog.resourceId).toBe('export');
+      expect(auditLog.ipAddress).toBe('192.168.1.1');
+      expect(auditLog.correlationId).toBe('req-123');
+      expect(auditLog.metadata).toMatchObject({
+        operation: 'export',
+        format: 'ndjson',
+        recordCount: 5,
+        bytesWritten: 1234,
+      });
+    });
+  });
+
+  describe('checkIntegrity and getEntry', () => {
+    it('checkIntegrity maps valid:true to 200 and valid:false to 409', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+
+      const reportValid: IntegrityReport = { valid: true, totalEntries: 10, checkedAt: '2026-01-15T10:00:00.000Z' };
+      const reportInvalid: IntegrityReport = { valid: false, totalEntries: 10, firstCorruptedIndex: 2, firstCorruptedId: 'id-2', checkedAt: '2026-01-15T10:00:00.000Z' };
+
+      jest.spyOn(repo, 'verifyIntegrity').mockReturnValue(reportValid);
+      expect(service.checkIntegrity()).toEqual({
+        report: reportValid,
+        status: 200,
+      });
+
+      jest.spyOn(repo, 'verifyIntegrity').mockReturnValue(reportInvalid);
+      expect(service.checkIntegrity()).toEqual({
+        report: reportInvalid,
+        status: 409,
+      });
+    });
+
+    it('getEntry delegates to getById', () => {
+      const repo = makeMockRepository();
+      const service = new AuditService(repo);
+      const spy = jest.spyOn(repo, 'getById').mockReturnValue(undefined);
+
+      expect(service.getEntry('id-999')).toBeUndefined();
+      expect(spy).toHaveBeenCalledWith('id-999');
+    });
+  });
+});
+

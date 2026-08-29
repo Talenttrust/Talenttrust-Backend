@@ -15,6 +15,12 @@
 import type BetterSqlite3 from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { ConflictError } from '../errors/appError';
+import {
+  encodeCursor,
+  decodeCursor,
+  parseLimit,
+} from '../contracts/cursor.repository';
+import type { CursorPage, CursorPaginationInput } from '../contracts/cursor.types';
 
 /** Raw row shape returned from SQLite (snake_case columns). */
 interface ReputationRow {
@@ -149,6 +155,61 @@ export class ReputationRepository {
       .all(targetId);
     
     return rows.map(toReputationEntry);
+  }
+
+  /**
+   * Returns a cursor-paginated page of reputation entries for a target user.
+   *
+   * Pages are ordered newest-first by (created_at DESC, id DESC). The opaque
+   * cursor encodes the anchor row's `created_at` + `id` tuple.
+   *
+   * @param targetId - The target user's ID.
+   * @param input    - Optional {@link CursorPaginationInput} (limit defaults to 20, capped at 100).
+   * @returns A {@link CursorPage} with up to `limit` entries and a `nextCursor` (or null on the last page).
+   */
+  findByTargetIdPaginated(
+    targetId: string,
+    input: CursorPaginationInput = {},
+  ): CursorPage<ReputationEntry> {
+    const limit = parseLimit(input.limit);
+
+    let rows: ReputationRow[];
+
+    if (input.cursor) {
+      const pos = decodeCursor(input.cursor);
+
+      rows = this.db
+        .prepare<[string, string, string, string, number], ReputationRow>(
+          `SELECT * FROM reputation_entries
+           WHERE target_id = ?
+             AND (created_at < ? OR (created_at = ? AND id < ?))
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+        )
+        .all(targetId, pos.createdAt, pos.createdAt, pos.id, limit + 1);
+    } else {
+      rows = this.db
+        .prepare<[string, number], ReputationRow>(
+          `SELECT * FROM reputation_entries
+           WHERE target_id = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+        )
+        .all(targetId, limit + 1);
+    }
+
+    const hasNextPage = rows.length > limit;
+    const pageRows = hasNextPage ? rows.slice(0, limit) : rows;
+    const data = pageRows.map(toReputationEntry);
+
+    // Use mapped domain objects (camelCase) for cursor encoding — raw rows use snake_case
+    const lastEntry = data[data.length - 1];
+    const nextCursor =
+      hasNextPage && lastEntry
+        ? encodeCursor({ createdAt: lastEntry.createdAt, id: lastEntry.id })
+        : null;
+
+    return { data, nextCursor, hasNextPage, limit };
   }
 
   /**

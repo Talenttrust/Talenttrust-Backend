@@ -25,7 +25,7 @@ The backend includes dependency-level chaos testing to simulate upstream outages
 - On upstream failures with graceful degradation enabled, it returns a safe fallback payload with `degraded: true`.
 - If graceful degradation is disabled, it returns `503` with `contracts_unavailable`.
 
-### Configuration
+### Chaos Testing Configuration
 
 - `GRACEFUL_DEGRADATION_ENABLED=true|false` (default `true`)
 - `UPSTREAM_CONTRACTS_URL` (default `https://example.invalid/contracts`)
@@ -248,6 +248,7 @@ All sensitive metadata fields (`password`, `token`, `secret`, `credential`, `api
 
 ## Documentation
 
+- [Reputation Operations Runbook](docs/runbook-reputation.md)
 - [Backend Notification Services](./docs/backend/notifications.md)
 - [Outbound Notification Subsystem (channels, transports, persistence)](docs/email-notifications.md)
 - [Event Ingestion Idempotency](docs/EVENT_INGESTION_IDEMPOTENCY.md)
@@ -257,6 +258,7 @@ All sensitive metadata fields (`password`, `token`, `secret`, `credential`, `api
 - [Escrow Contract Lifecycle & Bounds](docs/contracts-lifecycle.md)
 - [Contract Event Indexer Cursor Model & Replay Protection](INDEXER.md)
 - [Data Retention, Archival, and Purge Lifecycle](docs/DATA_RETENTION.md)
+- [Disputes Operations Runbook](docs/runbook-disputes.md) — Configuration, failure modes, alerts, and recovery procedures for the disputes subsystem
 
 ## CI/CD
 
@@ -370,10 +372,32 @@ All queue processors (`src/queue/processors/`) use the structured logger from `s
 | Concern | Rule |
 |---|---|
 | Logger instantiation | Each processor calls `createLogger({ processor: '<name>', ...correlationCtx })` at the top of its handler, binding `correlationId` and `requestId` from the job payload. |
-| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. |
+| Log record shape | Every record carries `timestamp`, `level`, `message`, and `service: "talenttrust-backend"`. Processor-specific context (e.g. `processor`, `action`, `network`) is bound at logger creation time and appears on every record from that processor instance. |
 | PII at info/warn level | Recipient email addresses, `userId`, and `contractId` must **not** appear in `message` strings at `info` or `warn` level. They may be logged at `debug` level as structured fields. |
+| Sensitive payload fields | Any payload logged at debug level must pass through `redactObject` / `redactPayload` from `src/utils/redact.ts` before inclusion. Keys matching `secret`, `token`, `password`, `authorization`, `key`, `signature`, `cookie`, and `nonce` are automatically replaced with `[REDACTED]` by the logger's built-in sanitizer. |
 | Error path | Validation errors emit a `warn` record (via `log.warn(...)`) **before** throwing, so observers can correlate the rejection with the job's correlation context. |
-| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). Never use `Date.now() + Math.random()` for IDs. |
+| Job IDs | Email tracking IDs are generated with `generateEmailId()` (uses `crypto.randomUUID()`). **Never** use `Date.now() + Math.random()` for IDs — this approach is collision-prone under load. |
+
+### ID generation
+
+`generateEmailId()` is exported from `email-processor.ts` and documented with TSDoc:
+
+```ts
+/**
+ * Generate a cryptographically-strong unique tracking ID for an outbound email.
+ *
+ * Uses `crypto.randomUUID()` (RFC 4122 v4) so that IDs are collision-resistant
+ * even under rapid successive calls, unlike the previous `Date.now() +
+ * Math.random()` approach which could produce duplicates under load.
+ *
+ * @returns A UUID v4 string prefixed with `email_` for readability in logs.
+ */
+export function generateEmailId(): string {
+  return `email_${crypto.randomUUID()}`;
+}
+```
+
+Uniqueness is validated in tests by generating 50 IDs in rapid succession and asserting the full set is deduplicated.
 
 ### Example — adding a new processor
 
@@ -388,16 +412,44 @@ export async function processMyJob(payload: MyPayload): Promise<JobResult> {
   });
 
   if (!isValid(payload)) {
-    log.warn('Validation failed: reason');   // structured, no PII
+    log.warn('Validation failed: reason');   // structured, no PII in message
     throw new Error('...');
   }
 
   log.info('Job started');
-  // ...
+  // log sensitive fields only at debug, never in message strings
+  log.debug('Processing with context', { internalId: payload.id });
   log.info('Job completed', { someMetric: 42 });
   return { success: true };
 }
 ```
+
+### Log record example
+
+```json
+{
+  "timestamp": "2026-07-24T22:52:00.001Z",
+  "level": "info",
+  "message": "Email notification delivered",
+  "service": "talenttrust-backend",
+  "processor": "email",
+  "emailId": "email_3f1a2b4c-...",
+  "subject": "Welcome",
+  "correlationId": "corr-abc",
+  "requestId": "req-123"
+}
+```
+
+### Testing convention
+
+Processor tests use `setWriteRecordImpl` from `src/logger.ts` to intercept log records as plain objects rather than parsing serialised output. This allows assertions on:
+
+- Required base field presence (`timestamp`, `level`, `message`, `service`)
+- Correlation context propagation (`correlationId`, `requestId`)
+- PII absence in `info`/`warn` message strings (email addresses, `userId`, `contractId`)
+- `warn` emission before throws on validation failure
+- Unique ID generation across rapid successive calls
+
 
 ## Graceful shutdown and drain order
 
@@ -439,15 +491,22 @@ All configuration is managed through `src/config/` and validated at startup usin
 | `GREEN_PORT` | `3002` | Port for the 'green' backend |
 | `HTTP_METRICS_ROUTE_LABEL_LIMIT` | `100` | Maximum distinct HTTP route template labels before new routes are recorded as `other` |
 
+## Webhooks Feature Flag
 
-## API Endpoints
+| Variable | Default | Description |
+|---|---|---|
+| `WEBHOOKS_ENABLED` | `true` | Enable/disable the webhooks subsystem at runtime. When `false`, `WebhookService.trigger()` becomes a no-op (no subscriptions queried, no deliveries attempted, no DLQ writes), and the `/api/v1/webhook-subscriptions` router is not mounted (all subscription management endpoints return `404`). Omit the variable to keep webhooks enabled (safe default). |
 
-- `GET /health` - Health check
-- `GET /api/v1/contracts` - Get contracts
-- `GET /api/v1/reputation/:id` - Get freelancer reputation profile
-- `PUT /api/v1/reputation/:id` - Update freelancer reputation profile
+See [docs/webhooks.md](docs/webhooks.md) for full webhook documentation and [docs/backend/config.md](docs/backend/config.md) for all configuration options.
 
-See [docs/backend/reputation-api.md](docs/backend/reputation-api.md) for detailed Reputation API info.
+## Milestones Feature Flag
+
+| Variable | Default | Description |
+|---|---|---|
+| `MILESTONES_ENABLED` | `true` | Enable/disable the milestones feature at runtime. When `false`, any `milestones` field in a contract create/update request is silently stripped — no validation errors are raised. Omit the variable to keep the feature enabled (safe default). |
+
+See [docs/milestones.md — Feature Flag](docs/milestones.md#feature-flag-milestones_enabled) for full details.
+
 
 ## API Endpoints
 
@@ -526,8 +585,11 @@ Each probe reports one of three statuses:
 
 **Other Probes:**
 - `stellar-rpc`: Stellar/Soroban RPC reachability (5s timeout)
-- `queue`: BullMQ job queue health (degraded if failed jobs exceed threshold)
-- `circuit-breaker`: Reports open circuit breakers
+- `queue`: BullMQ job queue health (degraded if failed jobs exceed
+  `QUEUE_FAILED_THRESHOLD` or waiting backlog exceeds
+  `QUEUE_BACKLOG_THRESHOLD`; configurable via validated config)
+- `circuit-breaker`: Reports open circuit breakers (degraded if any
+  breaker is in OPEN state)
 - `env`: Verifies required environment variables
 
 **Production Security:**
@@ -544,35 +606,6 @@ or resource identifiers. Unmatched requests are recorded as `unmatched`.
 labels retained by `http_requests_total` and `http_request_duration_seconds`.
 After the cap is reached, newly observed route templates are recorded as
 `other`, while existing route labels, `method`, and `status_code` remain intact.
-
-### Contracts
-- `GET /api/v1/contracts` - List contracts (placeholder)
-
-### Contract Metadata
-- `POST /api/v1/contracts/:contractId/metadata` - Create metadata
-- `GET /api/v1/contracts/:contractId/metadata` - List metadata with pagination
-- `GET /api/v1/contracts/:contractId/metadata/:id` - Get single metadata
-- `PATCH /api/v1/contracts/:contractId/metadata/:id` - Update metadata
-- `DELETE /api/v1/contracts/:contractId/metadata/:id` - Delete metadata
-
-See [docs/backend/contract-metadata-api.md](docs/backend/contract-metadata-api.md) for detailed API documentation.
-
-## Authentication
-
-The API uses Bearer token authentication. Include the token in the Authorization header:
-
-```
-Authorization: Bearer <your-auth-token>
-```
-
-Demo tokens for testing:
-- `demo-admin-token` - Admin user with full access
-- `demo-user-token` - Regular user with limited access
-
-## API Endpoints
-
-### Health Check
-- `GET /health` - Service health status
 
 ### Contracts
 - `GET /api/v1/contracts` - List contracts (placeholder)

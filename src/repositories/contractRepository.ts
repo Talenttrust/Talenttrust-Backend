@@ -6,8 +6,18 @@ import {
   decodeCursor,
   parseLimit,
 } from "../contracts/cursor.repository";
-import type { CursorPage, CursorPaginationInput } from "../contracts/cursor.types";
+import type {
+  CursorPage,
+  CursorPaginationInput,
+} from "../contracts/cursor.types";
 import { VersionConflictError, NotFoundError } from "../errors/appError";
+import {
+  isSoftDeleted,
+  isPastRetentionWindow,
+  filterNotDeleted,
+  SoftDeleteRetentionError,
+  DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+} from "../utils/softDelete";
 
 /** Input shape for creating a new contract. */
 export interface CreateContractInput {
@@ -48,16 +58,26 @@ function assertValidContractStatus(status: ContractStatus): void {
  */
 export interface IContractRepository {
   create(data: CreateContractInput): Promise<Contract>;
-  findById(id: string): Promise<Contract | undefined>;
-  findAll(): Promise<Contract[]>;
-  findByClientId(clientId: string): Promise<Contract[]>;
-  findPage(input: CursorPaginationInput): Promise<CursorPage<Contract>>;
+  findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined>;
+  findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]>;
+  findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]>;
+  findPage(
+    input?: CursorPaginationInput & { includeDeleted?: boolean },
+  ): Promise<CursorPage<Contract>>;
   updateWithVersion(
     id: string,
     fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
     expectedVersion: number,
   ): Promise<Contract>;
-  delete(id: string): Promise<boolean>;
+  delete(id: string, now?: Date): Promise<boolean>;
+  restore(id: string, now?: Date, retentionDays?: number): Promise<Contract>;
+  purgeExpired(now?: Date, retentionDays?: number): Promise<number>;
 }
 
 /** Row shape as returned from SQLite (snake_case columns). */
@@ -70,6 +90,7 @@ interface ContractRow {
   status: string;
   version: number;
   created_at: string;
+  deleted_at?: string | null;
 }
 
 /** Maps a raw DB row to the domain Contract interface. */
@@ -83,6 +104,7 @@ function toContract(row: ContractRow): Contract {
     status: row.status as ContractStatus,
     version: row.version,
     createdAt: row.created_at,
+    deletedAt: row.deleted_at ?? null,
   };
 }
 
@@ -99,24 +121,33 @@ export class ContractRepository implements IContractRepository {
     this.db = db;
   }
 
-  async findAll(): Promise<Contract[]> {
-    const rows = this.db
-      .prepare<[], ContractRow>("SELECT * FROM contracts ORDER BY created_at DESC")
-      .all();
+  async findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts ORDER BY created_at DESC"
+      : "SELECT * FROM contracts WHERE deleted_at IS NULL ORDER BY created_at DESC";
+    const rows = this.db.prepare<[], ContractRow>(sql).all();
     return rows.map(toContract);
   }
 
-  async findById(id: string): Promise<Contract | undefined> {
-    const row = this.db
-      .prepare<[string], ContractRow>("SELECT * FROM contracts WHERE id = ?")
-      .get(id);
+  async findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts WHERE id = ?"
+      : "SELECT * FROM contracts WHERE id = ? AND deleted_at IS NULL";
+    const row = this.db.prepare<[string], ContractRow>(sql).get(id);
     return row ? toContract(row) : undefined;
   }
 
-  async findByClientId(clientId: string): Promise<Contract[]> {
-    const rows = this.db
-      .prepare<[string], ContractRow>("SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC")
-      .all(clientId);
+  async findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]> {
+    const sql = options?.includeDeleted
+      ? "SELECT * FROM contracts WHERE client_id = ? ORDER BY created_at DESC"
+      : "SELECT * FROM contracts WHERE client_id = ? AND deleted_at IS NULL ORDER BY created_at DESC";
+    const rows = this.db.prepare<[string], ContractRow>(sql).all(clientId);
     return rows.map(toContract);
   }
 
@@ -127,7 +158,9 @@ export class ContractRepository implements IContractRepository {
     assertValidContractStatus(status);
 
     this.db
-      .prepare<[string, string, string, string, number, string, number, string]>(
+      .prepare<
+        [string, string, string, string, number, string, number, string]
+      >(
         `INSERT INTO contracts
            (id, title, client_id, freelancer_id, amount, status, version, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -152,6 +185,7 @@ export class ContractRepository implements IContractRepository {
       status,
       createdAt,
       version: 0,
+      deletedAt: null,
     };
   }
 
@@ -166,14 +200,23 @@ export class ContractRepository implements IContractRepository {
     }
 
     const result = this.db
-      .prepare<[string | null, string | null, number | null, string | null, string, number]>(
+      .prepare<
+        [
+          string | null,
+          string | null,
+          number | null,
+          string | null,
+          string,
+          number,
+        ]
+      >(
         `UPDATE contracts
          SET title         = COALESCE(?, title),
              status        = COALESCE(?, status),
              amount        = COALESCE(?, amount),
              freelancer_id = COALESCE(?, freelancer_id),
              version       = version + 1
-         WHERE id = ? AND version = ?`,
+         WHERE id = ? AND version = ? AND deleted_at IS NULL`,
       )
       .run(
         fields.title ?? null,
@@ -191,37 +234,89 @@ export class ContractRepository implements IContractRepository {
     return (await this.findById(id))!;
   }
 
-  async delete(id: string): Promise<boolean> {
+  async delete(id: string, now: Date = new Date()): Promise<boolean> {
     const result = this.db
-      .prepare<[string]>("DELETE FROM contracts WHERE id = ?")
-      .run(id);
+      .prepare<[string, string]>(
+        "UPDATE contracts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+      )
+      .run(now.toISOString(), id);
     return result.changes > 0;
   }
 
-  async findPage(input: CursorPaginationInput = {}): Promise<CursorPage<Contract>> {
+  async restore(
+    id: string,
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<Contract> {
+    const existing = await this.findById(id, { includeDeleted: true });
+    if (!existing) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+    if (!isSoftDeleted(existing.deletedAt)) {
+      throw new Error(`Contract ${id} is not soft-deleted`);
+    }
+    if (isPastRetentionWindow(existing.deletedAt!, retentionDays, now)) {
+      throw new SoftDeleteRetentionError(
+        `Contract ${id} retention window of ${retentionDays} days has expired`,
+      );
+    }
+
+    this.db
+      .prepare<[string]>("UPDATE contracts SET deleted_at = NULL WHERE id = ?")
+      .run(id);
+
+    return (await this.findById(id, { includeDeleted: true }))!;
+  }
+
+  async purgeExpired(
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<number> {
+    const cutoffIso = new Date(
+      now.getTime() - retentionDays * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const result = this.db
+      .prepare<[string]>(
+        "DELETE FROM contracts WHERE deleted_at IS NOT NULL AND deleted_at <= ?",
+      )
+      .run(cutoffIso);
+    return result.changes;
+  }
+
+  async findPage(
+    input: CursorPaginationInput & { includeDeleted?: boolean } = {},
+  ): Promise<CursorPage<Contract>> {
     const limit = parseLimit(input.limit);
+    const includeDeleted = input.includeDeleted ?? false;
 
     let rows: ContractRow[];
 
     if (input.cursor) {
       const pos = decodeCursor(input.cursor);
-
-      rows = this.db
-        .prepare<[string, string, string, number], ContractRow>(
-          `SELECT * FROM contracts
+      const sql = includeDeleted
+        ? `SELECT * FROM contracts
            WHERE (created_at < ? OR (created_at = ? AND id < ?))
            ORDER BY created_at DESC, id DESC
-           LIMIT ?`,
-        )
+           LIMIT ?`
+        : `SELECT * FROM contracts
+           WHERE (created_at < ? OR (created_at = ? AND id < ?)) AND deleted_at IS NULL
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`;
+
+      rows = this.db
+        .prepare<[string, string, string, number], ContractRow>(sql)
         .all(pos.createdAt, pos.createdAt, pos.id, limit + 1);
     } else {
-      rows = this.db
-        .prepare<[number], ContractRow>(
-          `SELECT * FROM contracts
+      const sql = includeDeleted
+        ? `SELECT * FROM contracts
            ORDER BY created_at DESC, id DESC
-           LIMIT ?`,
-        )
-        .all(limit + 1);
+           LIMIT ?`
+        : `SELECT * FROM contracts
+           WHERE deleted_at IS NULL
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`;
+
+      rows = this.db.prepare<[number], ContractRow>(sql).all(limit + 1);
     }
 
     const hasNextPage = rows.length > limit;
@@ -263,6 +358,7 @@ export class InMemoryContractRepository implements IContractRepository {
       status,
       createdAt,
       version: 0,
+      deletedAt: null,
     };
 
     this.contracts.set(id, contract);
@@ -270,32 +366,52 @@ export class InMemoryContractRepository implements IContractRepository {
     return contract;
   }
 
-  async findById(id: string): Promise<Contract | undefined> {
-    return this.contracts.get(id);
+  async findById(
+    id: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract | undefined> {
+    const record = this.contracts.get(id);
+    if (!record) return undefined;
+    if (!options?.includeDeleted && isSoftDeleted(record.deletedAt)) {
+      return undefined;
+    }
+    return record;
   }
 
-  async findAll(): Promise<Contract[]> {
-    return Array.from(this.contracts.values()).sort((a, b) => {
+  async findAll(options?: { includeDeleted?: boolean }): Promise<Contract[]> {
+    const all = Array.from(this.contracts.values()).sort((a, b) => {
       const cmp = b.createdAt.localeCompare(a.createdAt);
       if (cmp !== 0) return cmp;
-      // Deterministic, insertion-order tie-break (most recently inserted first)
-      // so equal-timestamp contracts sort stably instead of by random UUID.
-      return (this.insertionOrder.get(b.id) ?? 0) - (this.insertionOrder.get(a.id) ?? 0);
+      return (
+        (this.insertionOrder.get(b.id) ?? 0) -
+        (this.insertionOrder.get(a.id) ?? 0)
+      );
     });
+    return options?.includeDeleted ? all : filterNotDeleted(all);
   }
 
-  async findByClientId(clientId: string): Promise<Contract[]> {
-    return Array.from(this.contracts.values()).filter((c) => c.clientId === clientId);
+  async findByClientId(
+    clientId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<Contract[]> {
+    const all = Array.from(this.contracts.values()).filter(
+      (c) => c.clientId === clientId,
+    );
+    return options?.includeDeleted ? all : filterNotDeleted(all);
   }
 
-  async findPage(input: CursorPaginationInput = {}): Promise<CursorPage<Contract>> {
+  async findPage(
+    input: CursorPaginationInput & { includeDeleted?: boolean } = {},
+  ): Promise<CursorPage<Contract>> {
     const limit = parseLimit(input.limit);
-    let sorted = await this.findAll();
+    let sorted = await this.findAll({ includeDeleted: input.includeDeleted });
 
     if (input.cursor) {
       const pos = decodeCursor(input.cursor);
       sorted = sorted.filter(
-        (c) => c.createdAt < pos.createdAt || (c.createdAt === pos.createdAt && c.id < pos.id),
+        (c) =>
+          c.createdAt < pos.createdAt ||
+          (c.createdAt === pos.createdAt && c.id < pos.id),
       );
     }
 
@@ -315,7 +431,7 @@ export class InMemoryContractRepository implements IContractRepository {
     fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
     expectedVersion: number,
   ): Promise<Contract> {
-    const existing = this.contracts.get(id);
+    const existing = await this.findById(id);
     if (!existing) {
       throw new NotFoundError(`Contract with id ${id} not found`);
     }
@@ -334,11 +450,59 @@ export class InMemoryContractRepository implements IContractRepository {
     return updated;
   }
 
-  async delete(id: string): Promise<boolean> {
-    return this.contracts.delete(id);
+  async delete(id: string, now: Date = new Date()): Promise<boolean> {
+    const record = this.contracts.get(id);
+    if (!record || isSoftDeleted(record.deletedAt)) {
+      return false;
+    }
+    record.deletedAt = now.toISOString();
+    return true;
+  }
+
+  async restore(
+    id: string,
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<Contract> {
+    const record = this.contracts.get(id);
+    if (!record) {
+      throw new NotFoundError(`Contract with id ${id} not found`);
+    }
+    if (!isSoftDeleted(record.deletedAt)) {
+      throw new Error(`Contract ${id} is not soft-deleted`);
+    }
+    if (isPastRetentionWindow(record.deletedAt!, retentionDays, now)) {
+      throw new SoftDeleteRetentionError(
+        `Contract ${id} retention window of ${retentionDays} days has expired`,
+      );
+    }
+
+    record.deletedAt = null;
+    return { ...record };
+  }
+
+  async purgeExpired(
+    now: Date = new Date(),
+    retentionDays: number = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+  ): Promise<number> {
+    let purged = 0;
+    for (const [id, record] of this.contracts.entries()) {
+      if (
+        isSoftDeleted(record.deletedAt) &&
+        record.deletedAt &&
+        isPastRetentionWindow(record.deletedAt, retentionDays, now)
+      ) {
+        this.contracts.delete(id);
+        this.insertionOrder.delete(id);
+        purged++;
+      }
+    }
+    return purged;
   }
 
   clear(): void {
     this.contracts.clear();
+    this.insertionOrder.clear();
+    this.insertionSeq = 0;
   }
 }

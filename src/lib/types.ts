@@ -14,7 +14,9 @@ export type Resource =
   | "payments"
   | "reviews"
   | "reports"
-  | "settings";
+  | "settings"
+  | "disputes"
+  | "health";
 
 export type Action = "create" | "read" | "update" | "delete" | "list";
 

@@ -18,27 +18,47 @@ import { requireAuth, requireRole } from './middleware/authorization';
 import { authMiddleware, type AuthenticatedRequest } from './middleware/auth';
 import { adminAuthGuard } from './middleware/adminAuthGuard';
 import { registerShutdownHandlers } from './shutdown';
+import { validateEnv } from './config/env.schema';
 
 const queueManager = QueueManager.getInstance();
 
 const app = createApp({ includeTerminalHandlers: false });
 
-const auditExportLimiter = createRateLimiter({
-  ...rateLimitConfig.auditExport,
-  keyFn: (req) => {
+function auditActorKeyFn(prefix: string) {
+  return (req: Request) => {
     const authReq = req as typeof req & { user?: { id?: string } };
     const actor = authReq.user?.id ?? 'anonymous';
-    return `audit-export:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
-  },
+    return `${prefix}:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
+  };
+}
+
+const auditExportLimiter = createRateLimiter({
+  ...rateLimitConfig.auditExport,
+  keyFn: auditActorKeyFn('audit-export'),
 });
 
-app.use(
-  '/api/v1/audit',
-  createAuditRouter({
-    accessMiddleware: [requireAuth, requireRole('admin', 'auditor')],
-    exportMiddleware: [auditExportLimiter],
-  }),
-);
+const auditQueryLimiter = createRateLimiter({
+  ...rateLimitConfig.audit,
+  keyFn: auditActorKeyFn('audit'),
+});
+
+const auditIntegrityLimiter = createRateLimiter({
+  ...rateLimitConfig.auditIntegrity,
+  keyFn: auditActorKeyFn('audit-integrity'),
+});
+
+// Mount the audit router only when the AUDIT_ENABLED feature flag is on.
+// When disabled, all /api/v1/audit/* requests fall through to the 404 handler.
+if (validateEnv().AUDIT_ENABLED) {
+  app.use(
+    '/api/v1/audit',
+    createAuditRouter({
+      accessMiddleware: [requireAuth, requireRole('admin', 'auditor'), auditQueryLimiter],
+      exportMiddleware: [auditExportLimiter],
+      integrityMiddleware: [auditIntegrityLimiter],
+    }),
+  );
+}
 
 const DLQ_DEFAULT_LIMIT = 50;
 const DLQ_MAX_LIMIT = 100;

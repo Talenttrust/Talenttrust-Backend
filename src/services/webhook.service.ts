@@ -9,6 +9,7 @@ import { isSafeUrl } from '../utils/ssrf';
 import { RateLimitStore } from '../lib/rateLimitStore';
 import { MetricsServiceLike } from '../observability';
 import { validateEnv } from '../config/env.schema';
+import { parseBoolEnv } from '../config/env';
 
 import { getDb } from '../db/database';
 import { SqliteWebhookSubscriptionRepository } from '../repositories/webhook-subscription.repository';
@@ -19,6 +20,8 @@ const HOST_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_MAX ?? 60
 const HOST_RATE_LIMIT_WINDOW_MS = Number(process.env.WEBHOOK_HOST_RATE_LIMIT_WINDOW_MS ?? 60_000);
 /** Per-attempt outbound webhook timeout, validated through env schema. */
 const WEBHOOK_DELIVERY_TIMEOUT_MS = validateEnv().WEBHOOK_DELIVERY_TIMEOUT_MS;
+/** Maximum webhook payload size in bytes, validated through env schema. */
+const WEBHOOK_MAX_PAYLOAD_SIZE_BYTES = validateEnv().WEBHOOK_MAX_PAYLOAD_SIZE_BYTES;
 
 /**
  * Public, secret-redacted view of a DLQ entry. Exposes the failure reason as
@@ -53,6 +56,15 @@ export class WebhookService {
   private static hostRateStore = new RateLimitStore({ sweepIntervalMs: HOST_RATE_LIMIT_WINDOW_MS });
 
   /**
+   * When `false`, `trigger()` is a no-op: no subscriptions are queried,
+   * no deliveries are attempted, and no DLQ entries are written.
+   *
+   * Defaults to `true` (read from `WEBHOOKS_ENABLED` env var at construction
+   * time) so the flag can be injected in tests without touching `process.env`.
+   */
+  private readonly webhooksEnabled: boolean;
+
+  /**
    * Applies a per-host sliding-window rate limit.
    *
    * @param hostname - The destination hostname extracted from the webhook URL.
@@ -82,20 +94,29 @@ export class WebhookService {
     return entry.count <= HOST_RATE_LIMIT_MAX;
   }
 
-  constructor(private readonly metrics?: MetricsServiceLike) {}
+  constructor(private readonly metrics?: MetricsServiceLike, webhooksEnabled?: boolean) {
+    this.webhooksEnabled = webhooksEnabled ?? parseBoolEnv('WEBHOOKS_ENABLED', true);
+  }
 
   /**
    * Triggers a webhook event. It retrieves all active subscriptions matching the event type,
    * constructs a delivery payload, and delivers to each matching subscription URL asynchronously.
+   *
+   * When `WEBHOOKS_ENABLED=false` this method returns immediately without querying
+   * subscriptions, sending any deliveries, or touching the DLQ.
    *
    * @param eventType - The event type name.
    * @param data - The event body/data.
    * @param correlationId - Optional correlation ID.
    */
   async trigger(eventType: string, data: unknown, correlationId?: string): Promise<void> {
+    if (!this.webhooksEnabled) {
+      return;
+    }
+
     const subscriptions = await this.repo.findAll({ eventType, active: true });
     console.log("TRIGGER FINDALL:", subscriptions.length, "subs for", eventType);
-    
+
     // Asynchronously deliver to all matching subscriptions
     const deliveries = subscriptions.map((sub) => {
       const payload: WebhookPayload = {

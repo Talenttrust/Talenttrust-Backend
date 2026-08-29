@@ -394,15 +394,8 @@ function makeQueueInfo(overrides: Partial<QueueHealthInfo> = {}): QueueHealthInf
 }
 
 describe("queueProbe", () => {
-  const ORIGINAL = process.env;
-
   beforeEach(() => {
-    process.env = { ...ORIGINAL };
     jest.resetAllMocks();
-  });
-
-  afterEach(() => {
-    process.env = ORIGINAL;
   });
 
   it("returns ok when all queues are healthy", async () => {
@@ -418,36 +411,43 @@ describe("queueProbe", () => {
   });
 
   it("returns not ok when failed job count exceeds threshold", async () => {
-    process.env.QUEUE_FAILED_THRESHOLD = "5";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
       getHealth: jest.fn().mockResolvedValue([makeQueueInfo({ failed: 10 })]),
     });
 
-    const result = await queueProbe();
+    const result = await queueProbe({ queueFailedThreshold: 5 });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("failed jobs");
   });
 
   it("returns not ok when waiting backlog exceeds threshold", async () => {
-    process.env.QUEUE_BACKLOG_THRESHOLD = "10";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
       getHealth: jest.fn().mockResolvedValue([makeQueueInfo({ waiting: 50 })]),
     });
 
-    const result = await queueProbe();
+    const result = await queueProbe({ queueBacklogThreshold: 10 });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("waiting jobs");
   });
 
+  it("returns ok when thresholds are not exceeded", async () => {
+    MockQueueManager.getInstance = jest.fn().mockReturnValue({
+      getHealth: jest.fn().mockResolvedValue([makeQueueInfo({ failed: 3, waiting: 20 })]),
+    });
+
+    const result = await queueProbe({ queueFailedThreshold: 5, queueBacklogThreshold: 50 });
+    expect(result.ok).toBe(true);
+    expect(result.detail).toBeUndefined();
+  });
+
   it("returns not ok on timeout", async () => {
-    process.env.QUEUE_PROBE_TIMEOUT_MS = "1";
     MockQueueManager.getInstance = jest.fn().mockReturnValue({
       getHealth: jest.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(resolve, 60_000))
+        () => new Promise(() => { /* never resolves */ })
       ),
     });
 
-    const result = await queueProbe();
+    const result = await queueProbe({ queueProbeTimeoutMs: 1 });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("timeout");
   });
@@ -470,6 +470,18 @@ describe("queueProbe", () => {
     const result = await queueProbe();
     expect(result.ok).toBe(false);
     expect(result.detail).toBe("unknown error");
+  });
+
+  it("does not leak internal error details in production-like env", async () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    MockQueueManager.getInstance = jest.fn().mockReturnValue({
+      getHealth: jest.fn().mockRejectedValue(new Error("Redis ECONNREFUSED 10.0.0.1:6379")),
+    });
+
+    const result = await queueProbe();
+    expect(result.ok).toBe(false);
+    process.env.NODE_ENV = originalEnv;
   });
 });
 

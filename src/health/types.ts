@@ -33,5 +33,21 @@ export interface HealthResponse {
   probes: ProbeResult[];
 }
 
+/**
+ * Paginated health response payload.
+ *
+ * Extends {@link HealthResponse} with cursor-pagination metadata.
+ * The `probes` array is bounded to the requested page size.
+ */
+export interface PaginatedHealthResponse extends HealthResponse {
+  /**
+   * Opaque cursor to pass as `?cursor=` on the next request.
+   * `null` when this is the last (or only) page.
+   */
+  nextCursor: string | null;
+  /** Effective page size used for this response (after clamping). */
+  limit: number;
+}
+
 /** A probe is any async function returning a ProbeResult. */
 export type Probe = () => Promise<ProbeResult>;
