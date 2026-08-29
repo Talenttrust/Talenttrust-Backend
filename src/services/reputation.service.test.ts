@@ -1159,6 +1159,12 @@ describe('ReputationService — feature flag (REPUTATION_ENABLED)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
   });
 
   it('createRating throws ForbiddenError when REPUTATION_ENABLED is false', () => {
@@ -1377,5 +1383,638 @@ describe('ReputationService.getProfilePaginated', () => {
         expect(review.hasOwnProperty('comment')).toBe(true);
       }
     });
+  });
+});
+
+// ============================================================================
+// ReputationService.correctReputation — provenance & edge cases
+// ============================================================================
+
+describe('ReputationService.correctReputation — provenance tracking', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_REVIEWER = 'corr-reviewer';
+  const CORR_TARGET = 'corr-target';
+  const CORR_CONTEXT = 'corr-context';
+  const CORR_OPERATOR = 'corr-operator';
+  const CORR_OPERATOR_ROLE = 'admin';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_REVIEWER}', 'corr_reviewer', 'corr_reviewer@test.com', 'client', datetime('now')),
+        ('${CORR_TARGET}',   'corr_target',   'corr_target@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator', 'corr_operator@test.com', 'client', datetime('now'));
+    `);
+    // Create reputation_corrections table (migration v15)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reputation_corrections (
+        id              TEXT    PRIMARY KEY,
+        target_id       TEXT    NOT NULL REFERENCES users(id),
+        context_id      TEXT    NOT NULL REFERENCES contracts(id),
+        reason          TEXT    NOT NULL CHECK (length(reason) >= 10 AND length(reason) <= 5000),
+        reference       TEXT    NOT NULL,
+        before_score    REAL    NOT NULL,
+        after_score     REAL    NOT NULL,
+        before_weighted REAL    NOT NULL,
+        after_weighted  REAL    NOT NULL,
+        before_total    INTEGER NOT NULL,
+        after_total     INTEGER NOT NULL,
+        operator_id     TEXT    NOT NULL REFERENCES users(id),
+        operator_role   TEXT    NOT NULL,
+        created_at      TEXT    NOT NULL,
+        UNIQUE(target_id, context_id, reference)
+      );
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_target_id ON reputation_corrections(target_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_context_id ON reputation_corrections(context_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_operator_id ON reputation_corrections(operator_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_created_at ON reputation_corrections(created_at);
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Correction Contract', CORR_REVIEWER, CORR_TARGET);
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+    // Seed a rating so the profile has data
+    db.prepare(
+      `INSERT INTO reputation_entries (id, reviewer_id, target_id, rating, comment, context_id, created_at)
+       VALUES (?, ?, ?, ?, NULL, ?, datetime('now'))`,
+    ).run('seed-rating-1', CORR_REVIEWER, CORR_TARGET, 3, CORR_CONTEXT);
+  });
+
+  it('creates a correction with full provenance (reason, reference, before/after, operator)', () => {
+    const correction = ReputationService.correctReputation(
+      CORR_TARGET,
+      CORR_CONTEXT,
+      'Correction due to verified dispute resolution in favor of freelancer',
+      'DISP-2024-001234',
+      CORR_OPERATOR,
+      CORR_OPERATOR_ROLE,
+      'corr-123'
+    );
+
+    expect(correction).toMatchObject({
+      targetId: CORR_TARGET,
+      contextId: CORR_CONTEXT,
+      reason: 'Correction due to verified dispute resolution in favor of freelancer',
+      reference: 'DISP-2024-001234',
+      operatorId: CORR_OPERATOR,
+      operatorRole: 'admin',
+      beforeScore: 3,
+      afterScore: 3, // Same for note-style correction
+      beforeWeighted: expect.any(Number),
+      afterWeighted: expect.any(Number),
+      beforeTotal: 1,
+      afterTotal: 1,
+    });
+    expect(correction.id).toBeDefined();
+    expect(correction.createdAt).toBeDefined();
+
+    // Verify audit log was created
+    expect(auditService.log).toHaveBeenCalledTimes(1);
+    const logArg = (auditService.log as jest.Mock).mock.calls[0][0];
+    expect(logArg.action).toBe('REPUTATION_CORRECTED');
+    expect(logArg.severity).toBe('WARNING');
+    expect(logArg.actor).toBe(CORR_OPERATOR);
+    expect(logArg.resourceId).toBe(CORR_TARGET);
+    expect(logArg.metadata.correctionId).toBe(correction.id);
+    expect(logArg.metadata.reference).toBe('DISP-2024-001234');
+    expect(logArg.metadata.before.score).toBe(3);
+    expect(logArg.metadata.after.score).toBe(3);
+  });
+
+  it('allows admin and auditor roles', () => {
+    const adminOp = 'admin-user-' + Date.now();
+    const auditorOp = 'auditor-user-' + Date.now();
+    db.exec(`
+      INSERT INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${adminOp}', 'admin_user_${Date.now()}', 'admin${Date.now()}@test.com', 'client', datetime('now')),
+        ('${auditorOp}', 'auditor_user_${Date.now()}', 'auditor${Date.now()}@test.com', 'client', datetime('now'));
+    `);
+
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Admin correction reason here', 'TKT-001', adminOp, 'admin'
+    )).not.toThrow();
+
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Auditor correction reason here', 'TKT-002', auditorOp, 'auditor'
+    )).not.toThrow();
+  });
+
+  it('rejects unauthorized operator roles (client, freelancer)', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Client trying to correct', 'TKT-001', CORR_REVIEWER, 'client'
+    )).toThrow(ForbiddenError);
+
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Freelancer trying to correct', 'TKT-002', CORR_TARGET, 'freelancer'
+    )).toThrow(ForbiddenError);
+  });
+});
+
+describe('ReputationService.correctReputation — validation edge cases', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-val';
+  const CORR_CONTEXT = 'corr-context-val';
+  const CORR_OPERATOR = 'corr-operator-val';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_val',   'corr_target_val@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_val', 'corr_operator_val@test.com', 'client', datetime('now')),
+        ('some-client', 'some_client', 'some_client@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Test Contract', 'some-client', CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('rejects missing reason', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, '', 'REF-001', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, '   ', 'REF-001', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('rejects reason shorter than 10 characters', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Too short', 'REF-001', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('rejects reason longer than 5000 characters', () => {
+    const longReason = 'a'.repeat(5001);
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, longReason, 'REF-001', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('accepts reason at boundary lengths (10 and 5000)', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'a'.repeat(10), 'REF-001', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'a'.repeat(5000), 'REF-002', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+  });
+
+  it('rejects missing reference', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Valid reason here', '', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Valid reason here', '   ', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+});
+
+describe('ReputationService.correctReputation — sensitive reference handling', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-ref';
+  const CORR_CONTEXT = 'corr-context-ref';
+  const CORR_OPERATOR = 'corr-operator-ref';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_ref',   'corr_target_ref@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_ref', 'corr_operator_ref@test.com', 'client', datetime('now')),
+        ('some-client', 'some_client', 'some_client@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Test Contract', 'some-client', CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('rejects URLs with embedded credentials (user:pass@host)', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://user:pass@example.com/ticket/123', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('rejects URLs with token query parameters', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://example.com/ticket?token=abc123secret', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://example.com/api?access_token=xyz789', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://example.com?api_key=secretkey123', CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('rejects bare long tokens that look like secrets', () => {
+    const longToken = 'test_token_abcdefghijklmnopqrstuvwxyz123456';
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', longToken, CORR_OPERATOR, 'admin'
+    )).toThrow(ValidationError);
+  });
+
+  it('accepts safe reference formats (ticket numbers, dispute IDs)', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'TKT-2024-001234', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'DISP-2024-005678', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'ESC-999', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'INC-20240115-001', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'PR-12345', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+  });
+
+  it('accepts plain URLs without sensitive parameters', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://example.com/ticket/123', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Reason for correction', 'https://jira.example.com/browse/TKT-123', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+  });
+});
+
+describe('ReputationService.correctReputation — idempotency & duplicates', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-dup';
+  const CORR_CONTEXT = 'corr-context-dup';
+  const CORR_OPERATOR = 'corr-operator-dup';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_dup',   'corr_target_dup@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_dup', 'corr_operator_dup@test.com', 'client', datetime('now')),
+        ('some-client', 'some_client', 'some_client@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Test Contract', 'some-client', CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('rejects duplicate correction with same target, context, and reference', () => {
+    ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'First correction reason', 'DISP-001', CORR_OPERATOR, 'admin'
+    );
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Second correction reason', 'DISP-001', CORR_OPERATOR, 'admin'
+    )).toThrow(ConflictError);
+  });
+
+  it('allows corrections with different references for same target/context', () => {
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'First correction', 'DISP-001', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Second correction', 'DISP-002', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+  });
+
+  it('allows same reference for different targets', () => {
+    const otherTarget = 'other-target-dup';
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES ('${otherTarget}', 'other_target', 'other@test.com', 'freelancer', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run('other-context', 'Test Contract', 'some-client', otherTarget);
+
+    expect(() => ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'First correction', 'DISP-001', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+    expect(() => ReputationService.correctReputation(
+      otherTarget, 'other-context', 'Other target correction', 'DISP-001', CORR_OPERATOR, 'admin'
+    )).not.toThrow();
+  });
+});
+
+describe('ReputationService.correctReputation — concurrent corrections during event ingestion', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-conc';
+  const CORR_CONTEXT = 'corr-context-conc';
+  const CORR_OPERATOR = 'corr-operator-conc';
+  const CORR_REVIEWER = 'corr-reviewer-conc';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_conc',   'corr_target_conc@test.com',   'freelancer', datetime('now')),
+        ('${CORR_REVIEWER}', 'corr_reviewer_conc', 'corr_reviewer_conc@test.com', 'client', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_conc', 'corr_operator_conc@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Concurrent Contract', CORR_REVIEWER, CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('handles correction applied while new ratings are being ingested', () => {
+    // First, apply a correction
+    const correction = ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Correction during active ingestion', 'DISP-001', CORR_OPERATOR, 'admin'
+    );
+    expect(correction.id).toBeDefined();
+
+    // Then add a new rating (simulating concurrent event ingestion)
+    const newContext = 'new-context-conc';
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(newContext, 'New Contract', CORR_REVIEWER, CORR_TARGET);
+
+    const entry = ReputationService.createRating(CORR_REVIEWER, CORR_TARGET, 5, newContext);
+    expect(entry.id).toBeDefined();
+
+    // Verify both the correction and the rating exist
+    const corrections = ReputationService.getCorrections(CORR_TARGET);
+    expect(corrections).toHaveLength(1);
+    expect(corrections[0].reference).toBe('DISP-001');
+
+    const profile = ReputationService.getProfile(CORR_TARGET);
+    expect(profile.totalRatings).toBe(1); // Only the new rating (correction doesn't add ratings)
+  });
+
+  it('handles multiple rapid corrections from different operators', () => {
+    const operator2 = 'operator-2';
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES ('${operator2}', 'operator2', 'op2@test.com', 'client', datetime('now'));
+    `);
+
+    const corr1 = ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'First operator correction', 'DISP-001', CORR_OPERATOR, 'admin'
+    );
+    const corr2 = ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Second operator correction', 'DISP-002', operator2, 'auditor'
+    );
+
+    expect(corr1.id).not.toBe(corr2.id);
+    expect(corr1.operatorId).toBe(CORR_OPERATOR);
+    expect(corr2.operatorId).toBe(operator2);
+
+    const corrections = ReputationService.getCorrections(CORR_TARGET);
+    expect(corrections).toHaveLength(2);
+  });
+});
+
+describe('ReputationService.getCorrections — retrieval', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-get';
+  const CORR_CONTEXT = 'corr-context-get';
+  const CORR_OPERATOR = 'corr-operator-get';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    // Create reputation_corrections table (migration v15)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reputation_corrections (
+        id              TEXT    PRIMARY KEY,
+        target_id       TEXT    NOT NULL REFERENCES users(id),
+        context_id      TEXT    NOT NULL REFERENCES contracts(id),
+        reason          TEXT    NOT NULL CHECK (length(reason) >= 10 AND length(reason) <= 5000),
+        reference       TEXT    NOT NULL,
+        before_score    REAL    NOT NULL,
+        after_score     REAL    NOT NULL,
+        before_weighted REAL    NOT NULL,
+        after_weighted  REAL    NOT NULL,
+        before_total    INTEGER NOT NULL,
+        after_total     INTEGER NOT NULL,
+        operator_id     TEXT    NOT NULL REFERENCES users(id),
+        operator_role   TEXT    NOT NULL,
+        created_at      TEXT    NOT NULL,
+        UNIQUE(target_id, context_id, reference)
+      );
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_target_id ON reputation_corrections(target_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_context_id ON reputation_corrections(context_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_operator_id ON reputation_corrections(operator_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_created_at ON reputation_corrections(created_at);
+    `);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_get',   'corr_target_get@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_get', 'corr_operator_get@test.com', 'client', datetime('now')),
+        ('some-client', 'some_client', 'some_client@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Test Contract', 'some-client', CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('returns empty array for target with no corrections', () => {
+    const corrections = ReputationService.getCorrections(CORR_TARGET);
+    expect(corrections).toEqual([]);
+  });
+
+  it('returns all corrections ordered by created_at DESC', () => {
+    ReputationService.correctReputation(CORR_TARGET, CORR_CONTEXT, 'First correction', 'REF-001', CORR_OPERATOR, 'admin');
+    ReputationService.correctReputation(CORR_TARGET, CORR_CONTEXT, 'Second correction', 'REF-002', CORR_OPERATOR, 'admin');
+    ReputationService.correctReputation(CORR_TARGET, CORR_CONTEXT, 'Third correction', 'REF-003', CORR_OPERATOR, 'admin');
+
+    const corrections = ReputationService.getCorrections(CORR_TARGET);
+    expect(corrections).toHaveLength(3);
+    // Verify all three corrections are returned (order may vary if timestamps are identical)
+    const references = corrections.map(c => c.reference);
+    expect(references).toEqual(expect.arrayContaining(['REF-001', 'REF-002', 'REF-003']));
+  });
+
+  it('throws for empty targetId', () => {
+    expect(() => ReputationService.getCorrections('')).toThrow('Target ID is required');
+  });
+});
+
+describe('ReputationService.getCorrectionById — retrieval', () => {
+  let db: ReturnType<typeof Database>;
+  const CORR_TARGET = 'corr-target-get-id';
+  const CORR_CONTEXT = 'corr-context-get-id';
+  const CORR_OPERATOR = 'corr-operator-get-id';
+
+  beforeAll(() => {
+    db = getDb(':memory:');
+    ReputationService.initialize(db);
+    // Create reputation_corrections table (migration v15)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reputation_corrections (
+        id              TEXT    PRIMARY KEY,
+        target_id       TEXT    NOT NULL REFERENCES users(id),
+        context_id      TEXT    NOT NULL REFERENCES contracts(id),
+        reason          TEXT    NOT NULL CHECK (length(reason) >= 10 AND length(reason) <= 5000),
+        reference       TEXT    NOT NULL,
+        before_score    REAL    NOT NULL,
+        after_score     REAL    NOT NULL,
+        before_weighted REAL    NOT NULL,
+        after_weighted  REAL    NOT NULL,
+        before_total    INTEGER NOT NULL,
+        after_total     INTEGER NOT NULL,
+        operator_id     TEXT    NOT NULL REFERENCES users(id),
+        operator_role   TEXT    NOT NULL,
+        created_at      TEXT    NOT NULL,
+        UNIQUE(target_id, context_id, reference)
+      );
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_target_id ON reputation_corrections(target_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_context_id ON reputation_corrections(context_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_operator_id ON reputation_corrections(operator_id);
+      CREATE INDEX IF NOT EXISTS idx_reputation_corrections_created_at ON reputation_corrections(created_at);
+    `);
+    db.exec(`
+      INSERT OR IGNORE INTO users (id, username, email, role, created_at)
+      VALUES
+        ('${CORR_TARGET}',   'corr_target_get_id',   'corr_target_get_id@test.com',   'freelancer', datetime('now')),
+        ('${CORR_OPERATOR}', 'corr_operator_get_id', 'corr_operator_get_id@test.com', 'client', datetime('now')),
+        ('some-client', 'some_client', 'some_client@test.com', 'client', datetime('now'));
+    `);
+    db.prepare(
+      `INSERT OR IGNORE INTO contracts
+         (id, title, client_id, freelancer_id, amount, status, version, created_at)
+       VALUES (?, ?, ?, ?, 1000, 'completed', 0, datetime('now'))`,
+    ).run(CORR_CONTEXT, 'Test Contract', 'some-client', CORR_TARGET);
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset validateEnv mock to default enabled state
+    (validateEnv as jest.Mock).mockReturnValue({
+      REPUTATION_ENABLED: true,
+      REPUTATION_DECAY_LAMBDA: 0.005,
+      REPUTATION_SCORE_ALGORITHM_VERSION: 'exp-decay-v1',
+    });
+    db.exec('DELETE FROM reputation_entries');
+    db.exec('DELETE FROM reputation_corrections');
+  });
+
+  it('returns correction by ID', () => {
+    const created = ReputationService.correctReputation(
+      CORR_TARGET, CORR_CONTEXT, 'Correction for get by ID', 'REF-GET-001', CORR_OPERATOR, 'admin'
+    );
+    const found = ReputationService.getCorrectionById(created.id);
+    expect(found).toBeDefined();
+    expect(found?.id).toBe(created.id);
+    expect(found?.reference).toBe('REF-GET-001');
+  });
+
+  it('returns undefined for non-existent ID', () => {
+    const found = ReputationService.getCorrectionById('non-existent-id');
+    expect(found).toBeUndefined();
   });
 });

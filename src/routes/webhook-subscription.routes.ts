@@ -20,6 +20,7 @@ import { validateWebhookUrl, findSubscriptionOrFail } from './webhook-subscripti
 import { createRateLimiter } from '../middleware/rateLimiter';
 import { rateLimitConfig } from '../config/rateLimit';
 import { authRateLimitKeyFn } from '../auth/rateLimitKey';
+import { WebhookService } from '../services/webhook.service';
 
 const router = Router();
 
@@ -39,6 +40,157 @@ function sanitizeSubscription(sub: any): any {
   const { secret: _secret, ...rest } = sub;
   return rest;
 }
+
+// ── DLQ endpoints (must be defined before /:id routes to avoid routing conflicts) ──
+
+/**
+ * GET /api/v1/webhook-subscriptions/dlq
+ * Lists all dead-lettered webhook events. Admin-only.
+ * Returns public, secret-redacted views of DLQ entries.
+ */
+router.get(
+  '/dlq',
+  webhookRateLimiter,
+  requireAuth,
+  requireRole('admin'),
+  async (_req: AuthenticatedRequest, res: Response, next) => {
+    try {
+      const service = new WebhookService();
+      const dlqEntries = service.getDLQ();
+      const stats = await service.getDLQStats();
+      res.status(200).json({
+        status: 'success',
+        data: dlqEntries,
+        meta: {
+          total: stats.total,
+          pending: stats.pending,
+          replayed: stats.replayed,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * GET /api/v1/webhook-subscriptions/dlq/stats
+ * Returns DLQ statistics. Admin-only.
+ */
+router.get(
+  '/dlq/stats',
+  webhookRateLimiter,
+  requireAuth,
+  requireRole('admin'),
+  async (_req: AuthenticatedRequest, res: Response, next) => {
+    try {
+      const service = new WebhookService();
+      const stats = await service.getDLQStats();
+      res.status(200).json({
+        status: 'success',
+        data: stats,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/v1/webhook-subscriptions/dlq/replay-all
+ * Replays all pending DLQ entries with bounded concurrency. Admin-only.
+ * Must be defined before /dlq/:id to avoid routing conflicts.
+ */
+router.post(
+  '/dlq/replay-all',
+  webhookRateLimiter,
+  requireAuth,
+  requireRole('admin'),
+  async (_req: AuthenticatedRequest, res: Response, next) => {
+    try {
+      const service = new WebhookService();
+      const summary = await service.replayAll({ concurrency: 5 });
+      res.status(200).json({
+        status: 'success',
+        data: summary,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * GET /api/v1/webhook-subscriptions/dlq/:id
+ * Gets a single DLQ entry by ID. Admin-only.
+ * Returns 404 when the entry does not exist.
+ */
+router.get(
+  '/dlq/:id',
+  webhookRateLimiter,
+  requireAuth,
+  requireRole('admin'),
+  async (req: AuthenticatedRequest, res: Response, next) => {
+    try {
+      const { id } = req.params;
+      const service = new WebhookService();
+      const entry = await service.getDLQEntry(id);
+      if (!entry) {
+        return res.status(404).json({
+          error: {
+            code: 'not_found',
+            message: 'DLQ entry not found',
+            requestId: res.locals['requestId'] ?? 'unknown',
+          },
+        });
+      }
+      res.status(200).json({
+        status: 'success',
+        data: entry,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/v1/webhook-subscriptions/dlq/:id/replay
+ * Replays a single DLQ entry. Admin-only.
+ * Generates a fresh timestamp and HMAC signature for the replay delivery.
+ * Returns 404 when the entry does not exist.
+ */
+router.post(
+  '/dlq/:id/replay',
+  webhookRateLimiter,
+  requireAuth,
+  requireRole('admin'),
+  async (req: AuthenticatedRequest, res: Response, next) => {
+    try {
+      const { id } = req.params;
+      const service = new WebhookService();
+      const result = await service.replayDLQEntry(id);
+      if (!result.success) {
+        const statusCode = result.message === 'Entry not found' ? 404 : 422;
+        return res.status(statusCode).json({
+          error: {
+            code: result.message === 'Entry not found' ? 'not_found' : 'replay_failed',
+            message: result.message,
+            requestId: res.locals['requestId'] ?? 'unknown',
+          },
+        });
+      }
+      res.status(200).json({
+        status: 'success',
+        data: { id, replayed: true, message: result.message },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// ── Subscription CRUD endpoints ───────────────────────────────────────────────
 
 /**
  * POST /api/v1/webhook-subscriptions

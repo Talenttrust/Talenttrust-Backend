@@ -193,6 +193,18 @@ Queue workers enforce a wall-clock timeout for every job attempt. When a job exc
 
 Processors receive an `AbortSignal` as optional context and should stop outbound work when it is aborted. The manager still fails the attempt on timeout when a processor ignores the signal, and it prevents the same job from being executed again while the timed-out processor is still active.
 
+### Weighted Fair Scheduling
+
+Queue workers no longer run a strict priority ladder. A **weighted fair scheduler** ensures a high-priority stream cannot starve reconciliation, notification, or cleanup jobs indefinitely:
+
+- **Weighted fairness** — each priority level has a weight (`critical` 4, `high` 3, `normal` 2, `low` 1) and service is proportional to weight.
+- **Maximum wait bound** — a job waiting longer than `QUEUE_FAIR_MAX_WAIT_MS` (default 5 min) is promoted to the front unconditionally.
+- **Per-tenant isolation** — pass an optional `tenantId` to `addJob`; a tenant flood cannot block other tenants.
+- **Worker-restart safe** — scheduling is a pure function of durable job metadata, so a restarted worker computes the same order.
+- **Observable** — scheduling decisions are exposed as `queue_fair_*` Prometheus metrics.
+
+Configuration: `QUEUE_FAIR_MAX_WAIT_MS`, `QUEUE_FAIR_REBALANCE_INTERVAL_MS`. See [docs/backend/queue-fair-scheduling.md](docs/backend/queue-fair-scheduling.md) for the full design and edge cases.
+
 For full configuration details, see [docs/backend/config.md](docs/backend/config.md).
 
 ## Audit Log Export
@@ -726,6 +738,35 @@ When neither `startBlock` nor a stored cursor exists, the job starts from ledger
 `0`; when `endBlock` is omitted, the current chain head is discovered via
 `getLatestLedger`. If there is nothing new to sync, the job returns early
 without making event calls.
+
+## Blockchain Finality Depth
+
+Consumers must not observe on-chain state (e.g. a `MILESTONE_RELEASED`
+release) before it is settled: a reorg before finality would otherwise serve
+contradictory state. The backend therefore gates **public reads** on a
+per-network confirmation depth.
+
+- Events ingested with `network` + `ledger` are evaluated against the chain
+  head. Below the network's depth they are stored internally as
+  `provisional` and hidden from public reads (e.g. contract history).
+- A promotion sweep re-evaluates provisional events after every successful
+  blockchain sync and flips them to `finalized` once they reach the depth.
+  Promotion is one-way and idempotent, so retries and reorgs before finality
+  are safe.
+- Off-chain events (no `ledger`) and zero-confirmation networks are exposed
+  immediately.
+- Operators observe pending state only via the admin endpoint
+  `GET /api/v1/admin/events/provisional` (admin role required; payloads are
+  never included).
+
+| Variable | Default | Description |
+|---|---|---|
+| `FINALITY_DEPTHS` | `stellar=1,soroban=1` | Comma-separated `network=depth` confirmation depths. `network=0` enables zero-confirmation for that network. |
+| `FINALITY_DEFAULT_DEPTH` | `6` | Conservative depth applied to networks without an explicit entry (fail-closed). |
+| `FINALITY_ALLOW_ZERO_CONFIRMATION` | *(env-dependent)* | When `true`, depth `0` is honoured; when `false` it is clamped to `1`. Unset → allowed in development/test/staging, forbidden in production. |
+
+See [docs/backend/finality.md](docs/backend/finality.md) for full semantics,
+edge cases, and operational/security decisions.
 
 ## New Features
 

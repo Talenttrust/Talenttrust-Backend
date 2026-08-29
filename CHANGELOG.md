@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Transaction Poller Lease Fencing (Issue #1210)
+
+- **Lease tokens on transactions**: `Transaction` rows now carry `lease_owner` and
+  `lease_expires_at` (SQLite migration v14), so only the poller instance that
+  currently owns a transaction may update it.
+- **Fenced writes**: every poller write is a compare-and-swap
+  (`setIfLeaseOwner`) that only applies while the caller still owns the lease.
+  An old worker that completes late after losing its lease can no longer
+  clobber the new owner's state.
+- **Abandonment reporting**: polls abandoned because the lease was lost are
+  logged (structured `warn`), counted (`abandonedPolls`), and reported through
+  an optional `onPollAbandoned` callback for retry.
+- **Clock-skew tolerance**: `leaseSkewMs` prevents leases from being stolen
+  early by nodes with fast clocks.
+- **Restart-safe recovery**: `recoverPendingTransactions()` resumes only
+  transactions whose lease has expired or is unowned, skipping live foreign
+  leases.
+- **Coverage**: unit + integration tests for lease acquisition, expiry during
+  RPC, old-worker late completion, process restart, and clock skew.
+
 #### Deployment Automation Pipeline (Issue #45)
 
 - **Environment Configuration Module** (`src/config/environment.ts`)

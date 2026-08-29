@@ -251,7 +251,6 @@ function createContractsRouter(
     validateContractId,
     validateRequest(createMilestoneSchema),
     requireAuth,
-    contractCreateIdempotencyMiddleware(),
     requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.create.bind(milestonesSoftDelete),
   );
@@ -263,7 +262,6 @@ function createContractsRouter(
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
-    contractCreateIdempotencyMiddleware(),
     requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.restore.bind(milestonesSoftDelete),
   );
@@ -275,7 +273,6 @@ function createContractsRouter(
     validateContractId,
     validateParams(milestoneIdParamSchema),
     requireAuth,
-    contractCreateIdempotencyMiddleware(),
     requirePermission("contracts", "update", getContractOwnerId),
     milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
   );
@@ -295,7 +292,9 @@ function createContractsRouter(
 
   /**
    * POST /api/v1/contracts
-   * Supports Idempotency-Key to safely retry contract creation without creating duplicates.
+   *
+   * Optionally supports an `Idempotency-Key` header to safely retry contract
+   * creation (the "milestone release" side effect) without executing it twice.
    */
   router.post(
     "/",
@@ -322,21 +321,18 @@ function createContractsRouter(
     "/bulk",
     requireAuth,
     requirePermission("contracts", "create"),
-    contractCreateIdempotencyMiddleware(),
     validateSchema(bulkCreateContractsSchema),
     bulkController.bulkCreateContracts,
   );
 
   // PATCH /:id — update an existing contract (owner or admin only)
   // validateContractId runs before auth to reject clearly invalid :id params early.
-  // Idempotency-Key support added for milestones write safety.
   /** @permission contracts:update (ownOnly for client/freelancer) — admin, client, freelancer */
   router.patch(
     "/:id",
     validateContractId,
     requireAuth,
     requirePermission("contracts", "update", getContractOwnerId),
-    contractCreateIdempotencyMiddleware(),
     validateUpdateContract,
     controller.updateContract,
   );
@@ -359,7 +355,6 @@ function createContractsRouter(
     validateContractId,
     requireAuth,
     requirePermission("contracts", "delete", getContractOwnerId),
-    contractCreateIdempotencyMiddleware(),
     controller.deleteContract,
   );
 

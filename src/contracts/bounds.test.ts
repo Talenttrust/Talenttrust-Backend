@@ -10,6 +10,7 @@ import {
 describe('CONTRACT_BOUNDS', () => {
   it('exports maxMilestonesPerContract matching the constant', () => {
     expect(CONTRACT_BOUNDS.maxMilestonesPerContract).toBe(MAX_MILESTONES_PER_CONTRACT);
+    
   });
 
   it('exports maxContractAmountStroops matching the constant', () => {

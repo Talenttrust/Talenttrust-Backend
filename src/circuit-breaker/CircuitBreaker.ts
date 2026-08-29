@@ -22,6 +22,141 @@
 
 import { CircuitOpenError } from "./errors";
 
+/** Soroban RPC failure classes used for retry decisions. */
+export type SorobanFailureClass =
+  | "transport"
+  | "rate_limit"
+  | "timeout"
+  | "malformed_response"
+  | "application"
+  | "unknown";
+
+/** Classification of an error for retry and circuit-breaker decisions. */
+export interface SorobanFailureClassification {
+  class: SorobanFailureClass;
+  retryable: boolean;
+  /** Original provider/status code, preserved for diagnostics. */
+  providerCode?: string | number;
+  /** When rate-limited, the suggested wait time in ms, if available. */
+  retryAfterMs?: number;
+}
+
+/**
+ * Default classifier for Soroban RPC errors.
+ *
+ * Only transient infra failures (transport, rate-limit, timeout) are
+ * considered retryable. Malformed responses and application/contract errors
+ * are permanent. Unknown errors without a provider signal remain retryable so
+ * generic callers keep the previous fail-closed behaviour.
+ */
+export function classifySorobanError(error: unknown): SorobanFailureClassification {
+  if (typeof error !== "object" || error === null) {
+    return { class: "unknown", retryable: true };
+  }
+
+  const errorObject = error as object;
+  const obj = error as Record<string, unknown>;
+  const name = typeof obj.name === "string" ? obj.name : undefined;
+  const code = obj.code;
+  const status = typeof obj.status === "number" ? obj.status : undefined;
+  const response = obj.response as Record<string, unknown> | undefined;
+  const httpStatus =
+    status ??
+    (response && typeof response.status === "number" ? response.status : undefined);
+  const message = typeof obj.message === "string" ? obj.message : undefined;
+
+  // Timeout / abort.
+  if (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNABORTED"
+  ) {
+    return { class: "timeout", retryable: true, providerCode: code ?? httpStatus };
+  }
+
+  // Rate limit with optional Retry-After.
+  if (httpStatus === 429) {
+    let retryAfterMs: number | undefined;
+    const headers = response && (response.headers as unknown);
+    const retryAfter =
+      headers && typeof headers === "object"
+        ? typeof (headers as { get?: unknown }).get === "function"
+          ? (headers as { get: (name: string) => unknown }).get("retry-after")
+          : (headers as Record<string, unknown>)["retry-after"]
+        : undefined;
+    if (typeof retryAfter === "string") {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds)) {
+        retryAfterMs = seconds * 1000;
+      } else {
+        const parsed = Date.parse(retryAfter);
+        if (Number.isFinite(parsed)) {
+          retryAfterMs = Math.max(0, parsed - Date.now());
+        }
+      }
+    }
+    return {
+      class: "rate_limit",
+      retryable: true,
+      providerCode: httpStatus,
+      retryAfterMs,
+    };
+  }
+
+  // Malformed JSON or response body.
+  if (
+    name === "SyntaxError" ||
+    errorObject instanceof SyntaxError ||
+    (message !== undefined && message.includes("Unexpected token"))
+  ) {
+    return { class: "malformed_response", retryable: false, providerCode: code };
+  }
+
+  // Low-level network/transport failures.
+  if (
+    typeof code === "string" &&
+    [
+      "ECONNREFUSED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ECONNRESET",
+      "EADDRINUSE",
+      "ERR_SOCKET_CONNECTION_TIMEOUT",
+    ].includes(code)
+  ) {
+    return { class: "transport", retryable: true, providerCode: code };
+  }
+
+  // HTTP status 0 is a network-level failure.
+  if (httpStatus === 0) {
+    return { class: "transport", retryable: true, providerCode: httpStatus };
+  }
+
+  // 5xx HTTP statuses are treated as temporary transport failures.
+  if (typeof httpStatus === "number" && httpStatus >= 500) {
+    return { class: "transport", retryable: true, providerCode: httpStatus };
+  }
+
+  // 4xx HTTP statuses (except 429) are application/contract errors.
+  if (typeof httpStatus === "number" && httpStatus >= 400 && httpStatus < 500) {
+    return { class: "application", retryable: false, providerCode: httpStatus };
+  }
+
+  // JSON-RPC server error codes (-32000 to -32099) are application errors.
+  if (typeof code === "number" && code >= -32000 && code <= -32099) {
+    return { class: "application", retryable: false, providerCode: code };
+  }
+
+  // If the error had a provider status/code we did not recognize, do not retry.
+  if (httpStatus !== undefined || code !== undefined) {
+    return { class: "unknown", retryable: false, providerCode: code ?? httpStatus };
+  }
+
+  // Unrecognised generic error: preserve legacy retryable behaviour.
+  return { class: "unknown", retryable: true };
+}
+
 /** The three possible states of a circuit breaker. */
 export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
@@ -50,6 +185,13 @@ export interface CircuitBreakerOptions {
    * @default 'default'
    */
   name?: string;
+
+  /**
+   * Optional error classifier used to decide whether a failure should count
+   * toward opening the circuit and whether it is retryable.
+   * @default classifySorobanError
+   */
+  classifyError?: (error: unknown) => SorobanFailureClassification;
 }
 
 /** Point-in-time snapshot of circuit breaker counters. */
@@ -89,12 +231,14 @@ export class CircuitBreaker {
   private lastFailureTime: number | null = null;
   /** Tracks whether a probe call is currently in-flight in HALF_OPEN. */
   private probeInFlight = false;
+  private readonly classifyError: (error: unknown) => SorobanFailureClassification;
 
   constructor(options: CircuitBreakerOptions = {}) {
     this.name = options.name ?? "default";
     this.failureThreshold = options.failureThreshold ?? 5;
     this.successThreshold = options.successThreshold ?? 1;
     this.timeout = options.timeout ?? 30_000;
+    this.classifyError = options.classifyError ?? classifySorobanError;
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -127,7 +271,10 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (err) {
-      this.onFailure();
+      const classification = this.classifyError(err);
+      if (classification.retryable) {
+        this.onFailure();
+      }
       throw err;
     } finally {
       this.probeInFlight = false;
@@ -153,6 +300,14 @@ export class CircuitBreaker {
       successCount: this.successCount,
       lastFailureTime: this.lastFailureTime,
     };
+  }
+
+  /**
+   * Returns whether the given error should be considered retryable according
+   * to the configured classifier. Useful for external retry decisions.
+   */
+  isRetryable(error: unknown): boolean {
+    return this.classifyError(error).retryable;
   }
 
   /**
