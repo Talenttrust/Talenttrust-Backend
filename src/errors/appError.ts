@@ -335,7 +335,7 @@ export function classifySorobanRpcError(error: unknown): SorobanRpcError {
 
   // Rate limit: HTTP 429 with optional Retry-After.
   if (status === 429) {
-    const retryAfterRaw = response?.headers??.get?.('retry-after');
+    const retryAfterRaw = response?.headers?.get?.('retry-after');
     const retryAfter = parseRetryAfter(retryAfterRaw);
     return new SorobanRpcRateLimitError({
       retryAfter,
