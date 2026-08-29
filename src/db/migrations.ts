@@ -614,3 +614,37 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 14: poll lease columns on the transactions table.
+//
+// Lease fencing prevents two poller instances from updating the same
+// transaction after a lease owner has changed: `lease_owner` names the poller
+// instance that currently owns the transaction and `lease_expires_at` bounds
+// that ownership. Writes are only applied while the stored owner matches the
+// writer's token, so a poller whose lease expired (or was taken over) while an
+// RPC call was in flight abandons its poll instead of clobbering the new
+// owner's state.
+MIGRATIONS.push({
+  version: 14,
+  name: "add_transaction_lease_columns",
+  checksumSource: [
+    "ALTER TABLE transactions ADD COLUMN lease_owner TEXT",
+    "ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(transactions)") as Array<{
+      name: string;
+    }>;
+    const hasLeaseOwner = columns.some((column) => column.name === "lease_owner");
+    const hasLeaseExpiresAt = columns.some(
+      (column) => column.name === "lease_expires_at",
+    );
+
+    if (!hasLeaseOwner) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_owner TEXT");
+    }
+    if (!hasLeaseExpiresAt) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT");
+    }
+  },
+});
