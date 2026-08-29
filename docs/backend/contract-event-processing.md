@@ -42,6 +42,30 @@ contractId:eventId:sequence
 - `invalid`: payload violated schema or semantic constraints.
 - `error`: unexpected runtime failure in processor/repository interaction.
 
+## Backpressure and Health Signals
+
+RPC or queue pressure can cause silent lag — events pile up and operators
+discover data loss too late. The ingestion pipeline applies **bounded
+admission control** (`src/events/backpressure.ts`): at most
+`EVENT_INGESTION_MAX_PENDING` (default 100) events may be in flight at once,
+and when the buffer is full new events are rejected with 429
+`ingestion_backpressure` and a `Retry-After` header — visibly, never
+silently dropped.
+
+`GET /api/v1/events/health` exposes actionable signals:
+
+- `queueDepth` / `maxPendingEvents` — current load vs. capacity
+- `oldestEventAgeMs` — how long the oldest in-flight event has waited
+- `rejectedTotal` + `recentRejections` — rejected work, with reasons
+- `latencyMs` — processing latency (count / sum / p95)
+- `admission` — `open` (admitting) or `closed` (backpressure)
+
+Prometheus metrics are registered via
+`initializeEventIngestionBackpressureMetrics` (`event_ingestion_*`
+families). State is per-instance: a worker restart starts clean rather than
+inheriting phantom backpressure, and the health endpoint reflects the
+current instance immediately.
+
 ## Threat Scenarios and Security Assumptions
 
 1. Replay events
