@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isSafeUrl } from '../utils/ssrf';
+import { parseFinalityDepths } from '../finality/policy';
 
 
 /**
@@ -364,6 +365,50 @@ export const envSchema = z.object({
   AUDIT_ENABLED: z.string()
     .optional()
     .transform((val) => val !== 'false'),
+
+  // ── Blockchain Finality Configuration ───────────────────────────────────────
+  /**
+   * FINALITY_DEPTHS — per-network confirmation depth, comma-separated
+   * `network=depth` pairs (e.g. `stellar=1,soroban=2`). Depth is the
+   * number of confirmations an event must accumulate before it is
+   * exposed through public reads. A depth of `0` enables
+   * zero-confirmation for that network (only honoured outside
+   * production unless FINALITY_ALLOW_ZERO_CONFIRMATION is explicit).
+   *
+   * Default: `stellar=1,soroban=1`.
+   */
+  FINALITY_DEPTHS: z.string()
+    .default('stellar=1,soroban=1')
+    .transform((val) => parseFinalityDepths(val)),
+
+  /**
+   * FINALITY_DEFAULT_DEPTH — confirmation depth applied to networks
+   * without an explicit FINALITY_DEPTHS entry. Conservative (fail-closed)
+   * so an unconfigured network is never exposed early.
+   *
+   * Default: `6`.
+   */
+  FINALITY_DEFAULT_DEPTH: z.string()
+    .default('6')
+    .transform((val) => parseInt(val, 10))
+    .pipe(z.number().int().nonnegative('FINALITY_DEFAULT_DEPTH must be a non-negative integer').max(1000)),
+
+  /**
+   * FINALITY_ALLOW_ZERO_CONFIRMATION — when `true`, a configured depth
+   * of `0` is honoured (zero-confirmation). When `false`, depth `0` is
+   * clamped to `1`. When unset, zero-confirmation is permitted in
+   * development/test/staging and forbidden in production.
+   */
+  FINALITY_ALLOW_ZERO_CONFIRMATION: z.string()
+    .optional()
+    .transform((val) => {
+      if (val === undefined || val.trim() === '') return undefined;
+      const lower = val.trim().toLowerCase();
+      if (lower === 'true' || lower === '1') return true;
+      if (lower === 'false' || lower === '0') return false;
+      return undefined;
+    })
+    .pipe(z.boolean().optional()),
 
 }).superRefine((obj, ctx) => {
   const requireForEmailProvider = (field: keyof typeof obj, message: string): void => {

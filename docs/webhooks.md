@@ -982,3 +982,255 @@ WEBHOOKS_ENABLED=true npm start
 - The flag is read once at process startup via `parseBoolEnv`. Changing the variable at runtime requires a restart.
 - The `features.webhooksEnabled` field in `src/config/features.ts` exposes the resolved boolean for use outside the service constructor.
 - All non-trigger methods on `WebhookService` (DLQ reads, replays, stats) remain functional regardless of the flag.
+
+---
+
+## Webhook Signing — Outbound Delivery
+
+### Signing Format
+
+Every webhook with a configured secret is signed using HMAC-SHA256. The canonical message is:
+
+```
+${timestamp}.${JSON.stringify(payload.data)}
+```
+
+Where:
+- `timestamp` is the current Unix time in **milliseconds** (`Date.now()`), generated fresh for each delivery attempt.
+- `JSON.stringify(payload.data)` is the **exact bytes** sent as the HTTP request body.
+
+The signature is then:
+
+```
+HMAC-SHA256(secret, canonicalMessage) → hex string (64 characters)
+```
+
+### Required Headers
+
+| Header | Format | Description |
+|--------|--------|-------------|
+| `X-Signature` | `sha256=<64-hex-chars>` | HMAC-SHA256 signature of the canonical message. |
+| `X-Timestamp` | `<unix-ms>` | Millisecond Unix timestamp used in signing. |
+| `Content-Type` | `application/json` | Always present. |
+| `X-Correlation-Id` | alphanumeric string | Present when a correlation ID is propagated. |
+
+### How Subscribers Verify Signatures
+
+```
+1. Extract X-Timestamp from request headers.
+2. Reject if abs(now - X-Timestamp) exceeds your replay window (recommended: 5 minutes).
+3. Read the raw request body as a string — do NOT parse and re-serialize JSON.
+4. Construct: canonicalMessage = `${X-Timestamp}.${rawBody}`
+5. Compute: expectedSig = HMAC-SHA256(yourSecret, canonicalMessage).hexdigest()
+6. Compare X-Signature (strip "sha256=" prefix) with expectedSig using constant-time comparison.
+7. If mismatch: reject with HTTP 401.
+```
+
+**Critical:** Sign verification must use the **raw body bytes** received on the wire. Parsing and re-serializing JSON may alter field ordering or whitespace and will break signature verification.
+
+### Security Properties
+
+- Signature comparison uses `crypto.timingSafeEqual` to prevent timing oracle attacks.
+- The `sha256=` prefix is stripped before comparison; both `sha256=<hex>` and bare `<hex>` are accepted.
+- Each delivery attempt generates a **fresh timestamp and signature** — replays get new signatures too.
+- The webhook secret is **never** logged, never returned in API responses, and stripped from DLQ views.
+
+---
+
+## Retry Behavior
+
+### Policy
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Max retries | 5 | Number of retries after the initial attempt (6 total attempts). |
+| Initial delay | 1 000 ms | Backoff before first retry. |
+| Max delay | 30 000 ms | Cap on exponential backoff. |
+| Multiplier | 2 | Exponential base. |
+| Jitter | 10% | Random jitter to prevent thundering herd. |
+| Timeout | 10 000 ms | Per-attempt HTTP request timeout (configurable). |
+
+Delay formula: `min(initialDelay × 2^retryIndex, maxDelay) ± 10% jitter`
+
+### Retryable Failures
+
+The following failures trigger a retry:
+
+- HTTP 5xx responses (transient server-side failures)
+- Network/transport failures (timeouts, `ECONNRESET`, `ETIMEDOUT`, `ECONNABORTED`, `ECONNREFUSED`, DNS failures, etc.)
+
+Retrying only these transient failures keeps retries bounded and avoids wasting attempts on permanent client errors.
+
+### Non-Retryable Failures (Direct DLQ)
+
+The following failures are moved **directly to the DLQ on the first attempt** (no retries):
+
+- Payload exceeds `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES` → `WEBHOOK_PAYLOAD_TOO_LARGE`
+- Destination URL blocked by SSRF guard → `WEBHOOK_SSRF_BLOCKED`
+- Per-host rate limit exceeded → `WEBHOOK_RATE_LIMITED`
+- HTTP 4xx client error response → `WEBHOOK_DELIVERY_4XX` (permanent client error; retrying cannot succeed)
+
+### After Retry Exhaustion
+
+After all retryable attempts fail, the event is moved to the **Dead Letter Queue** with error code `WEBHOOK_RETRY_EXHAUSTED` and the last failure message.
+
+---
+
+## Dead Letter Queue (DLQ)
+
+### Overview
+
+Failed webhook deliveries are persisted to a SQLite-backed DLQ that survives service restarts.
+
+| Property | Value |
+|----------|-------|
+| Storage | SQLite (`data/webhook-dlq.db` by default) |
+| Max capacity | 10 000 entries (oldest-evict when full) |
+| Poison message limit | 5 replay attempts before permanent drop |
+| Secret storage | Secrets stored internally for replay, **never returned in API responses** |
+
+### DLQ Entry Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | DLQ entry identifier. |
+| `webhookId` | UUID | Original stable event ID (unchanged across all retry attempts). |
+| `url` | string | Destination URL. |
+| `body` | object | Event payload body. |
+| `retryCount` | number | Number of delivery attempts made. |
+| `failedAt` | ISO-8601 | When the final failure occurred. |
+| `error` | string | Machine-readable failure reason (error code + message). |
+| `replayedAt` | ISO-8601 &#124; null | When the entry was successfully replayed (null if pending). |
+
+Note: `webhookSecret` is **never** present in DLQ views returned by the API.
+
+---
+
+## DLQ API
+
+All DLQ endpoints require `admin` role authentication.
+
+### GET /api/v1/webhook-subscriptions/dlq
+
+List all dead-lettered webhook events.
+
+**Response (200):**
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "dlq-uuid-1",
+      "webhookId": "event-uuid-stable",
+      "url": "https://example.com/hook",
+      "body": { "event": "contract.created" },
+      "retryCount": 6,
+      "failedAt": "2024-01-01T00:00:00.000Z",
+      "error": "WEBHOOK_RETRY_EXHAUSTED: connection refused",
+      "replayedAt": null
+    }
+  ],
+  "meta": { "total": 10, "pending": 8, "replayed": 2 }
+}
+```
+
+### GET /api/v1/webhook-subscriptions/dlq/stats
+
+Returns DLQ statistics.
+
+**Response (200):**
+```json
+{
+  "status": "success",
+  "data": { "total": 10, "pending": 8, "replayed": 2 }
+}
+```
+
+### GET /api/v1/webhook-subscriptions/dlq/:id
+
+Returns a single DLQ entry. Returns `404` if not found.
+
+### POST /api/v1/webhook-subscriptions/dlq/:id/replay
+
+Replays a single DLQ entry through the normal delivery pipeline with a **fresh timestamp and signature**. Returns `404` if not found, `422` if already replayed.
+
+**Response (200):**
+```json
+{
+  "status": "success",
+  "data": { "id": "dlq-uuid-1", "replayed": true, "message": "Replay successful" }
+}
+```
+
+### POST /api/v1/webhook-subscriptions/dlq/replay-all
+
+Replays all pending (not yet replayed) DLQ entries with bounded concurrency (default: 5 parallel).
+
+**Response (200):**
+```json
+{
+  "status": "success",
+  "data": { "attempted": 8, "succeeded": 7, "failed": 0, "deduped": 1 }
+}
+```
+
+---
+
+## Replay Behavior
+
+- Replay uses the **same delivery pipeline** as normal event delivery (SSRF check, payload size check, signing, retry, DLQ).
+- A **fresh `X-Timestamp`** and **fresh `X-Signature`** are generated for every replay attempt — old timestamps/signatures are never reused.
+- Replay removes the entry from the DLQ **only on success**.
+- If replay also fails, the entry remains in the DLQ for manual review or another replay attempt.
+- **Deduplication:** if the same `webhookId` + `body` combination is already pending in the DLQ, the entry is marked replayed without re-attempting delivery.
+
+---
+
+## Delivery Semantics
+
+### At-Least-Once Delivery
+
+HTTP webhooks cannot guarantee exactly-once delivery. If the subscriber's server receives the request but the sender times out before receiving a response, the event will be retried.
+
+Subscribers **must** implement idempotency using the stable event `webhookId`. The same `webhookId` is preserved across all retry attempts for a given event.
+
+### Event ID Stability
+
+Each logical event is assigned a UUID before the first delivery attempt. This UUID is preserved:
+- Across all retry attempts for the same failure.
+- In the DLQ entry (`webhookId` field).
+- During replay (the `webhookId` is not regenerated on replay).
+
+---
+
+## Configuration Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBHOOKS_ENABLED` | `true` | Master switch. When `false`, all webhook delivery is a no-op and subscription routes return 404. |
+| `WEBHOOK_DELIVERY_TIMEOUT_MS` | `10000` | Per-attempt HTTP request timeout in milliseconds. Range: 100–120 000. |
+| `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES` | `1048576` | Maximum serialized payload size in bytes. Oversized payloads go directly to DLQ. Range: 1 024–10 485 760. |
+| `WEBHOOK_HOST_RATE_LIMIT_MAX` | `60` | Maximum outbound deliveries per destination host per window. |
+| `WEBHOOK_HOST_RATE_LIMIT_WINDOW_MS` | `60000` | Sliding window duration for per-host rate limiting. |
+| `WEBHOOK_DLQ_PATH` | `data/webhook-dlq.db` | Path to the SQLite file used for DLQ persistence. Use `:memory:` for ephemeral (test) mode. |
+| `WEBHOOK_RETRY_MAX_ATTEMPTS` | `6` | Total delivery attempts including the initial one (default 5 retries). Range: 1–100. |
+| `WEBHOOK_RETRY_INITIAL_DELAY_MS` | `1000` | Initial retry backoff in milliseconds. Range: 100–60 000. |
+| `WEBHOOK_RETRY_MAX_DELAY_MS` | `30000` | Cap on exponential backoff in milliseconds. Range: 1 000–600 000. |
+| `WEBHOOK_RETRY_MULTIPLIER` | `2` | Exponential backoff multiplier. Range: 1–10. |
+| `WEBHOOK_RETRY_JITTER_FACTOR` | `0.1` | Jitter offset (±) as a fraction of the delay. Range: 0–1. |
+
+---
+
+## Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `WEBHOOK_PAYLOAD_TOO_LARGE` | — | Serialized payload exceeds `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES`. Event goes to DLQ without retry. |
+| `WEBHOOK_SSRF_BLOCKED` | — | Destination URL is private/reserved. Event goes to DLQ without retry. |
+| `WEBHOOK_RATE_LIMITED` | — | Per-host delivery rate limit exceeded. Event goes to DLQ without retry. |
+| `WEBHOOK_RETRY_EXHAUSTED` | — | All retry attempts failed. Event moved to DLQ. |
+| `WEBHOOK_DELIVERY_4XX` | — | Downstream returned a permanent 4xx client error. Event moved to DLQ without retry. |
+| `WEBHOOK_DELIVERY_FAILED` | — | Single delivery attempt failed. |
+| `WEBHOOK_DLQ_NOT_FOUND` | 404 | Requested DLQ entry does not exist. |
+| `WEBHOOK_REPLAY_FAILED` | 422 | Replay attempt failed (already replayed, etc.). |
+| `WEBHOOK_INVALID_CONFIGURATION` | — | Subscription configuration is invalid (e.g., malformed URL). |

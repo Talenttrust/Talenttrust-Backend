@@ -123,39 +123,6 @@ export const bulkRatingItemSchema = z.object({
     .max(5, 'Rating must be at most 5'),
   comment: z.string()
     .max(1000, 'Comment must not exceed 1000 characters')
-    .refine((val: string) => isNotSpamComment(val), 'Comment contains excessive repetitive content')
-    .optional(),
-});
-
-export const bulkReputationSchema = z.object({
-  body: z.object({
-    items: z.array(bulkRatingItemSchema)
-      .min(1, 'items array must contain at least one item')
-      .max(MAX_BULK_BATCH_SIZE, `items array must not exceed ${MAX_BULK_BATCH_SIZE} items`),
-  }),
-});
-
-/** Inferred TypeScript types from the schemas above. */
-export type ReputationParamsDto = z.infer<typeof reputationParamsSchema>;
-export type UpdateReputationDto = z.infer<typeof updateReputationSchema>;
-export type ReputationProfileResponseDto = z.infer<typeof reputationProfileResponseSchema>;
-
-registry.register('UpdateReputation', updateReputationSchema);
-registry.register('ReputationProfileResponse', reputationProfileResponseSchema);
-
-export const MAX_BULK_BATCH_SIZE = 50;
-
-export const bulkRatingItemSchema = z.object({
-  reviewerId: z.string().min(1, 'reviewerId is required'),
-  targetId: z.string().min(1, 'targetId is required'),
-  contextId: z.string().uuid('contextId must be a valid UUID'),
-  rating: z.number()
-    .finite('Rating must be a finite number')
-    .int('Rating must be an integer')
-    .min(1, 'Rating must be at least 1')
-    .max(5, 'Rating must be at most 5'),
-  comment: z.string()
-    .max(1000, 'Comment must not exceed 1000 characters')
     .refine(
       (val: string) => isNotSpamComment(val),
       'Comment contains excessive repetitive content'
@@ -170,3 +137,71 @@ export const bulkReputationSchema = z.object({
       .max(MAX_BULK_BATCH_SIZE, `Batch size must not exceed ${MAX_BULK_BATCH_SIZE}`),
   }),
 });
+
+/**
+ * DTO schema for submitting a manual reputation correction.
+ *
+ * This endpoint is strictly separated from ordinary event ingestion pathways.
+ * It requires:
+ * - A mandatory reason (10-5000 characters) explaining the correction
+ * - A mandatory reference (e.g., ticket number, dispute ID, escalation ID)
+ * - A valid contextId (UUID) linking to the associated contract
+ *
+ * Security:
+ * - References containing URLs with credentials, tokens, or secrets are rejected
+ * - Only authorized operator roles (admin, support, moderator, superadmin) may call this endpoint
+ * - All corrections are audited with WARNING severity and full provenance
+ */
+export const correctReputationSchema = z.object({
+  reason: z.string()
+    .min(10, 'Reason must be at least 10 characters')
+    .max(5000, 'Reason must not exceed 5000 characters')
+    .openapi({ example: 'Correction due to verified dispute resolution in favor of freelancer' }),
+  reference: z.string()
+    .min(1, 'Reference is required')
+    .max(255, 'Reference must not exceed 255 characters')
+    .refine(
+      (val: string) => !/https?:\/\/[^:]+:[^@]+@/i.test(val),
+      'Reference must not contain URLs with embedded credentials'
+    )
+    .refine(
+      (val: string) => !/https?:\/\/[^\s]+\?(?:.*[&?])?(?:token|key|secret|password|auth|access_token|api_key)=[^&\s]+/i.test(val),
+      'Reference must not contain URLs with token/query parameters'
+    )
+    .openapi({ example: 'DISP-2024-001234' }),
+  contextId: z.string().uuid('contextId must be a valid UUID').openapi({
+    example: '550e8400-e29b-41d4-a716-446655440000',
+  }),
+});
+
+/**
+ * Response schema for a reputation correction entry.
+ */
+export const reputationCorrectionResponseSchema = z.object({
+  id: z.string().uuid().openapi({ example: '123e4567-e89b-12d3-a456-426614174000' }),
+  targetId: z.string().openapi({ example: 'freelancer-uuid' }),
+  contextId: z.string().uuid().openapi({ example: 'contract-uuid' }),
+  reason: z.string().openapi({ example: 'Correction due to verified dispute resolution' }),
+  reference: z.string().openapi({ example: 'DISP-2024-001234' }),
+  beforeScore: z.number().min(0).max(5).openapi({ example: 3.5 }),
+  afterScore: z.number().min(0).max(5).openapi({ example: 4.0 }),
+  beforeWeighted: z.number().min(0).max(5).openapi({ example: 3.45 }),
+  afterWeighted: z.number().min(0).max(5).openapi({ example: 3.95 }),
+  beforeTotal: z.number().int().min(0).openapi({ example: 10 }),
+  afterTotal: z.number().int().min(0).openapi({ example: 10 }),
+  operatorId: z.string().openapi({ example: 'admin-uuid' }),
+  operatorRole: z.string().openapi({ example: 'admin' }),
+  createdAt: z.string().datetime().openapi({ example: '2024-01-15T10:30:00.000Z' }),
+});
+
+/** Inferred TypeScript types from the schemas above. */
+export type ReputationParamsDto = z.infer<typeof reputationParamsSchema>;
+export type UpdateReputationDto = z.infer<typeof updateReputationSchema>;
+export type CorrectReputationDto = z.infer<typeof correctReputationSchema>;
+export type ReputationProfileResponseDto = z.infer<typeof reputationProfileResponseSchema>;
+export type ReputationCorrectionResponseDto = z.infer<typeof reputationCorrectionResponseSchema>;
+
+registry.register('UpdateReputation', updateReputationSchema);
+registry.register('ReputationProfileResponse', reputationProfileResponseSchema);
+registry.register('CorrectReputation', correctReputationSchema);
+registry.register('ReputationCorrectionResponse', reputationCorrectionResponseSchema);

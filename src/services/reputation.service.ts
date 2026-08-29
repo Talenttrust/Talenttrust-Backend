@@ -1,6 +1,6 @@
-import { ReputationProfile, PaginatedReputationProfile, UpdateReputationPayload } from '../types/reputation';
+import { ReputationProfile, PaginatedReputationProfile, UpdateReputationPayload, CorrectReputationBodyDTO, ReputationCorrectionEntry } from '../types/reputation';
 import type { CursorPaginationInput } from '../contracts/cursor.types';
-import { ReputationRepository, ReputationEntry } from '../repositories/reputationRepository';
+import { ReputationRepository, ReputationEntry, ReputationCorrectionEntry as RepoReputationCorrectionEntry, CreateReputationCorrection } from '../repositories/reputationRepository';
 import { auditService } from '../audit/service';
 import {
   AppError,
@@ -610,6 +610,211 @@ export class ReputationService {
     }
 
     return results;
+  }
+
+  /**
+   * Applies a manual reputation correction with full provenance tracking.
+   * 
+   * This method is strictly separated from ordinary event ingestion pathways.
+   * It requires:
+   * - A mandatory reason (10-5000 characters) explaining the correction
+   * - A mandatory reference (e.g., ticket number, dispute ID, escalation ID)
+   * - Operator identity and role for audit trail
+   * - Before/after snapshots of the target's reputation profile
+   *
+   * @param targetId - The user whose reputation is being corrected
+   * @param contextId - The contract/context associated with the correction
+   * @param reason - Human-readable explanation for the correction (10-5000 chars)
+   * @param reference - External reference ID (ticket, dispute, escalation, etc.)
+   * @param operatorId - The user ID performing the correction
+   * @param operatorRole - The role of the operator (e.g., 'admin', 'support', 'moderator')
+   * @param correlationId - Optional correlation ID for distributed tracing
+   * @returns The created ReputationCorrectionEntry with full provenance
+   *
+   * @throws ForbiddenError if reputation system is disabled or operator unauthorized
+   * @throws ConflictError if a correction with the same reference already exists for this target/context
+   * @throws ValidationError if reason or reference are invalid
+   * @throws Error if audit logging fails
+   */
+  public static correctReputation(
+    targetId: string,
+    contextId: string,
+    reason: string,
+    reference: string,
+    operatorId: string,
+    operatorRole: string,
+    correlationId?: string
+  ): ReputationCorrectionEntry {
+    // Feature flag check - reputation must be enabled
+    if (!isReputationEnabled()) {
+      throw new ForbiddenError('Reputation system is currently disabled');
+    }
+
+    // Ensure repository is initialized
+    if (!this.repository) {
+      throw new Error('ReputationService not initialized. Call initialize() first.');
+    }
+
+    // Validate required fields
+    if (!reason || reason.trim().length < 10) {
+      throw new ValidationError('Reason must be at least 10 characters');
+    }
+    if (reason.length > 5000) {
+      throw new ValidationError('Reason must not exceed 5000 characters');
+    }
+    if (!reference || reference.trim().length === 0) {
+      throw new ValidationError('Reference is required');
+    }
+
+    // Validate reference format - must not contain sensitive URLs
+    // Sanitize and validate the reference to prevent sensitive data leakage
+    const sanitizedReference = this.sanitizeReference(reference);
+    if (sanitizedReference !== reference) {
+      throw new ValidationError('Reference contains potentially sensitive data (URLs with credentials, tokens, etc.)');
+    }
+
+    // Validate operator role - only authorized roles can perform corrections
+    const authorizedRoles = ['admin', 'auditor'];
+    if (!authorizedRoles.includes(operatorRole.toLowerCase())) {
+      throw new ForbiddenError('Operator role not authorized to perform reputation corrections');
+    }
+
+    // Snapshot the target's current reputation profile BEFORE the correction
+    const profileBefore = this.getProfile(targetId);
+    const beforeScore = profileBefore.score;
+    const beforeWeighted = profileBefore.weightedScore;
+    const beforeTotal = profileBefore.totalRatings;
+
+    // For corrections, we don't modify the underlying ratings directly.
+    // Instead, we record the correction as a provenance entry.
+    // The "after" values represent the intended corrected state.
+    // In a real implementation, this might adjust a manual override score.
+    // For now, we record the correction with the same values (no actual score change)
+    // but the provenance record captures the intent.
+    // The after values could be provided by the operator or computed from a proposed change.
+    // Here we use the same values to indicate a "note" correction, but the structure
+    // supports actual score adjustments if needed in the future.
+    const afterScore = beforeScore;
+    const afterWeighted = beforeWeighted;
+    const afterTotal = beforeTotal;
+
+    // Create the correction record with full provenance
+    const correction = this.repository.createCorrection({
+      targetId,
+      contextId,
+      reason: reason.trim(),
+      reference: reference.trim(),
+      beforeScore,
+      afterScore,
+      beforeWeighted,
+      afterWeighted,
+      beforeTotal,
+      afterTotal,
+      operatorId,
+      operatorRole: operatorRole.toLowerCase(),
+    });
+
+    // Mandatory audit log for the correction
+    try {
+      auditService.log({
+        action: 'REPUTATION_CORRECTED',
+        severity: 'WARNING', // Corrections are WARNING level as they override computed scores
+        actor: operatorId,
+        resource: 'reputation',
+        resourceId: targetId,
+        metadata: {
+          correctionId: correction.id,
+          contextId,
+          reason: reason.trim(),
+          reference: reference.trim(),
+          operatorRole: operatorRole.toLowerCase(),
+          before: {
+            score: beforeScore,
+            weightedScore: beforeWeighted,
+            totalRatings: beforeTotal,
+          },
+          after: {
+            score: afterScore,
+            weightedScore: afterWeighted,
+            totalRatings: afterTotal,
+          },
+        },
+        correlationId,
+      });
+    } catch (auditError) {
+      console.error('[ReputationService] Audit logging failed for correction:', auditError);
+      throw new Error('Failed to create audit trail for correction');
+    }
+
+    return correction;
+  }
+
+  /**
+   * Sanitizes a reference string to prevent sensitive data leakage.
+   * 
+   * Rejects references that contain URLs with credentials, tokens, or other sensitive patterns.
+   * Allows safe references like ticket numbers (TKT-123), dispute IDs (DISP-456), etc.
+   * 
+   * @param reference - The reference string to sanitize
+   * @returns The sanitized reference, or a modified version if sensitive data detected
+   */
+  private static sanitizeReference(reference: string): string {
+    // Check for URLs with credentials (user:pass@host)
+    const urlWithCredentials = /https?:\/\/[^:]+:[^@]+@/i;
+    if (urlWithCredentials.test(reference)) {
+      return '[REDACTED_URL_WITH_CREDENTIALS]';
+    }
+
+    // Check for URLs with token-like query parameters
+    const urlWithToken = /https?:\/\/[^\s]+\?(?:.*[&?])?(?:token|key|secret|password|auth|access_token|api_key)=[^&\s]+/i;
+    if (urlWithToken.test(reference)) {
+      return '[REDACTED_URL_WITH_TOKEN]';
+    }
+
+    // Check for bare tokens/secrets (long alphanumeric strings that look like API keys)
+    const bareToken = /\b[a-zA-Z0-9_-]{32,}\b/;
+    if (bareToken.test(reference) && !/^(TKT|DISP|ESC|INC|PR|ISSUE)-\d+$/i.test(reference.trim())) {
+      // Allow common reference formats but flag potential bare tokens
+      return '[REDACTED_POTENTIAL_TOKEN]';
+    }
+
+    return reference;
+  }
+
+  /**
+   * Retrieves all reputation corrections for a target user.
+   * 
+   * @param targetId - The target user's ID
+   * @returns Array of ReputationCorrectionEntry objects ordered by creation date descending
+   */
+  public static getCorrections(targetId: string): ReputationCorrectionEntry[] {
+    if (!isReputationEnabled()) {
+      throw new ForbiddenError('Reputation system is currently disabled');
+    }
+
+    if (!this.repository) {
+      throw new Error('ReputationService not initialized. Call initialize() first.');
+    }
+
+    if (!targetId) {
+      throw new AppError(400, 'bad_request', 'Target ID is required');
+    }
+
+    return this.repository.findCorrectionsByTargetId(targetId);
+  }
+
+  /**
+   * Retrieves a specific reputation correction by ID.
+   * 
+   * @param correctionId - The correction UUID
+   * @returns The ReputationCorrectionEntry or undefined if not found
+   */
+  public static getCorrectionById(correctionId: string): ReputationCorrectionEntry | undefined {
+    if (!this.repository) {
+      throw new Error('ReputationService not initialized. Call initialize() first.');
+    }
+
+    return this.repository.findCorrectionById(correctionId);
   }
 
   /**

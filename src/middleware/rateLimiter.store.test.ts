@@ -32,7 +32,7 @@ describe('createRateLimiter with unified RateLimitStore', () => {
     store.destroy();
   });
 
-  it('preserves the window reset boundary', async () => {
+  it('bounds bursts across a window boundary (sliding window)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(1_000);
 
@@ -45,13 +45,23 @@ describe('createRateLimiter with unified RateLimitStore', () => {
     jest.setSystemTime(2_000);
     const stillSameWindow = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
 
+    // Just after the bucket rolls over, the prior bucket's excess requests
+    // are still weighted into the trailing window, so the burst stays
+    // bounded instead of resetting to a fresh quota (the fixed-window bug
+    // this sliding-window counter fixes).
     jest.setSystemTime(2_001);
-    const afterReset = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
+    const justAfterRoll = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
+
+    // After a full window of silence (skipping a bucket entirely), the prior
+    // count is too old to carry forward, so a fresh request is allowed.
+    jest.setSystemTime(4_001);
+    const afterFullyAged = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(429);
     expect(stillSameWindow.status).toBe(429);
-    expect(afterReset.status).toBe(200);
+    expect(justAfterRoll.status).toBe(429);
+    expect(afterFullyAged.status).toBe(200);
 
     store.destroy();
   });

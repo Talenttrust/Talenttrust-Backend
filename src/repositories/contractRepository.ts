@@ -228,7 +228,8 @@ export class ContractRepository implements IContractRepository {
       );
 
     if (result.changes === 0) {
-      throw new VersionConflictError();
+      const current = await this.findById(id);
+      throw new VersionConflictError(current?.version);
     }
 
     return (await this.findById(id))!;
@@ -437,7 +438,7 @@ export class InMemoryContractRepository implements IContractRepository {
     }
 
     if (existing.version !== expectedVersion) {
-      throw new VersionConflictError();
+      throw new VersionConflictError(existing.version);
     }
 
     const updated: Contract = {

@@ -8,6 +8,7 @@ import {
   isWithinRetentionWindow,
   parseRetentionDays,
 } from '../utils/softDelete';
+import { WebhookService } from './webhook.service';
 
 /** Env key for milestones soft-delete retention window (days). */
 export const MILESTONES_SOFT_DELETE_RETENTION_DAYS_ENV =
@@ -66,6 +67,17 @@ const milestoneStore = new Map<string, MilestoneRecord>();
  * Service layer for milestone business logic, including soft-delete / restore / purge.
  */
 export class MilestonesService {
+  /**
+   * Optional webhook service used to fire `milestone.released` events when a
+   * milestone is created with `completed: true`. When omitted (default), no
+   * webhook is triggered. Webhook delivery failure is silently swallowed so it
+   * never propagates into the milestone creation response.
+   */
+  private readonly webhookService?: WebhookService;
+
+  constructor(webhookService?: WebhookService) {
+    this.webhookService = webhookService;
+  }
   /**
    * Retention window in days. Overridable via env for tests and ops.
    */
@@ -130,6 +142,24 @@ export class MilestonesService {
       deletedAt: null,
     };
     milestoneStore.set(record.id, record);
+
+    // Fire `milestone.released` webhook when a milestone is created as already completed.
+    // Delivery is fire-and-forget: failure is observable via the DLQ but must not
+    // propagate into the milestone creation response.
+    if (this.webhookService && record.completed) {
+      void this.webhookService
+        .trigger('milestone.released', {
+          milestoneId: record.id,
+          contractId: record.contractId,
+          title: record.title,
+          amount: record.amount,
+          completedAt: record.updatedAt.toISOString(),
+        })
+        .catch(() => {
+          // Webhook delivery failure is observable via DLQ; do not throw.
+        });
+    }
+
     return { ...record };
   }
 
@@ -264,4 +294,8 @@ export class MilestonesService {
   }
 }
 
-export const milestonesService = new MilestonesService();
+// Default singleton wired to the real webhook delivery service so landmark
+// milestone releases (creation with `completed: true`) fire `milestone.released`
+// webhooks in production. The webhook delivery pipeline (signing, retry, DLQ)
+// stays isolated from milestone CRUD via fire-and-forget delivery in `create()`.
+export const milestonesService = new MilestonesService(new WebhookService());

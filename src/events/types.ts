@@ -21,6 +21,19 @@ export interface ContractEvent {
   timestamp: number;
   payload: Record<string, any>;
   signature?: string;
+  /**
+   * On-chain network the event was observed on (e.g. `soroban`,
+   * `stellar`). Present for on-chain events; absent for off-chain
+   * events which carry no finality risk.
+   */
+  network?: string;
+  /**
+   * Ledger/block sequence the event was observed at. Together with
+   * `network` this drives the finality evaluation — an event is only
+   * exposed through public reads once it has accumulated the network's
+   * configured confirmation depth.
+   */
+  ledger?: number;
 }
 
 export interface EventIngestionResult {
@@ -45,6 +58,17 @@ export interface EventProcessingAudit {
   createdAt: Date;
   /** Optional correlation ID for distributed tracing across service boundaries. */
   correlationId?: string;
+  /** On-chain network the event was observed on, if any. */
+  network?: string;
+  /** Ledger/block sequence the event was observed at, if any. */
+  ledger?: number;
+  /**
+   * Internal finality state. `undefined` for legacy records and
+   * off-chain events, which are treated as finalized by public reads.
+   */
+  finalityStatus?: import('../finality/types').FinalityStatus;
+  /** ISO-8601 timestamp when the event became finalized (if it has). */
+  finalizedAt?: string;
 }
 
 /**
