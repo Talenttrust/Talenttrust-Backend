@@ -109,6 +109,24 @@ export interface CursorUpdateResult {
 }
 
 /**
+ * @notice Result of attempting to rewind a cursor checkpoint.
+ * @dev Identical shape to CursorUpdateResult; the distinction is
+ *      semantic — callers use this to signal that the rewind was
+ *      intentional (reorg recovery) rather than a normal forward
+ *      update.
+ */
+export interface CursorRewindResult {
+  /** Whether the cursor was successfully rewound */
+  success: boolean;
+
+  /** New cursor state after rewind */
+  cursor: IndexerCursor;
+
+  /** Reason for failure, if any */
+  reason?: string;
+}
+
+/**
  * @notice Request to resume indexing from a stored cursor.
  */
 export interface CursorResumeRequest {
