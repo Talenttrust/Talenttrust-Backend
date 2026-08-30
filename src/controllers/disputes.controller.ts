@@ -1,7 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { disputesService, DisputeError } from '../services/disputes.service';
 import {
-  DisputeResponseDto,
   mapToDisputeResponse,
   CreateDisputeDto,
   UpdateDisputePayload,
@@ -32,7 +31,7 @@ function traceContext(res: Response): Record<string, string> {
 
 export class DisputesController {
   public async getDisputes(
-    _req: Request,
+    req: DisputeRequest,
     res: Response,
     next: NextFunction,
   ): Promise<void> {
@@ -41,7 +40,10 @@ export class DisputesController {
     log.info('disputes.getDisputes: start', ctx);
 
     try {
-      ok(res, { disputes: [], total: 0 });
+      const includeDeleted = req.query['includeDeleted'] === 'true';
+      const disputes = disputesService.listDisputes({ includeDeleted });
+      log.info('disputes.getDisputes: success', { ...ctx, count: disputes.length });
+      ok(res, { disputes: disputes.map(mapToDisputeResponse), total: disputes.length });
     } catch (error) {
       log.error('disputes.getDisputes: error', { ...ctx, err: error as Error });
       next(error);
@@ -84,17 +86,20 @@ export class DisputesController {
 
     try {
       const body = req.body ?? {};
-      const dispute = {
-        id: `dispute-${Date.now()}`,
+      const dispute = disputesService.createDispute({
         contractId: body.contractId ?? '',
-        status: 'open' as const,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+        reason: body.reason,
+        raisedBy: (req.user?.id as string | undefined) ?? body.raisedBy,
+      });
 
       log.info('disputes.createDispute: success', { ...ctx, disputeId: dispute.id });
       ok(res, mapToDisputeResponse(dispute), undefined, 201);
     } catch (error) {
+      if (error instanceof DisputeError) {
+        log.warn('disputes.createDispute: failed', { ...ctx, error: error.code });
+        fail(res, error.code, error.message, error.statusCode);
+        return;
+      }
       log.error('disputes.createDispute: error', { ...ctx, err: error as Error });
       next(error);
     }
@@ -112,7 +117,11 @@ export class DisputesController {
 
     try {
       const body = req.body ?? {};
-      const dispute = await disputesService.updateDispute(id, body);
+      const dispute = await disputesService.updateDispute(id, {
+        ...body,
+        // Actor comes from the verified session, never from the caller.
+        statusChangedBy: (req.user?.id as string | undefined) ?? body.statusChangedBy,
+      });
       log.info('disputes.updateDispute: success', { ...ctx, disputeId: id });
       ok(res, mapToDisputeResponse(dispute));
     } catch (error) {
@@ -137,8 +146,15 @@ export class DisputesController {
     log.info('disputes.deleteDispute: start', { ...ctx, disputeId: id });
 
     try {
+      disputesService.softDeleteDispute(id);
+      log.info('disputes.deleteDispute: success', { ...ctx, disputeId: id });
       ok(res, { message: `Dispute ${id} deleted successfully` });
     } catch (error) {
+      if (error instanceof DisputeError) {
+        log.warn('disputes.deleteDispute: failed', { ...ctx, disputeId: id, error: error.code });
+        fail(res, error.code, error.message, error.statusCode);
+        return;
+      }
       log.error('disputes.deleteDispute: error', { ...ctx, disputeId: id, err: error as Error });
       next(error);
     }

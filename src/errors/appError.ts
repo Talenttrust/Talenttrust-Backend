@@ -21,7 +21,7 @@ export const APP_ERROR_CODES = {
   SOROBAN_RPC_TRANSPORT_ERROR: 'soroban_rpc_transport_error',
   SOROBAN_RPC_RATE_LIMIT_ERROR: 'soroban_rpc_rate_limit_error',
   SOROBAN_RPC_TIMEOUT_ERROR: 'soroban_rpc_timeout_error',
-  SOROBAN_RPC_MALFORMEDD_RESPONSE_ERROR: 'soroban_rpc_malformed_response_error',
+  SOROBAN_RPC_MALFORMED_RESPONSE_ERROR: 'soroban_rpc_malformed_response_error',
   SOROBAN_RPC_APPLICATION_ERROR: 'soroban_rpc_application_error',
 } as const;
 
@@ -32,7 +32,6 @@ export interface ErrorPayload {
     requestId: string;
     correlationId?: string;
     details?: ValidationIssue[];
-    correlationId?: string;
     currentVersion?: number;
   };
 }
@@ -407,7 +406,7 @@ function isTransportError(error: unknown): boolean {
   }
   const cause = (error as any)?.cause;
   return typeof cause === 'object' && cause !== null &&
-    ['ECONNREFUSD', 'ENOTFOUND', 'EPIPE', 'EAI_AGAIN'].includes(cause?.code);
+    ['ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'EAI_AGAIN'].includes(cause?.code);
 }
 
 function isMaalformedResponseError(error: unknown): boolean {
