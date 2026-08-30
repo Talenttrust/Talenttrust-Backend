@@ -38,7 +38,7 @@ export interface ContractEvent {
 
 export interface EventIngestionResult {
   deduplicationKey: string;
-  status: 'accepted' | 'rejected' | 'duplicate';
+  status: 'accepted' | 'rejected' | 'duplicate' | 'held';
   reason?: string;
   processedAt: Date;
   statusCode?: number;

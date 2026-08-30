@@ -37,7 +37,11 @@ let instancePath: string | null = null;
  * file-backed instance left open by an earlier suite. Production callers invoke
  * `getDb()` with no argument, so they always reuse the single shared instance.
  */
-export function getDb(dbPath?: string): DatabaseInstance {
+export interface GetDbOptions {
+  runMigrations?: boolean;
+}
+
+export function getDb(dbPath?: string, options?: GetDbOptions): DatabaseInstance {
   const resolvedPath =
     dbPath ??
     process.env["DB_PATH"] ??
@@ -71,7 +75,11 @@ export function getDb(dbPath?: string): DatabaseInstance {
 
   created.pragma("foreign_keys = ON"); // Enforce FK constraints
 
-  runMigrations(created);
+  const shouldRunMigrations = options?.runMigrations ?? (resolvedPath === ':memory:');
+  if (shouldRunMigrations) {
+    runMigrations(created);
+  }
+  
   return created;
 }
 

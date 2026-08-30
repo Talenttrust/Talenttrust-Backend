@@ -5,9 +5,13 @@
  * and that no sensitive data leaks into info/warn records.
  */
 
-import { processBlockchainSync } from './blockchain-processor';
+import { processBlockchainSync, resetHeadTracker } from './blockchain-processor';
 import { BlockchainSyncPayload } from '../types';
 import { setWriteRecordImpl, LogRecord } from '../../logger';
+
+beforeEach(() => {
+  resetHeadTracker();
+});
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

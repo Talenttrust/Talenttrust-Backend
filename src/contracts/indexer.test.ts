@@ -180,20 +180,39 @@ describe('ContractEventIndexer', () => {
       expect(cursor!.lastSequence).toBe(20);
     });
 
-    it('maintains separate cursors for multiple sources', async () => {
-      await indexer.indexBatch('source-1', [
-        createValidEvent({ eventId: 'e1', sequence: 100 }),
+    it('handles a checkpoint ahead of the available ledger without rolling back', async () => {
+      const source = 'network-1:contract-1:ethereum';
+      await cursorRepository.updateCursor(source, 100);
+
+      const result = await indexer.indexBatch(source, [
+        createValidEvent({ eventId: 'late-event', sequence: 50 }),
       ]);
 
-      await indexer.indexBatch('source-2', [
-        createValidEvent({ eventId: 'e2', sequence: 50 }),
-      ]);
+      expect(result.processedCount).toBe(0);
+      expect(result.newCursor).toBeUndefined();
 
-      const cursor1 = await indexer.getCursor('source-1');
-      const cursor2 = await indexer.getCursor('source-2');
+      const cursor = await indexer.getCursor(source);
+      expect(cursor!.lastSequence).toBe(100);
+    });
 
-      expect(cursor1!.lastSequence).toBe(100);
-      expect(cursor2!.lastSequence).toBe(50);
+    it('advances checkpoints independently for different networks', async () => {
+      const networkA = 'network-1:contract-1:ethereum';
+      const networkB = 'network-2:contract-1:ethereum';
+
+      await indexer.indexBatch(networkA, [createValidEvent({ eventId: 'a1', sequence: 1 })]);
+      await indexer.indexBatch(networkB, [createValidEvent({ eventId: 'b1', sequence: 1 })]);
+
+      const cursorA = await indexer.getCursor(networkA);
+      const cursorB = await indexer.getCursor(networkB);
+      expect(cursorA!.lastSequence).toBe(1);
+      expect(cursorB!.lastSequence).toBe(1);
+
+      await indexer.indexBatch(networkA, [createValidEvent({ eventId: 'a2', sequence: 2 })]);
+
+      const cursorA2 = await indexer.getCursor(networkA);
+      const cursorB2 = await indexer.getCursor(networkB);
+      expect(cursorA2!.lastSequence).toBe(2);
+      expect(cursorB2!.lastSequence).toBe(1);
     });
 
     it('handles empty batch gracefully', async () => {
@@ -236,6 +255,23 @@ describe('ContractEventIndexer', () => {
 
       const indexed = await indexer.getIndexedEvents();
       expect(indexed).toHaveLength(2);
+    });
+
+    it('does not advance the cursor when a projection write fails', async () => {
+      const source = 'network-1:contract-1:ethereum';
+      const failingEventRepository = new InMemoryContractEventRepository();
+      jest.spyOn(failingEventRepository, 'save').mockRejectedValue(new Error('projection write failed'));
+      const failingProcessor = new ContractEventProcessor(failingEventRepository);
+      const failingIndexer = new ContractEventIndexer(failingProcessor, cursorRepository);
+
+      const result = await failingIndexer.indexBatch(source, [createValidEvent()]);
+
+      expect(result.processedCount).toBe(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toMatch(/projection write failed/i);
+      expect(result.newCursor).toBeUndefined();
+      const cursor = await failingIndexer.getCursor(source);
+      expect(cursor).toBeNull();
     });
 
     it('respects sequence ordering despite insertion order', async () => {

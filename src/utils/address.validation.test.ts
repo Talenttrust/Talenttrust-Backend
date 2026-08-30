@@ -2,7 +2,7 @@ import { validateDestinationAddress } from './address.validation';
 import { ValidationError } from '../errors/appError';
 
 describe('validateDestinationAddress', () => {
-  const VALID_ACCOUNT = 'GBJDSMTMG4YBPW75YILPTYWVKNDN754YNY4YHYJ6W2Z2G7Z3N7M5UQQO';
+  const VALID_ACCOUNT = 'GAIHGRGXET76OMA3VERY4OILKXCT2Y67OHEP7UBNL4CRHOER6IOHU4IC';
   const VALID_CONTRACT = 'CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5';
 
   it('accepts a valid address (account)', () => {
@@ -23,7 +23,7 @@ describe('validateDestinationAddress', () => {
     expect(() => validateDestinationAddress(algorandAddr)).toThrow(ValidationError);
     expect(() => validateDestinationAddress(algorandAddr)).toThrow('wrong network');
 
-    const wrongPrefix = 'MBJDSMTMG4YBPW75YILPTYWVKNDN754YNY4YHYJ6W2Z2G7Z3N7M5UQQO';
+    const wrongPrefix = `M${VALID_ACCOUNT.slice(1)}`;
     expect(() => validateDestinationAddress(wrongPrefix)).toThrow(ValidationError);
     expect(() => validateDestinationAddress(wrongPrefix)).toThrow('wrong network');
   });
@@ -37,14 +37,14 @@ describe('validateDestinationAddress', () => {
 
   it('rejects malformed base32 (invalid character)', () => {
     // '0' is not in the Stellar base32 alphabet
-    const malformed = 'G0JDSMTMG4YBPW75YILPTYWVKNDN754YNY4YHYJ6W2Z2G7Z3N7M5UQQO';
+    const malformed = `G0${VALID_ACCOUNT.slice(2)}`;
     expect(() => validateDestinationAddress(malformed)).toThrow(ValidationError);
     expect(() => validateDestinationAddress(malformed)).toThrow('malformed base32');
   });
 
   it('rejects malformed base32 (invalid checksum)', () => {
     // Valid characters but wrong checksum
-    const badChecksum = 'GBJDSMTMG4YBPW75YILPTYWVKNDN754YNY4YHYJ6W2Z2G7Z3N7M5UQQA';
+    const badChecksum = `${VALID_ACCOUNT.slice(0, -1)}A`;
     expect(() => validateDestinationAddress(badChecksum)).toThrow(ValidationError);
     expect(() => validateDestinationAddress(badChecksum)).toThrow('malformed base32');
   });

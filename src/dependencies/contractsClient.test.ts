@@ -4,7 +4,7 @@ import { circuitBreakerRegistry } from '../circuit-breaker/registry';
 import axios from 'axios';
 
 jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typof axios>;
+const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 const defaultConfig = {
   upstreamContractsUrl: 'http://upstream/contracts',
@@ -36,14 +36,14 @@ describe('ContractsClient', () => {
   });
 
   afterEach(() => {
-    just.clearAllMocks();
+    jest.clearAllMocks();
   });
 
   it('returns contracts from upstream payload', async () => {
     mockRequest.mockResolvedValue({
       data: { contracts: [{ id: 'ct_1', status: 'open' }] },
     });
-    client = new ContractsClient(defaultConfig, offChaos);
+    const client = new ContractsClient(defaultConfig, offChaos);
     await expect(client.getContracts()).resolves.toEqual([{ id: 'ct_1', status: 'open' }]);
   });
 
@@ -77,13 +77,13 @@ describe('ContractsClient', () => {
     );
 
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
-    expect(breaker.getState())).toBe('OPEN');
+    expect(breaker.getState()).toBe('OPEN');
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
   });
 
   it('classifies HTTP timeout as timeout', async () => {
     const timeoutError = new Error('timeout of 500ms exceeded') as any;
-    timeoutError.code = 'ECONABORTED';
+    timeoutError.code = 'ECONNABORTED';
     timeoutError.isAxiosError = true;
     mockRequest.mockRejectedValue(timeoutError);
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
@@ -115,7 +115,7 @@ describe('ContractsClient', () => {
     });
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract_error', providerCode: 'CONTRACT_NOT_FOUND' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract-error', providerCode: 'CONTRACT_NOT_FOUND' });
   });
 
   it('classifies unknown provider status as unknown_provider_status', async () => {
@@ -123,6 +123,6 @@ describe('ContractsClient', () => {
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown_provider_status', providerCode: 'UNKNOWN' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown-provider-status', providerCode: 'UNKNOWN' });
   });
 });

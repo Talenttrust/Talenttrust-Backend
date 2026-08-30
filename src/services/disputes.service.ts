@@ -51,20 +51,57 @@ export interface DisputeRecord {
   updatedAt: Date;
   /** Set when soft-deleted; null/undefined while active. */
   deletedAt?: Date | null;
+  /**
+   * Optimistic-concurrency version. Incremented on every status-changing
+   * write so concurrent transitions surface a conflict instead of silently
+   * overwriting each other.
+   */
+  version: number;
+  /** Actor that performed the last status change (audit trail). */
+  statusChangedBy?: string;
+  /** Human-readable reason for the last status change. */
+  statusChangeReason?: string;
 }
 
 const disputeStore = new Map<string, DisputeRecord>();
 
 /**
- * Valid state transitions for disputes.
- * Maps from current state → set of allowed next states.
+ * Explicit legal-transition matrix for disputes. Centralizes the state
+ * machine so every route (single PATCH, batch, event ingestion) enforces the
+ * same rules instead of guarding inconsistently.
+ *
+ * ```
+ *              open ──► under_review
+ *                │  \       │
+ *                │   \      ▼
+ *                ▼    └─► escalated ──► resolved  (terminal)
+ *              resolved ◄──┘
+ * ```
+ *
+ * Rules layered on top of the matrix (enforced in {@link updateDispute}):
+ *  - a dispute may only be created in the `open` state ("open from eligible
+ *    state");
+ *  - a contract may only have ONE active dispute ("duplicate open" is
+ *    rejected);
+ *  - transitioning INTO `resolved` requires evidence (`resolution`);
+ *  - `resolved` is terminal: closing twice is a conflict unless the retry is
+ *    identical (idempotent);
+ *  - every status change persists actor, reason, and version atomically, and
+ *    a stale `expectedVersion` rejects the write (concurrent transition).
  */
-const VALID_TRANSITIONS: Record<DisputeStatus, Set<DisputeStatus>> = {
-  open: new Set<DisputeStatus>(['under_review', 'resolved', 'escalated']),
-  under_review: new Set<DisputeStatus>(['resolved', 'escalated']),
-  resolved: new Set<DisputeStatus>([]), // terminal state
-  escalated: new Set<DisputeStatus>(['resolved']),
+export const DISPUTE_TRANSITION_MATRIX: Readonly<Record<DisputeStatus, readonly DisputeStatus[]>> = {
+  open: ['under_review', 'resolved', 'escalated'],
+  under_review: ['resolved', 'escalated'],
+  resolved: [], // terminal state
+  escalated: ['resolved'],
 };
+
+/** Statuses that keep a dispute active (an open dispute exists for its contract). */
+const ACTIVE_STATUSES: ReadonlySet<DisputeStatus> = new Set<DisputeStatus>(['open', 'under_review', 'escalated']);
+
+const VALID_TRANSITIONS: Record<DisputeStatus, Set<DisputeStatus>> = Object.fromEntries(
+  Object.entries(DISPUTE_TRANSITION_MATRIX).map(([status, next]) => [status, new Set(next)]),
+) as Record<DisputeStatus, Set<DisputeStatus>>;
 
 /**
  * Error class for dispute-specific errors.
@@ -141,22 +178,57 @@ export class DisputesService {
   }
 
   /**
-   * Create a new active dispute.
+   * Create a new dispute. Business rules enforced here (centralized, so no
+   * route can bypass them):
+   *  - a dispute can only be opened from the eligible `open` state — creating
+   *    one directly in `resolved`/`escalated`/`under_review` is rejected;
+   *  - a contract may only have one active dispute — a second open for the
+   *    same contract is rejected ("duplicate open").
    */
   public createDispute(input: CreateDisputeInput): DisputeRecord {
+    const status = input.status ?? 'open';
+    if (status !== 'open') {
+      throw new DisputeError(
+        'invalid_initial_status',
+        `Disputes can only be opened in the 'open' state, got '${status}'`,
+        400,
+      );
+    }
+
+    if (this.hasActiveDisputeForContract(input.contractId)) {
+      throw new DisputeError(
+        'dispute_already_open',
+        `Contract ${input.contractId} already has an active dispute`,
+        409,
+      );
+    }
+
     const now = new Date();
     const record: DisputeRecord = {
       id: randomUUID(),
       contractId: input.contractId,
-      status: input.status ?? 'open',
+      status,
       reason: input.reason,
       raisedBy: input.raisedBy,
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
+      version: 1,
+      statusChangedBy: input.raisedBy,
+      statusChangeReason: 'dispute opened',
     };
     disputeStore.set(record.id, record);
     return { ...record };
+  }
+
+  /**
+   * True when the contract already has an active (non-terminal) dispute.
+   * Used to reject duplicate opens. Soft-deleted records do not count.
+   */
+  public hasActiveDisputeForContract(contractId: string): boolean {
+    return this.listDisputes().some(
+      (d) => d.contractId === contractId && ACTIVE_STATUSES.has(d.status),
+    );
   }
 
   /**
@@ -287,18 +359,70 @@ export class DisputesService {
     // Fetch dispute (404 if not found / soft-deleted)
     const dispute = this.getDisputeById(id);
 
-    // Validate transition if status is being changed
-    if (updates.status !== undefined) {
-      this.validateTransition(dispute.status, updates.status);
+    // Optimistic concurrency: a caller that read an older version must not
+    // silently overwrite a concurrent transition.
+    if (
+      updates.expectedVersion !== undefined &&
+      updates.expectedVersion !== dispute.version
+    ) {
+      throw new DisputeError(
+        'dispute_version_conflict',
+        `Dispute ${id} was modified by another actor (current version ${dispute.version})`,
+        409,
+      );
     }
 
-    // Apply the update
     const newStatus = updates.status ?? dispute.status;
+
+    // Centralized transition validation — the single funnel every route
+    // (single PATCH and batch) goes through.
+    this.validateTransition(dispute.status, newStatus);
+
+    // Resolve-without-evidence: entering the terminal `resolved` state
+    // requires evidence (resolution).
+    if (newStatus === 'resolved' && dispute.status !== 'resolved') {
+      const evidence = (updates.resolution ?? '').trim();
+      if (evidence.length === 0) {
+        throw new DisputeError(
+          'resolution_required',
+          'Resolving a dispute requires a resolution (evidence)',
+          400,
+        );
+      }
+    }
+
+    // Close twice: `resolved` is terminal. A retry carrying identical
+    // evidence is idempotent; a second close with different evidence is a
+    // conflict, not a silent overwrite.
+    if (dispute.status === 'resolved' && newStatus === 'resolved') {
+      const storedEvidence = (dispute.resolution ?? '').trim();
+      const incomingEvidence = (updates.resolution ?? '').trim();
+      if (updates.status !== undefined && incomingEvidence !== storedEvidence) {
+        throw new DisputeError(
+          'dispute_already_resolved',
+          `Dispute ${id} is already resolved; cannot change its resolution`,
+          409,
+        );
+      }
+      // Identical or metadata-only update — idempotent no-op on status.
+      return { ...dispute };
+    }
+
+    const statusChanged = dispute.status !== newStatus;
+    const now = new Date();
     const updatedDispute: DisputeRecord = {
       ...dispute,
       status: newStatus,
       resolution: updates.resolution ?? dispute.resolution,
-      updatedAt: new Date(),
+      updatedAt: now,
+      // Actor, reason, and version are persisted atomically with the write.
+      version: dispute.version + 1,
+      ...(statusChanged
+        ? {
+            statusChangedBy: updates.statusChangedBy ?? dispute.statusChangedBy,
+            statusChangeReason: updates.resolution ?? 'status updated',
+          }
+        : {}),
     };
 
     // Save to store
@@ -307,7 +431,7 @@ export class DisputesService {
     // Fire cascading side effects (notifications, escrow state changes).
     // These are fire-and-forget; failures do not roll back the dispute update.
     // In production, these would be queued for reliable delivery.
-    if (dispute.status !== newStatus) {
+    if (statusChanged) {
       try {
         const payload: EscrowEventPayload = {
           contractId: dispute.contractId,

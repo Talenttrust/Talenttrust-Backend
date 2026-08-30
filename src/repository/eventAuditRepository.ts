@@ -1,4 +1,5 @@
 import { EventProcessingAudit, EventIngestionResult } from '../events/types';
+import { PerContractEventOrdering } from '../events/ordering';
 import { DeduplicationManager } from '../utils/deduplication';
 import { redact, redactPayloadForLog } from '../events/redact';
 import { FinalityEvaluator } from '../finality/finalityEvaluator';
@@ -43,6 +44,15 @@ export interface IEventAuditRepository {
    * when the event is unknown.
    */
   markFinalized(deduplicationKey: string, finalizedAt: string): Promise<void>;
+  /**
+   * Demote finalized events within a ledger range back to provisional.
+   * Used by the rewind service after a chain reorg is detected. Only
+   * affects events whose `network` matches and whose `ledger` falls
+   * within `[fromLedger, toLedger]`.
+   *
+   * @returns The number of events actually demoted.
+   */
+  demoteProvisional(network: string, fromLedger: number, toLedger: number): Promise<number>;
   findByStatus(status: 'accepted' | 'rejected' | 'duplicate', limit?: number): Promise<EventProcessingAudit[]>;
   getEventStatistics(): Promise<{
     total: number;
@@ -119,6 +129,31 @@ export class InMemoryEventAuditRepository implements IEventAuditRepository {
     });
   }
 
+  async demoteProvisional(
+    network: string,
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<number> {
+    let demoted = 0;
+    for (const [key, audit] of this.audits.entries()) {
+      if (
+        audit.network === network &&
+        audit.ledger !== undefined &&
+        audit.ledger >= fromLedger &&
+        audit.ledger <= toLedger &&
+        audit.finalityStatus === 'finalized'
+      ) {
+        this.audits.set(key, {
+          ...audit,
+          finalityStatus: 'provisional',
+          finalizedAt: undefined,
+        });
+        demoted++;
+      }
+    }
+    return demoted;
+  }
+
   async findByStatus(status: 'accepted' | 'rejected' | 'duplicate', limit: number = 100): Promise<EventProcessingAudit[]> {
     const deduplicationKeys = this.statusIndex.get(status) || new Set();
     const audits = Array.from(deduplicationKeys)
@@ -157,6 +192,118 @@ export class EventAuditService {
   ) {}
 
   async processEvent(event: any, contractType: string, correlationId?: string): Promise<EventIngestionResult> {
+    if (this.ordering) {
+      return this.processEventOrdered(event, contractType, correlationId);
+    }
+    return this.processEventInternal(event, contractType, correlationId);
+  }
+
+  /**
+   * Ordering-aware ingestion path: consult the gate, apply only in ledger
+   * order, and drain the held buffer once a gap fills.
+   */
+  private async processEventOrdered(
+    event: any,
+    contractType: string,
+    correlationId?: string,
+  ): Promise<EventIngestionResult> {
+    const processedAt = new Date();
+    const deduplicationKey = DeduplicationManager.computeDeduplicationKey(event);
+    const decision = this.ordering!.submit(event);
+
+    if (decision.status === 'duplicate') {
+      return {
+        deduplicationKey,
+        status: 'duplicate',
+        reason: 'Event with same sequence already applied for this contract',
+        processedAt,
+      };
+    }
+
+    if (decision.status === 'rejected') {
+      log.warn('Event rejected by per-contract ordering', {
+        contractId: event.contractId,
+        eventId: event.eventId,
+        sequence: event.sequence,
+        code: decision.code,
+      });
+      return {
+        deduplicationKey,
+        status: 'rejected',
+        reason: decision.reason,
+        processedAt,
+        statusCode: decision.statusCode,
+        code: decision.code,
+      };
+    }
+
+    if (decision.status === 'held') {
+      return {
+        deduplicationKey,
+        status: 'held',
+        reason: 'Held for per-contract ordering; applied once the sequence gap fills',
+        processedAt,
+      };
+    }
+
+    const result = await this.processEventInternal(event, contractType, correlationId);
+    this.ordering!.advanceTo(event.contractId, event.sequence);
+    await this.drainOrderedEvents(event.contractId, contractType, correlationId);
+    return result;
+  }
+
+  /**
+   * Apply the contiguous run of held events whose predecessor has now been
+   * applied, in ledger order. Each event is applied and only then advances
+   * the high-water mark, so a failed apply re-holds the event instead of
+   * being silently skipped.
+   */
+  private async drainOrderedEvents(
+    contractId: string,
+    contractType: string,
+    correlationId?: string,
+  ): Promise<void> {
+    let next = this.ordering!.peekNext(contractId);
+    while (next) {
+      const held = this.ordering!.popNext(contractId)!;
+      try {
+        await this.processEventInternal(held.event, contractType, correlationId);
+        this.ordering!.advanceTo(contractId, held.event.sequence);
+      } catch (error) {
+        // Re-hold so a later retry can apply it; never silently drop it.
+        this.ordering!.submit(held.event);
+        log.warn('Ordered held event failed to apply; re-held', {
+          contractId,
+          eventId: held.event.eventId,
+          sequence: held.event.sequence,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+        break;
+      }
+      next = this.ordering!.peekNext(contractId);
+    }
+  }
+
+  /**
+   * Expire held events that waited too long for their predecessor. Returns
+   * the expired events so callers can surface them (they are recorded as
+   * `ordering_gap_timeout` rejections in the gate snapshot).
+   */
+  public expireHeldOrderingEvents(now?: number): import('../events/ordering').ExpiredEvent[] {
+    if (!this.ordering) return [];
+    return this.ordering.expireHeld(now);
+  }
+
+  /**
+   * Snapshot of the ordering gate (high-water marks, pending, rejections).
+   * Empty snapshot when no gate is attached.
+   */
+  public getOrderingSnapshot(): import('../events/ordering').OrderingSnapshot | null {
+    return this.ordering ? this.ordering.getSnapshot() : null;
+  }
+
+  /** The existing ingestion logic (validation-free; dedupe, finality, persist). */
+  private async processEventInternal(event: any, contractType: string, correlationId?: string): Promise<EventIngestionResult> {
     const deduplicationKey = DeduplicationManager.computeDeduplicationKey(event);
     const processedAt = new Date();
     const payloadHash = DeduplicationManager.computePayloadHash(event.payload);

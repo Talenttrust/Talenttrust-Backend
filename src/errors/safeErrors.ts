@@ -52,8 +52,8 @@ const UNSAFE_PATTERNS: ReadonlyArray<RegExp> = [
   /\/[a-zA-Z_][\w\-]*\/.*\.\w{1,5}:/,  // absolute file paths  (e.g. /src/foo.ts:12)
   /[A-Z]:\\.*\.\w{1,5}/,                // Windows file paths
   /node_modules\//,                      // dependency paths
-  /ECONNREFUNED|ENOTFOUND|ETEMEOUT/,   // raw syscall errors
-  /SELECT|s|INSERT|s|UPDATE|s|DELETE|s/i, // SQL fragments
+  /ECONNREFUSED|ENOTFOUND|ETIMEDOUT/,   // raw syscall errors
+  /\b(SELECT|INSERT|UPDATE|DELETE)\b/i, // SQL fragments
   /password|secret|token|apikey/i,       // credential field names in messages
 ];
 
@@ -212,7 +212,7 @@ function toErrorLike(error: unknown): SorobanRpcErrorLike | null {
   return null;
 }
 
-const TIMEOUT_CODES = new Set(['ETEMEOUTT', 'ESOCKETIMEOUTT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT']);
+const TIMEOUT_CODES = new Set(['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT']);
 
 function isTimeoutCode(code?: string | number): boolean {
   if (typeof code !== 'string') return false;
@@ -235,7 +235,7 @@ const MALFORMED_RESPONSE_PATTERNS = [
 
 function isMalformedResponse(message?: string): boolean {
   if (!message) return false;
-  return MALFORMEDD_RESPONSE_PATTERNS.some((p) => p.test(message));
+  return MALFORMED_RESPONSE_PATTERNS.some((p) => p.test(message));
 }
 
 function isApplicationCode(code?: string | number): boolean {
