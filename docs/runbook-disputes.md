@@ -167,6 +167,32 @@ Only `admin` role can transition a contract **out of** the `disputed` state:
 
 Attempting to resolve a dispute without `admin` role returns `403 forbidden`.
 
+### Dispute Record State Machine (Service Layer)
+
+Independent of the contract state machine above, each dispute *record*
+(`DisputesService`) moves through its own legal transitions. All status
+changes — single PATCH and batch — are validated through one centralized
+transition matrix (`DISPUTE_TRANSITION_MATRIX` in
+`src/services/disputes.service.ts`), so no route can enforce different
+rules:
+
+| From | Legal Next States | Notes |
+|------|-------------------|-------|
+| `open` | `under_review`, `resolved`, `escalated` | Disputes can only be *created* in `open` (opening directly in another state is rejected); a contract may only have **one** active dispute |
+| `under_review` | `resolved`, `escalated` | |
+| `escalated` | `resolved` | |
+| `resolved` | — (terminal) | Entering `resolved` requires evidence (`resolution`); closing twice with different evidence is a `409 dispute_already_resolved` |
+
+Additional rules enforced by the service layer:
+
+1. **Resolve-without-evidence** — transitioning into `resolved` without a
+   non-empty `resolution` returns `400 resolution_required`.
+2. **Concurrent transitions (OCC)** — every write persists `version`,
+   `statusChangedBy` (actor from the verified session) and
+   `statusChangeReason` atomically. A request carrying a stale
+   `expectedVersion` returns `409 dispute_version_conflict` instead of
+   silently overwriting a concurrent transition.
+
 ---
 
 ## Common Failure Modes

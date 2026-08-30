@@ -1,4 +1,5 @@
 import { EventIngestionConfig, EventIngestionService } from './eventIngestionService';
+import { PerContractEventOrdering } from './ordering';
 import { EventAuditService, InMemoryEventAuditRepository } from '../repository/eventAuditRepository';
 import { createFinalityPolicy } from '../finality/policy';
 import { FinalityEvaluator } from '../finality/finalityEvaluator';
@@ -35,9 +36,25 @@ const finalityEvaluator = new FinalityEvaluator(
   finalityPolicy,
   createSorobanLatestLedgerProvider(),
 );
+
+/**
+ * Per-contract ordering gate: events for the same contract are applied in
+ * ledger (`sequence`) order even when RPC pages or workers deliver them out
+ * of order. Disabled by setting EVENT_ORDERING_ENABLED=false.
+ */
+const orderingEnabled = process.env.EVENT_ORDERING_ENABLED !== 'false';
+const ordering = orderingEnabled
+  ? new PerContractEventOrdering({
+      holdTimeoutMs: Number(process.env.EVENT_ORDERING_HOLD_TIMEOUT_MS ?? 30_000),
+      maxPendingPerContract: Number(process.env.EVENT_ORDERING_MAX_PENDING_PER_CONTRACT ?? 100),
+      maxTotalPending: Number(process.env.EVENT_ORDERING_MAX_TOTAL_PENDING ?? 1_000),
+    })
+  : undefined;
+
 export const eventAuditService = new EventAuditService(
   eventAuditRepository,
   console,
   finalityEvaluator,
+  ordering,
 );
 export const eventIngestionService = new EventIngestionService(eventAuditService, defaultConfig);
