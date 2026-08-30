@@ -2,7 +2,7 @@ import { validateDestinationAddress } from './address.validation';
 import { ValidationError } from '../errors/appError';
 
 describe('validateDestinationAddress', () => {
-  const VALID_ACCOUNT = 'GBJDSMTMG4YBPW75YILPTYWVKNDN754YNY4YHYJ6W2Z2G7Z3N7M5UQQO';
+  const VALID_ACCOUNT = 'GCV3AJVBLBT6DX7TTKNI5LTJKNGVW6MKK6KKREX27HBAUG43GWJ3H4ON';
   const VALID_CONTRACT = 'CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5';
 
   it('accepts a valid address (account)', () => {

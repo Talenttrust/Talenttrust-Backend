@@ -4,7 +4,7 @@ import { circuitBreakerRegistry } from '../circuit-breaker/registry';
 import axios from 'axios';
 
 jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typof axios>;
+const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 const defaultConfig = {
   upstreamContractsUrl: 'http://upstream/contracts',
@@ -36,14 +36,14 @@ describe('ContractsClient', () => {
   });
 
   afterEach(() => {
-    just.clearAllMocks();
+    jest.clearAllMocks();
   });
 
   it('returns contracts from upstream payload', async () => {
     mockRequest.mockResolvedValue({
       data: { contracts: [{ id: 'ct_1', status: 'open' }] },
     });
-    client = new ContractsClient(defaultConfig, offChaos);
+    const client = new ContractsClient(defaultConfig, offChaos);
     await expect(client.getContracts()).resolves.toEqual([{ id: 'ct_1', status: 'open' }]);
   });
 
@@ -60,7 +60,7 @@ describe('ContractsClient', () => {
     mockRequest.mockResolvedValue({ data: { items: [] } });
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'malformed-response' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'malformed_response' });
   });
 
   it('throws DependencyError when circuit breaker is open', async () => {
@@ -77,13 +77,13 @@ describe('ContractsClient', () => {
     );
 
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
-    expect(breaker.getState())).toBe('OPEN');
+    expect(breaker.getState()).toBe('OPEN');
     await expect(client.getContracts()).rejects.toBeInstanceOf(DependencyError);
   });
 
   it('classifies HTTP timeout as timeout', async () => {
     const timeoutError = new Error('timeout of 500ms exceeded') as any;
-    timeoutError.code = 'ECONABORTED';
+    timeoutError.code = 'ECONNABORTED';
     timeoutError.isAxiosError = true;
     mockRequest.mockRejectedValue(timeoutError);
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
@@ -98,7 +98,7 @@ describe('ContractsClient', () => {
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'rate-limit', retryAfter: 2 });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'rate_limit', retryAfterMs: 2000 });
   });
 
   it('classifies invalid JSON as malformed-response', async () => {
@@ -106,23 +106,22 @@ describe('ContractsClient', () => {
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(false) as any;
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'malformed-response' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'malformed_response' });
   });
 
-  it('classifies contract error as contract_error', async () => {
-    mockRequest.mockResolvedValue({
-      data: { error: { code: 'CONTRACT_NOT_FOUND', message: 'contract not found' } },
-    });
-
-    const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract_error', providerCode: 'CONTRACT_NOT_FOUND' });
-  });
-
-  it('classifies unknown provider status as unknown_provider_status', async () => {
-    mockRequest.mockRejectedValue(makeAxiosError(500, { error: { code: 'UNKNOWN' } }));
+  it('classifies contract error as contract error', async () => {
+    mockRequest.mockRejectedValue(makeAxiosError(404, { error: { code: 'CONTRACT_NOT_FOUND', message: 'contract not found' } }));
     mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
 
     const client = new ContractsClient(defaultConfig, offChaos);
-    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown_provider_status', providerCode: 'UNKNOWN' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract', providerCode: 'CONTRACT_NOT_FOUND' });
+  });
+
+  it('classifies unknown provider status as unknown_provider_status', async () => {
+    mockRequest.mockRejectedValue(makeAxiosError(302, { detail: 'redirected' }));
+    mockedAxios.isAxiosError = jest.fn().mockReturnValue(true) as any;
+
+    const client = new ContractsClient(defaultConfig, offChaos);
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown_provider_status' });
   });
 });

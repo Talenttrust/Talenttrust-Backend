@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import { Resource, Action } from './roles';
 import { AuthenticatedRequest } from './authenticate';
 import { isAllowed } from './authorize';
-import { getContext, requestContextStorage } from '../context';
+import { getRequestContext, requestContextStore } from '../middleware/requestContext';
 
 export function requirePermission(resource: Resource, action: Action) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
@@ -11,9 +11,9 @@ export function requirePermission(resource: Resource, action: Action) {
       return;
     }
     const user = req.user;
-    const current = getContext() ?? {};
+    const current = getRequestContext() ?? {};
     const enriched = { ...current, actorId: user.id };
-    requestContextStorage.run(enriched, () => {
+    requestContextStore.run(enriched, () => {
       if (!isAllowed(user.role, resource, action)) {
         res.status(403).json({ error: 'Forbidden: insufficient permissions' });
         return;

@@ -42,6 +42,25 @@ function getErrorProperty(error: unknown, ...keys: string[]): any {
   return undefined;
 }
 
+/**
+ * Resolve the upstream provider's error code. Prefers an explicit code
+ * carried on the failing error, then falls back to the `error.code` field of
+ * a structured JSON failure body (`{ error: { code } }`).
+ */
+function getProviderCode(error: unknown): string | undefined {
+  const direct = getErrorProperty(error, 'providerCode', 'code');
+  if (direct != null && typeof direct === 'string') return direct;
+
+  const responseBody = getErrorProperty(error, 'responseBody', 'body', 'response.data');
+  if (responseBody && typeof responseBody === 'object' && !Array.isArray(responseBody)) {
+    const nested = (responseBody as ErrorLike).error;
+    if (nested && typeof nested === 'object' && typeof nested.code === 'string') {
+      return nested.code;
+    }
+  }
+  return undefined;
+}
+
 function getKindFromError(error: unknown): FailureKind {
   if (!error) return FailureKind.Unknown;
 
@@ -105,7 +124,7 @@ function resolveRetryAfterMs(error: unknown): number | undefined {
 }
 
 function isRetryable(kind: FailureKind): boolean {
-  return RETRQABLE_KINDS.has(kind);
+  return RETRYABLE_KINDS.has(kind);
 }
 
 interface ClassifiedDependencyError extends DependencyError {
@@ -125,8 +144,8 @@ function classifyError(error: unknown): DependencyError {
   classified.kind = kind;
   classified.retryable = isRetryable(kind);
 
-  const providerCode = getErrorProperty(error, 'providerCode', 'code');
-  if (providerCode != null && typeof providerCode === 'string') {
+  const providerCode = getProviderCode(error);
+  if (providerCode != null) {
     classified.providerCode = providerCode;
   }
 
@@ -177,7 +196,7 @@ export class ContractsClient {
     path: string,
     options?: any,
   ): Promise<T> {
-    const { maxAttempts, baseDelayMs, maxDalayMs } = this.retryOptions;
+    const { maxAttempts, baseDelayMs, maxDelayMs } = this.retryOptions;
     let lastError: DependencyError | undefined;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -190,8 +209,8 @@ export class ContractsClient {
           throw classified;
         }
         const retryAfterMs = (classified as ClassifiedDependencyError).retryAfterMs;
-        const delayMls = retryAfterMs ?? Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
-        await delay(delayMls);
+        const delayMs = retryAfterMs ?? Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+        await delay(delayMs);
       }
     }
     throw lastError ?? new DependencyError('Upstream dependency unavailable');
@@ -216,7 +235,7 @@ export class ContractsClient {
         const depError = new DependencyError(`Circuit breaker open: ${error.message}`);
         const classified = depError as ClassifiedDependencyError;
         classified.kind = FailureKind.CircuitOpen;
-        clssified.retryable = false;
+        classified.retryable = false;
         throw depError;
       }
       throw classifyError(error);

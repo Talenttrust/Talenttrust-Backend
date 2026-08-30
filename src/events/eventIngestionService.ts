@@ -1,7 +1,7 @@
 import { EventAuditService } from '../repository/eventAuditRepository';
 import { ContractEvent } from './types';
 import { EnvelopeValidationOptions, isRecord, validateEventEnvelopePreamble } from '../shared/eventEnvelopeValidation';
-import { getContext } from '../context';
+import { getRequestContext } from '../middleware/requestContext';
 
 export interface EventIngestionConfig {
   enableStrictValidation: boolean;
@@ -65,7 +65,7 @@ export class EventIngestionService {
     }
 
     if (correlationId === undefined) {
-      correlationId = getContext()?.correlationId;
+      correlationId = getRequestContext()?.correlationId;
     }
 
     try {

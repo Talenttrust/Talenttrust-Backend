@@ -9,6 +9,26 @@ export class DependencyError extends Error {
   }
 }
 
+/**
+ * Carries the underlying failure context (transport code, HTTP status,
+ * response headers and body) onto a {@link DependencyError} so downstream
+ * classification can decide retry semantics. Additive only — the message and
+ * type are unchanged, so existing callers that match on either keep working.
+ */
+function preserveDiagnostics(error: DependencyError, source: unknown): DependencyError {
+  if (!source || typeof source !== 'object') return error;
+  const src = source as Record<string, any>;
+  const target = error as Record<string, any>;
+  if (src.code !== undefined) target.code = src.code;
+  if (src.name === 'TimeoutError') target.code = 'ETIMEDOUT';
+  if (src.response) {
+    target.status = src.response.status;
+    target.headers = src.response.headers;
+    target.responseBody = src.response.data;
+  }
+  return error;
+}
+
 
 
 export interface UpstreamClientConfig {
@@ -47,7 +67,7 @@ export class UpstreamHttpClient {
     }
 
     if (chaosResult === 'timeout') {
-      throw new DependencyError('Injected dependency timeout');
+      throw preserveDiagnostics(new DependencyError('Injected dependency timeout'), { code: 'ETIMEDOUT' });
     }
 
     const controller = new AbortController();
@@ -69,7 +89,7 @@ export class UpstreamHttpClient {
             throw new DependencyError('Upstream dependency timeout');
           }
           if (axios.isAxiosError(error) && error.response) {
-            throw new DependencyError('Upstream returned non-success response');
+            throw preserveDiagnostics(new DependencyError('Upstream returned non-success response'), error);
           }
           throw error;
         }
@@ -89,7 +109,7 @@ export class UpstreamHttpClient {
       if (error instanceof DependencyError) {
         throw error;
       }
-      throw new DependencyError('Upstream dependency unavailable');
+      throw preserveDiagnostics(new DependencyError('Upstream dependency unavailable'), error);
     } finally {
       clearTimeout(globalTimeout);
     }

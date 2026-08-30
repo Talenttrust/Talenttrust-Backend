@@ -113,7 +113,10 @@ describe('reputation route rate limiting', () => {
 
       expect(blocked.status).toBe(429);
 
-      jest.setSystemTime(1_700_000_001_001);
+      // With sliding-window accounting, the previous bucket still contributes
+      // to the count until more than `windowMs` has passed since its start, so
+      // full restoration requires advancing past two window boundaries.
+      jest.setSystemTime(1_700_000_002_001);
 
       const afterReset = await getReputation(app, { ip });
       expect(afterReset.status).toBe(200);
