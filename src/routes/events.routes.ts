@@ -5,21 +5,50 @@ import { EventAuditService } from '../repository/eventAuditRepository';
 import { validateContractEventPayload } from '../contracts/validation';
 import { getCorrelationId } from '../utils/correlationId';
 import { validateSchema } from '../middleware/validate.middleware';
+import {
+  EventIngestionBackpressure,
+  DEFAULT_MAX_PENDING_EVENTS,
+} from '../events/backpressure';
 import { eventAuditService as sharedEventAuditService } from '../events/registry';
 import { createTenantRateLimiter } from '../middleware/tenantRateLimiter';
 
+export interface EventsRouterOptions {
+  /**
+   * Bounded admission gate for the ingestion pipeline. When omitted, a
+   * default instance is created from EVENT_INGESTION_MAX_PENDING (default
+   * 100). Inject a fresh instance in tests for deterministic state.
+   */
+  backpressure?: EventIngestionBackpressure;
+}
+
+const DEFAULT_BACKPRESSURE_MAX_PENDING = Number(
+  process.env.EVENT_INGESTION_MAX_PENDING ?? DEFAULT_MAX_PENDING_EVENTS,
+);
+
 export function createEventsRouter(
   eventAuditService: EventAuditService = sharedEventAuditService,
+  options: EventsRouterOptions = {},
 ): Router {
   const router = Router();
-  
-  // Use tenant rate limiter with a reasonable event ingestion budget
-  const eventRateLimiter = createTenantRateLimiter({ maxRequests: 50, windowMs: 10_000 });
+  const backpressure =
+    options.backpressure ??
+    new EventIngestionBackpressure({ maxPendingEvents: DEFAULT_BACKPRESSURE_MAX_PENDING });
 
   router.post('/events', eventRateLimiter, async (req: Request, res: Response) => {
     const validation = validateContractEventPayload(req.body);
     if (!validation.ok) {
       return fail(res, 'invalid_event_payload', validation.reason, 400);
+    }
+
+    const admission = backpressure.tryAdmit(validation.event);
+    if (!admission.admitted) {
+      res.setHeader('Retry-After', '1');
+      return fail(
+        res,
+        'ingestion_backpressure',
+        'Event ingestion is at capacity; retry shortly',
+        429,
+      );
     }
 
     try {
@@ -28,6 +57,7 @@ export function createEventsRouter(
         validation.event.type,
         getCorrelationId(res),
       );
+      backpressure.complete(admission.token!, result.status);
 
       if (result.status === 'accepted') {
         return ok(
@@ -54,9 +84,25 @@ export function createEventsRouter(
         result.reason ?? 'Event rejected',
         result.statusCode ?? 400,
       );
-    } catch (error) {
+    } catch (_error) {
+      backpressure.complete(admission.token!, 'error');
       return fail(res, 'internal_error', 'Failed to process event', 500);
     }
+  });
+
+  /**
+   * Actionable ingestion health signals: queue depth, oldest event age,
+   * rejected work, processing latency, and admission state. Lets operators
+   * see backpressure building before queue loss instead of after.
+   */
+  router.get('/events/health', (_req: Request, res: Response) => {
+    const health = backpressure.getHealth();
+    return ok(
+      res,
+      health,
+      undefined,
+      health.healthy ? 200 : 503,
+    );
   });
 
   router.post('/events/validate', (req: Request, res: Response) => {
