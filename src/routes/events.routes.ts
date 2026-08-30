@@ -6,13 +6,17 @@ import { validateContractEventPayload } from '../contracts/validation';
 import { getCorrelationId } from '../utils/correlationId';
 import { validateSchema } from '../middleware/validate.middleware';
 import { eventAuditService as sharedEventAuditService } from '../events/registry';
+import { createTenantRateLimiter } from '../middleware/tenantRateLimiter';
 
 export function createEventsRouter(
   eventAuditService: EventAuditService = sharedEventAuditService,
 ): Router {
   const router = Router();
+  
+  // Use tenant rate limiter with a reasonable event ingestion budget
+  const eventRateLimiter = createTenantRateLimiter({ maxRequests: 50, windowMs: 10_000 });
 
-  router.post('/events', async (req: Request, res: Response) => {
+  router.post('/events', eventRateLimiter, async (req: Request, res: Response) => {
     const validation = validateContractEventPayload(req.body);
     if (!validation.ok) {
       return fail(res, 'invalid_event_payload', validation.reason, 400);

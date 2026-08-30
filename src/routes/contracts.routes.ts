@@ -1,3 +1,4 @@
+import { payoutIdempotencyMiddleware } from "../middleware/payoutIdempotency";
 import { Router, Request, Response, NextFunction } from "express";
 import compression from "compression";
 
@@ -277,6 +278,17 @@ function createContractsRouter(
     milestonesSoftDelete.softDelete.bind(milestonesSoftDelete),
   );
 
+  // POST /:id/milestones/:milestoneId/payout ?" payout request
+  /** @permission contracts:update (ownOnly) ?" admin, client, freelancer */
+  router.post(
+    "/:id/milestones/:milestoneId/payout",
+    validateContractId,
+    validateParams(milestoneIdParamSchema),
+    requireAuth,
+    requirePermission("contracts", "update", getContractOwnerId),
+    payoutIdempotencyMiddleware(),
+    milestonesSoftDelete.payout.bind(milestonesSoftDelete),
+  );
   // GET /:id/milestones/audit-log — bounded, cursor-paginated audit trail
   // (actor, action, before/after summary, timestamp) for milestone writes on
   // this contract. Same visibility as reading the contract itself.
@@ -363,3 +375,4 @@ function createContractsRouter(
 
 export { createContractsRouter };
 export default createContractsRouter();
+
