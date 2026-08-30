@@ -741,34 +741,23 @@ MIGRATIONS.push({
   },
 });
 
-// Version 16: audit_download_tokens table for signed, expiring, one-time-use
-// download tokens bound to a specific export artifact and requester (issue #1222).
+// Version 16: event indexer checkpoints per contract network
 MIGRATIONS.push({
   version: 16,
-  name: "create_audit_download_tokens_table",
+  name: "create_event_indexer_checkpoints_table",
   checksumSource: [
-    "CREATE TABLE IF NOT EXISTS audit_download_tokens (",
-    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant",
-    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at",
+    "CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (",
+    "PRIMARY KEY (network, contract)",
   ].join("\n"),
   up: (db) => {
     db.exec(`
-      CREATE TABLE IF NOT EXISTS audit_download_tokens (
-        jti           TEXT    PRIMARY KEY,
-        tenant_id     TEXT    NOT NULL,
-        requester_id  TEXT    NOT NULL,
-        artifact_id   TEXT    NOT NULL,
-        issued_at     TEXT    NOT NULL,
-        expires_at    TEXT    NOT NULL,
-        used_at       TEXT,
-        revoked_at    TEXT
+      CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (
+        network         TEXT    NOT NULL,
+        contract        TEXT    NOT NULL,
+        ledger          INTEGER NOT NULL,
+        event_sequence  INTEGER NOT NULL,
+        PRIMARY KEY (network, contract)
       );
-
-      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant
-        ON audit_download_tokens(tenant_id);
-
-      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at
-        ON audit_download_tokens(expires_at);
     `);
   },
 });
