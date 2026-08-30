@@ -132,6 +132,16 @@ export function createEventsRouter(
   const quarantine = options.quarantineStorage ?? getEventQuarantineStorage();
   const knownSchemaVersions = options.knownSchemaVersions ?? [LEGACY_SCHEMA_VERSION];
 
+  // Expire any held ordering events whose gap never filled before handling
+  // new traffic. Bounded sweep — each call examines only held entries.
+  router.use('/events', (_req: Request, res: Response, next: import('express').NextFunction) => {
+    const expired = eventAuditService.expireHeldOrderingEvents();
+    if (expired.length > 0) {
+      res.locals['expiredOrderingEvents'] = expired;
+    }
+    next();
+  });
+
   router.post('/events', async (req: Request, res: Response) => {
     const boundary = classifyAtBoundary(req.body, quarantine, knownSchemaVersions);
 
@@ -169,62 +179,59 @@ export function createEventsRouter(
         boundary.event.type,
         getCorrelationId(res),
       );
-      return mapProcessedResult(res, result);
+
+      if (result.status === 'accepted') {
+        return ok(
+          res,
+          {
+            status: 'accepted',
+            deduplicationKey: result.deduplicationKey,
+          },
+          undefined,
+          202,
+        );
+      }
+
+      if (result.status === 'duplicate') {
+        return ok(res, {
+          status: 'duplicate',
+          deduplicationKey: result.deduplicationKey,
+        });
+      }
+
+      if (result.status === 'held') {
+        return ok(
+          res,
+          {
+            status: 'held',
+            deduplicationKey: result.deduplicationKey,
+            reason: result.reason,
+          },
+          undefined,
+          202,
+        );
+      }
+
+      return fail(
+        res,
+        result.code ?? 'event_rejected',
+        result.reason ?? 'Event rejected',
+        result.statusCode ?? 400,
+      );
     } catch (_error) {
       return fail(res, 'internal_error', 'Failed to process event', 500);
     }
   });
 
   /**
-   * Ingest a page of events (one RPC page / batch). Per-item isolation: one
-   * malformed or unknown-version event never blocks the rest of the page.
+   * Read-only ordering snapshot: high-water marks, held (pending) events per
+   * contract, and recent rejections (gap too large, buffer full, hold
+   * timeout). Lets operators see at a glance whether any contract stream is
+   * stalled on a missing sequence.
    */
-  router.post('/events/batch', async (req: Request, res: Response) => {
-    const events = Array.isArray(req.body?.events) ? (req.body.events as unknown[]) : null;
-    if (events === null) {
-      return fail(res, 'invalid_event_payload', 'body.events must be an array', 400);
-    }
-    if (events.length === 0) {
-      return fail(res, 'invalid_event_payload', 'body.events must not be empty', 400);
-    }
-    if (events.length > MAX_EVENT_BATCH_SIZE) {
-      return fail(
-        res,
-        'event_batch_too_large',
-        `Batch exceeds the maximum of ${MAX_EVENT_BATCH_SIZE} events`,
-        400,
-      );
-    }
-
-    const correlationId = getCorrelationId(res);
-    const results = [];
-    for (let index = 0; index < events.length; index++) {
-      const boundary = classifyAtBoundary(events[index], quarantine, knownSchemaVersions);
-
-      if (boundary.kind === 'malformed') {
-        results.push({ index, status: 'rejected', code: 'invalid_event_payload', reason: boundary.reason });
-        continue;
-      }
-      if (boundary.kind === 'quarantined') {
-        results.push({ index, status: 'quarantined', quarantineId: boundary.quarantineId, reason: boundary.reason });
-        continue;
-      }
-
-      try {
-        const result = await eventAuditService.processEvent(boundary.event, boundary.event.type, correlationId);
-        results.push({
-          index,
-          status: result.status,
-          deduplicationKey: result.deduplicationKey,
-          ...(result.code ? { code: result.code } : {}),
-          ...(result.reason ? { reason: result.reason } : {}),
-        });
-      } catch (_error) {
-        results.push({ index, status: 'rejected', code: 'internal_error', reason: 'Failed to process event' });
-      }
-    }
-
-    return ok(res, { results, processedCount: results.filter((r) => r.status === 'accepted').length });
+  router.get('/events/ordering', (_req: Request, res: Response) => {
+    const snapshot = eventAuditService.getOrderingSnapshot();
+    return ok(res, snapshot ?? { enabled: false });
   });
 
   router.post('/events/validate', (req: Request, res: Response) => {

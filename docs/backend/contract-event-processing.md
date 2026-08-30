@@ -39,33 +39,34 @@ contractId:eventId:sequence
 
 - `accepted`: event is valid and persisted.
 - `duplicate`: event identity was already processed; request is idempotent.
+- `held`: event is valid but out of ledger order for its contract; it is
+  retained in a bounded buffer and applied once the sequence gap fills.
 - `invalid`: payload violated schema or semantic constraints.
 - `error`: unexpected runtime failure in processor/repository interaction.
 
-## Contract Schema Versions
+## Per-Contract Ordering
 
-A contract's event payload shape can change when a newer contract version is
-deployed on-chain. An event from a newer contract must not enter projections
-that assume the older payload shape, but it must not be silently dropped
-either:
+Events from the same contract must be applied in ledger (`sequence`) order
+even when RPC pages or workers deliver them out of order. The ingestion
+funnel runs through a per-contract ordering gate (`src/events/ordering.ts`)
+when enabled (`EVENT_ORDERING_ENABLED`, default `true`):
 
-- `schemaVersion` is optional on the event envelope. Absent = legacy
-  (treated as version 1). Present-and-invalid is rejected at the boundary
-  with 400 `invalid_event_payload` (fail-closed — an ambiguous version is
-  never guessed).
-- A valid-but-unknown version (newer than this backend supports) is
-  **quarantined**: the redacted event is persisted to the
-  `event_quarantine` store (`src/events/eventQuarantine.ts`) and the
-  ingestion endpoint returns 202 `status: quarantined` with a quarantine
-  id. Quarantined events never reach projections.
-- `POST /api/v1/events/batch` ingests one RPC page with per-item
-  isolation: a malformed or unknown-version event never blocks the rest of
-  the page.
-- `GET /api/v1/events/quarantine` (admin) lists quarantined events;
-  `POST /api/v1/events/quarantine/replay` (admin, audited) reprocesses a
-  quarantined event once support ships. A replay whose version is still
-  unknown re-quarantines; replay attempts are bounded (no silent
-  deletion).
+- In-order events are applied immediately.
+- Out-of-order events are **held** in a bounded buffer (per-contract and
+  aggregate caps) until their predecessor arrives; the gap is then drained
+  in ledger order.
+- A held event whose predecessor never arrives within
+  `EVENT_ORDERING_HOLD_TIMEOUT_MS` (default 30s) expires and is recorded as
+  an `ordering_gap_timeout` rejection.
+- A sequence jump larger than the per-contract hold bound is rejected as
+  `ordering_gap_too_large` (400); a full aggregate buffer is rejected as
+  `ordering_buffer_full` (503). Neither is silently dropped.
+- Replayed sequences are returned as `duplicate` (idempotent).
+
+`GET /api/v1/events/ordering` exposes the gate snapshot (high-water marks,
+held counts per contract, recent rejections) for operators.
+
+## Threat Scenarios and Security Assumptions
 
 ## Threat Scenarios and Security Assumptions
 
