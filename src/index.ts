@@ -384,6 +384,9 @@ attachTerminalHandlers(app);
 export { app };
 export default app;
 
+import { verifySchemaState } from './db/migrations';
+import { getDb } from './db/database';
+
 const isMainModule = false;
 const isJest = Boolean(process.env.JEST_WORKER_ID);
 const shouldBootstrapServer = (isMainModule && !isJest) || process.env.FORCE_START_INDEX === '1';
@@ -400,6 +403,7 @@ async function initializeQueues(): Promise<void> {
 async function startServer(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3001;
   if (!isJest) {
+    verifySchemaState(getDb());
     await initializeQueues();
   }
 

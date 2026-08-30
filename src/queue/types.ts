@@ -77,6 +77,8 @@ export interface BlockchainSyncPayload {
   requestId?: string;
 }
 
+export type { RawEventRetentionJobPayload };
+
 /**
  * Milestone divergence scan job payload.
  *
