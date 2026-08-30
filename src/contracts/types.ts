@@ -15,6 +15,12 @@ export interface ContractEvent {
     | 'CONTRACT_CANCELLED';
   payload: Record<string, unknown>;
   /**
+   * Contract schema version the event payload conforms to. Absent on
+   * legacy events (treated as version 1). A present-but-invalid value is
+   * rejected; a known-newer version is quarantined rather than projected.
+   */
+  schemaVersion?: number;
+  /**
    * On-chain network the event was observed on (e.g. `soroban`,
    * `stellar`). Optional — off-chain events carry no finality risk.
    */
