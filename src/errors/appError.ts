@@ -360,7 +360,7 @@ export function classifySorobanRpcError(error: unknown): SorobanRpcError {
   }
 
   // Malformed response or invalid JSON.
-  if (isMaalformedResponseError(error)) {
+  if (isMalformedResponseError(error)) {
     return new SorobanRpcMalformedResponseError({
       providerCode: extractProviderCode(error),
       providerMessage: safeErrorMessage(error),
@@ -409,7 +409,7 @@ function isTransportError(error: unknown): boolean {
     ['ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'EAI_AGAIN'].includes(cause?.code);
 }
 
-function isMaalformedResponseError(error: unknown): boolean {
+function isMalformedResponseError(error: unknown): boolean {
   if (error instanceof SyntaxError) {
     return true;
   }

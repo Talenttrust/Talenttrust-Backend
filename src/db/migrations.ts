@@ -741,23 +741,36 @@ MIGRATIONS.push({
   },
 });
 
-// Version 16: event indexer checkpoints per contract network
+// Version 16: poll lease columns on the transactions table.
+//
+// Lease fencing prevents two poller instances from updating the same
+// transaction after a lease owner has changed: `lease_owner` names the poller
+// instance that currently owns the transaction and `lease_expires_at` bounds
+// that ownership. Writes are only applied while the stored owner matches the
+// writer's token, so a poller whose lease expired (or was taken over) while an
+// RPC call was in flight abandons its poll instead of clobbering the new
+// owner's state.
 MIGRATIONS.push({
   version: 16,
-  name: "create_event_indexer_checkpoints_table",
+  name: "add_transaction_lease_columns",
   checksumSource: [
-    "CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (",
-    "PRIMARY KEY (network, contract)",
+    "ALTER TABLE transactions ADD COLUMN lease_owner TEXT",
+    "ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT",
   ].join("\n"),
   up: (db) => {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS event_indexer_checkpoints (
-        network         TEXT    NOT NULL,
-        contract        TEXT    NOT NULL,
-        ledger          INTEGER NOT NULL,
-        event_sequence  INTEGER NOT NULL,
-        PRIMARY KEY (network, contract)
-      );
-    `);
+    const columns = db.pragma("table_info(transactions)") as Array<{
+      name: string;
+    }>;
+    const hasLeaseOwner = columns.some((column) => column.name === "lease_owner");
+    const hasLeaseExpiresAt = columns.some(
+      (column) => column.name === "lease_expires_at",
+    );
+
+    if (!hasLeaseOwner) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_owner TEXT");
+    }
+    if (!hasLeaseExpiresAt) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT");
+    }
   },
 });

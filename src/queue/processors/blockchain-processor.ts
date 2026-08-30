@@ -8,72 +8,22 @@
 import { BlockchainSyncPayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
 import { InvalidJobPayloadError } from '../queue-errors';
-import { evaluateReorg, ReorgEvaluation, ReorgDetectorConfig } from '../../finality/reorgDetector';
-
-/** Promotion callback — invoked after a successful sync. */
-type FinalityPromoter = (network: string) => Promise<{ promoted: number; remaining: number }>;
-
-/** No-op default when no promotion infrastructure is wired up. */
-const defaultFinalityPromoter: FinalityPromoter = async () => ({
-  promoted: 0,
-  remaining: 0,
-});
+import { eventAuditService } from '../../events/registry';
 
 /**
- * Reorg handler callback — invoked *before* the sync when the processor
- * detects a chain reorganization (head regression). The handler is
- * expected to rewind affected events and cursors, then throw if the
- * reorg exceeds the retention window so the queue retries the job.
- *
- * Module-scoped so it can be wired once at startup via
- * {@link setReorgHandler} and remains available across processor
- * invocations within a single process lifetime.
- *
- * @param network - The network that experienced the reorg.
- * @param evaluation - The reorg evaluation result.
+ * Finality promotion callback invoked after a successful sync. Flips
+ * provisional events that have reached the network's finality depth.
  */
-type ReorgHandler = (
+export type FinalityPromoter = (
   network: string,
-  evaluation: ReorgEvaluation,
-) => Promise<void>;
-
-let reorgHandler: ReorgHandler = async () => {};
+) => Promise<{ promoted: number; remaining: number }>;
 
 /**
- * Wire the reorg handler at application startup. Must be called before
- * any blockchain sync jobs are processed.
+ * Default promoter backed by the shared event audit service. Idempotent
+ * and safe to run on every successful sync (retries are harmless).
  */
-export function setReorgHandler(handler: ReorgHandler): void {
-  reorgHandler = handler;
-}
-
-/**
- * Head tracker — remembers the last known chain head per network so
- * that the processor can detect a reorg (head regression) on the next
- * sync. Module-scoped so state persists across processor invocations
- * within a single process lifetime.
- */
-const lastKnownHeads = new Map<string, number>();
-
-/** Exposed for tests that need to reset head tracking state. */
-export function resetHeadTracker(): void {
-  lastKnownHeads.clear();
-}
-
-/**
- * Exposed for tests that need to inject a known previous head. */
-export function setLastKnownHead(network: string, head: number): void {
-  lastKnownHeads.set(network, head);
-}
-
-/**
- * Default reorg detector configuration. The max rewind depth is
- * intentionally generous (100 ledgers ≈ 500 s) to cover Stellar's
- * typical reorg depth while still bounding the rewind window.
- */
-const DEFAULT_REORG_CONFIG: ReorgDetectorConfig = {
-  maxRewindDepth: Number(process.env.MAX_REORG_DEPTH ?? 100),
-};
+const defaultFinalityPromoter: FinalityPromoter = (network) =>
+  eventAuditService.promoteProvisionalEvents(network);
 
 /**
  * Process blockchain synchronization job

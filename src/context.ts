@@ -1,34 +1,25 @@
 /**
  * @module context
- * @description Request-scoped context propagation via AsyncLocalStorage.
+ * @description Request-scoped context propagation for asynchronous processors.
  *
- * The middleware seeds a per-request context (request id, correlation id,
- * optional tenant/actor/trace ids) into {@link requestContextStorage} so that
- * asynchronous work spawned from a request handler — event ingestion,
- * webhook delivery, background processors — can recover the same tracing and
- * isolation fields without threading them through every call signature.
- *
- * Usage:
- * - `requestContextMiddleware` is mounted app-wide (after request id
- *   resolution) and runs each handler inside a fresh context.
- * - `getContext()` returns the current context (or `undefined` outside a
- *   request) — safe for callers that must work in both request and
- *   non-request contexts (e.g. queue processors).
- * - `runWithContext()` runs a function inside an explicit context, used by
- *   tests and by code that must re-establish context after async hops.
+ * The request context envelope carries traceability and authorization fields
+ * (request id, tenant, actor) across asynchronous boundaries such as queue
+ * jobs and webhook deliveries. It is populated by {@link requestContextMiddleware}
+ * and read back with {@link getContext}.
  *
  * @security
- *  - Context values come from validated request metadata (`res.locals` set by
- *    `requestIdMiddleware`), never from unvalidated caller input.
- *  - Context is scoped to the request lifetime; a new request always starts
- *    with a fresh store so no cross-request leakage is possible.
+ *   - Only whitelisted, non-empty string fields are propagated (mirrors
+ *     `src/api/jobs.ts` sanitization and the DLQ context contract).
+ *   - Values are bounded in length and control characters are rejected to
+ *     prevent header injection.
  */
 
+import { randomUUID } from 'crypto';
 import { AsyncLocalStorage } from 'async_hooks';
-import type { NextFunction, Request, Response } from 'express';
+import { NextFunction, Request, Response } from 'express';
 
-/** Whitelisted fields carried in the request context. */
-export interface RequestContext {
+/** A validated context envelope propagated through asynchronous processors. */
+export interface RequestContextEnvelope {
   requestId?: string;
   correlationId?: string;
   tenantId?: string;
@@ -36,60 +27,51 @@ export interface RequestContext {
   traceId?: string;
 }
 
-/**
- * Async storage for the current request context. `getStore()` returns the
- * context bound to the current async execution chain, or `undefined` when no
- * context has been established (e.g. a background worker outside a request).
- */
-export const requestContextStorage = new AsyncLocalStorage<RequestContext>();
+const MAX_CONTEXT_FIELD_LENGTH = 128;
+
+function sanitizeContextValue(value: unknown): string | undefined {
+  const raw = Array.isArray(value) ? value.find((v): v is string => typeof v === 'string') : value;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_CONTEXT_FIELD_LENGTH) return undefined;
+  // Prevent header injection and other control-character issues.
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+  return trimmed;
+}
 
 /**
- * Return the context bound to the current async execution, or `undefined`
- * when the caller is not inside a request/context scope.
+ * AsyncLocalStorage instance carrying the request-scoped context envelope.
  */
-export function getContext(): RequestContext | undefined {
+export const requestContextStorage = new AsyncLocalStorage<RequestContextEnvelope>();
+
+/**
+ * Returns the current request context, or undefined when called outside an
+ * active request scope.
+ */
+export function getContext(): RequestContextEnvelope | undefined {
   return requestContextStorage.getStore();
 }
 
 /**
- * Run `fn` inside the given context. Nested runs inherit the outer context
- * fields and override them with the provided values, so processors that need
- * to enrich (e.g. add `actorId`) can safely re-run with a merged envelope.
+ * Express middleware that seeds the request context from incoming headers and
+ * `res.locals` (populated by `requestIdMiddleware`), then runs the rest of the
+ * chain inside the AsyncLocalStorage scope.
  */
-export function runWithContext<T>(context: RequestContext, fn: () => T): T {
-  return requestContextStorage.run(context, fn);
-}
+export function requestContextMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const requestId =
+    sanitizeContextValue(req.headers['x-request-id']) ??
+    sanitizeContextValue(res.locals?.requestId) ??
+    randomUUID();
+  const correlationId = sanitizeContextValue(req.headers['x-correlation-id']);
+  const tenantId =
+    sanitizeContextValue(req.headers['x-tenant-id']) ??
+    sanitizeContextValue((req as { tenantId?: unknown }).tenantId);
+  const actorId = sanitizeContextValue((req as { user?: { id?: unknown } }).user?.id);
 
-/**
- * Express middleware that seeds the per-request context from the validated
- * request metadata already attached to `res.locals` by `requestIdMiddleware`.
- *
- * Must be mounted after `requestIdMiddleware`; requests that bypass it (or
- * tests that mount handlers directly) simply run with an empty context.
- */
-export function requestContextMiddleware(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
-  const context: RequestContext = {};
-  const locals = res.locals as Record<string, unknown>;
-
-  if (typeof locals['requestId'] === 'string') {
-    context.requestId = locals['requestId'];
-  }
-  if (typeof locals['correlationId'] === 'string') {
-    context.correlationId = locals['correlationId'];
-  }
-  if (typeof locals['tenantId'] === 'string') {
-    context.tenantId = locals['tenantId'];
-  }
-  if (typeof locals['actorId'] === 'string') {
-    context.actorId = locals['actorId'];
-  }
-  if (typeof locals['traceId'] === 'string') {
-    context.traceId = locals['traceId'];
-  }
+  const context: RequestContextEnvelope = { requestId };
+  if (correlationId) context.correlationId = correlationId;
+  if (tenantId) context.tenantId = tenantId;
+  if (actorId) context.actorId = actorId;
 
   requestContextStorage.run(context, () => next());
 }
