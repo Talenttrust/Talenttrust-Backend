@@ -11,7 +11,7 @@ import { processContractProcessing } from './contract-processor';
 import { processReputationUpdate } from './reputation-processor';
 import { processReputationRecompute } from './reputation-recompute-processor';
 import { processBlockchainSync } from './blockchain-processor';
-import { processRawEventRetention } from '../../events/rawEventRetention.processor';
+import { processMilestoneDivergenceScan } from '../../milestones/divergence/processor';
 
 /**
  * Type-safe processor function signature
@@ -35,5 +35,6 @@ export const jobProcessors: Record<JobType, JobProcessor> = {
   [JobType.REPUTATION_UPDATE]: processReputationUpdate as JobProcessor,
   [JobType.REPUTATION_RECOMPUTE]: processReputationRecompute as unknown as JobProcessor,
   [JobType.BLOCKCHAIN_SYNC]: processBlockchainSync as JobProcessor,
-  [JobType.RAW_EVENT_RETENTION]: processRawEventRetention as unknown as JobProcessor,
+  [JobType.MILESTONE_DIVERGENCE_SCAN]:
+    processMilestoneDivergenceScan as unknown as JobProcessor,
 };

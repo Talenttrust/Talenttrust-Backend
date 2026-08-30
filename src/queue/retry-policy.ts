@@ -95,11 +95,11 @@ export const DEFAULT_RETRY_POLICIES: Record<JobType, RetryPolicy> = {
     removeOnFail: 100,
   },
 
-  // Raw event retention: bounded, idempotent (archival upserts by event_id;
-  // purge happens only after a successful archive in the same transaction).
-  // Per-event failures are isolated inside the run, so retries matter only
-  // for infrastructure-level failures (DB, etc.).
-  [JobType.RAW_EVENT_RETENTION]: {
+  // Read-only bounded comparison job. Retries are meaningful only when the
+  // chain head fetch fails (per-contract RPC failures are isolated inside the
+  // scan and do not fail the job). Exponential backoff with jitter avoids a
+  // thundering herd when an RPC outage affects every run.
+  [JobType.MILESTONE_DIVERGENCE_SCAN]: {
     attempts: 3,
     backoff: {
       type: 'exponential',
