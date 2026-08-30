@@ -13,7 +13,7 @@
 
 import type { CursorPosition } from './cursor.types';
 import { CURSOR_MAX_LIMIT, CURSOR_DEFAULT_LIMIT, CURSOR_MAX_LENGTH } from './cursor.types';
-import { IndexerCursor, CursorUpdateResult } from './cursor.types';
+import { IndexerCursor, CursorUpdateResult, CursorRewindResult } from './cursor.types';
 
 /**
  * Encodes a {@link CursorPosition} into an opaque base-64 string suitable for
@@ -159,6 +159,18 @@ export interface CursorRepository {
   updateCursor(sourceId: string, newSequence: number, metadata?: Record<string, unknown>): Promise<CursorUpdateResult>;
 
   /**
+   * Rewind cursor to an earlier sequence number.
+   *
+   * Unlike `updateCursor`, this is explicitly allowed to move the
+   * cursor backwards and is used exclusively during chain reorg
+   * recovery.  Normal forward progression MUST use `updateCursor`.
+   *
+   * @param sourceId - The source whose cursor to rewind.
+   * @param toSequence - The target sequence (must be < current).
+   */
+  rewindCursor(sourceId: string, toSequence: number): Promise<CursorRewindResult>;
+
+  /**
    * List all cursors in storage.
    */
   listCursors(): Promise<IndexerCursor[]>;
@@ -199,6 +211,41 @@ export class InMemoryCursorRepository implements CursorRepository {
       success: true,
       cursor,
     };
+  }
+
+  async rewindCursor(
+    sourceId: string,
+    toSequence: number,
+  ): Promise<CursorRewindResult> {
+    const existing = this.cursorsBySourceId.get(sourceId);
+    if (existing === undefined) {
+      // No cursor to rewind — create one at the target sequence.
+      const now = new Date().toISOString();
+      const cursor: IndexerCursor = {
+        sourceId,
+        lastSequence: toSequence,
+        updatedAt: now,
+      };
+      this.cursorsBySourceId.set(sourceId, cursor);
+      return { success: true, cursor };
+    }
+
+    if (toSequence >= existing.lastSequence) {
+      return {
+        success: false,
+        cursor: existing,
+        reason: 'Cannot rewind cursor: target sequence is not before current',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const cursor: IndexerCursor = {
+      ...existing,
+      lastSequence: toSequence,
+      updatedAt: now,
+    };
+    this.cursorsBySourceId.set(sourceId, cursor);
+    return { success: true, cursor };
   }
 
   async listCursors(): Promise<IndexerCursor[]> {
