@@ -219,7 +219,7 @@ function isTimeoutCode(code?: string | number): boolean {
   return TIMEOUT_CODES.has(code);
 }
 
-const TRANSPORT_CODE_PATTERN = /^(ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH)/;
+const TRANSPORT_CODE_PATTERN = /^(ECONNREFUSED|ENOTFOUND|EHOSTUREACH|ENETUREACH)/;
 
 function isTransportCode(code?: string | number): boolean {
   if (typeof code !== 'string') return false;

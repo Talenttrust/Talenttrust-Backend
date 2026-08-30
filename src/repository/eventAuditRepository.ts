@@ -18,6 +18,16 @@ export interface IEventAuditRepository {
   save(audit: EventProcessingAudit): Promise<EventProcessingAudit>;
   findByContractId(contractId: string, limit?: number): Promise<EventProcessingAudit[]>;
   /**
+   * Atomic event-checkpoint + projection persistence (see
+   * {@link SqliteEventAuditRepository}). Optional so in-memory repositories
+   * used by unit tests remain valid; when present, accepted events that also
+   * advance a projection are persisted in a single transaction.
+   */
+  persistEventAndProjection?(
+    audit: EventProcessingAudit,
+    projection: import('./sqliteEventAuditRepository').ProjectionWrite,
+  ): Promise<void>;
+  /**
    * Public read — returns only events that are safe to expose (not
    * provisional). Legacy records without a `finalityStatus` are treated
    * as finalized.
@@ -175,14 +185,10 @@ export class EventAuditService {
     private repository: IEventAuditRepository,
     private logger: Logger = console,
     private readonly finalityEvaluator?: FinalityEvaluator,
-    /**
-     * Optional per-contract ordering gate. When present, events for the
-     * same contract are applied strictly in `sequence` order: out-of-order
-     * events are held (bounded) until the gap fills, and impossible jumps
-     * or expired holds are rejected with a structured code. Omit for
-     * passthrough (legacy) behaviour.
-     */
-    private readonly ordering?: PerContractEventOrdering,
+    private readonly projectionBuilder?: (
+      event: any,
+      audit: EventProcessingAudit,
+    ) => import('./sqliteEventAuditRepository').ProjectionWrite | null,
   ) {}
 
   async processEvent(event: any, contractType: string, correlationId?: string): Promise<EventIngestionResult> {
@@ -379,7 +385,20 @@ export class EventAuditService {
       ...(finalizedAt && { finalizedAt }),
     };
 
-    await this.repository.save(audit);
+    // Persist the event checkpoint and, when a projection is derivable,
+    // its projection atomically in a single database transaction. The
+    // projection builder is a pure function (no DB/external I/O), so only
+    // the two writes are inside the transaction — external calls such as the
+    // finality evaluation above already ran outside it. When no projection
+    // is produced (off-chain/legacy events) we fall back to a plain write.
+    const projection = this.projectionBuilder
+      ? this.projectionBuilder(event, audit)
+      : null;
+    if (projection && this.repository.persistEventAndProjection) {
+      await this.repository.persistEventAndProjection(audit, projection);
+    } else {
+      await this.repository.save(audit);
+    }
 
     return {
       deduplicationKey,

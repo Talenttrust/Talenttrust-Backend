@@ -1,6 +1,8 @@
 import { EventIngestionConfig, EventIngestionService } from './eventIngestionService';
-import { PerContractEventOrdering } from './ordering';
-import { EventAuditService, InMemoryEventAuditRepository } from '../repository/eventAuditRepository';
+import { EventAuditService } from '../repository/eventAuditRepository';
+import { SqliteEventAuditRepository } from '../repository/sqliteEventAuditRepository';
+import type { EventProcessingAudit } from './types';
+import { getDb } from '../db/database';
 import { createFinalityPolicy } from '../finality/policy';
 import { FinalityEvaluator } from '../finality/finalityEvaluator';
 import { createSorobanLatestLedgerProvider } from '../finality/providers';
@@ -23,7 +25,7 @@ const defaultConfig: EventIngestionConfig = {
  * when an on-chain event with a positive finality depth is ingested.
  */
 const env = validateEnv();
-export const eventAuditRepository = new InMemoryEventAuditRepository();
+export const eventAuditRepository = new SqliteEventAuditRepository(getDb());
 const finalityPolicy = createFinalityPolicy(
   {
     depths: env.FINALITY_DEPTHS,
@@ -38,23 +40,33 @@ const finalityEvaluator = new FinalityEvaluator(
 );
 
 /**
- * Per-contract ordering gate: events for the same contract are applied in
- * ledger (`sequence`) order even when RPC pages or workers deliver them out
- * of order. Disabled by setting EVENT_ORDERING_ENABLED=false.
+ * Derive the entity projection for an accepted contract event.
+ *
+ * The projection is keyed by **entity identity** (the contract id), not the
+ * event identity, so a contract can accumulate state across many events. The
+ * retained `data` is the incoming event payload (the read-model advance) and
+ * `lastEventId` is the event's deduplication key — a duplicate replay of the
+ * same event is a no-op for the projection. Tenant scoping flows from the
+ * event payload and defaults to the shared `default` tenant.
+ *
+ * This is a pure function: it performs no DB or network I/O, so only the two
+ * writes in `persistEventAndProjection` sit inside the transaction.
  */
-const orderingEnabled = process.env.EVENT_ORDERING_ENABLED !== 'false';
-const ordering = orderingEnabled
-  ? new PerContractEventOrdering({
-      holdTimeoutMs: Number(process.env.EVENT_ORDERING_HOLD_TIMEOUT_MS ?? 30_000),
-      maxPendingPerContract: Number(process.env.EVENT_ORDERING_MAX_PENDING_PER_CONTRACT ?? 100),
-      maxTotalPending: Number(process.env.EVENT_ORDERING_MAX_TOTAL_PENDING ?? 1_000),
-    })
-  : undefined;
+const contractProjectionBuilder = (
+  event: { contractId: string; tenantId?: string; payload?: Record<string, unknown> },
+  audit: EventProcessingAudit,
+): import('../repository/sqliteEventAuditRepository').ProjectionWrite => ({
+  entityId: event.contractId,
+  tenantId: event.tenantId ?? 'default',
+  data: JSON.stringify(event.payload ?? {}),
+  version: 1,
+  lastEventId: audit.deduplicationKey,
+});
 
 export const eventAuditService = new EventAuditService(
   eventAuditRepository,
   console,
   finalityEvaluator,
-  ordering,
+  contractProjectionBuilder,
 );
 export const eventIngestionService = new EventIngestionService(eventAuditService, defaultConfig);
