@@ -692,3 +692,41 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 16: milestone divergence reports for the bounded comparison job
+MIGRATIONS.push({
+  version: 16,
+  name: "create_milestone_divergence_reports_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS milestone_divergence_reports (",
+    "UNIQUE(run_id, contract_id)",
+    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_tenant",
+    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_run",
+    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_status",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS milestone_divergence_reports (
+        id                       TEXT    PRIMARY KEY,
+        run_id                   TEXT    NOT NULL,
+        tenant_id                TEXT    NOT NULL DEFAULT 'default',
+        contract_id              TEXT    NOT NULL,
+        status                   TEXT    NOT NULL
+                                       CHECK (status IN ('in_sync', 'divergent', 'unavailable')),
+        block_height             INTEGER,
+        compared_at              TEXT    NOT NULL,
+        milestone_comparisons    TEXT    NOT NULL,
+        differences              TEXT    NOT NULL,
+        rpc_error                TEXT,
+        created_at               TEXT    NOT NULL,
+        UNIQUE(run_id, contract_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_tenant
+        ON milestone_divergence_reports(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_run
+        ON milestone_divergence_reports(run_id);
+      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_status
+        ON milestone_divergence_reports(status);
+    `);
+  },
+});

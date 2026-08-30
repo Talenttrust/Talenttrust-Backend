@@ -6,6 +6,7 @@
  */
 
 import { PriorityLevel } from './fair-scheduler';
+import type { MilestoneDivergenceScanPayload } from '../milestones/divergence/types';
 
 /**
  * Available job types in the system
@@ -16,6 +17,7 @@ export enum JobType {
   REPUTATION_UPDATE = 'reputation-update',
   REPUTATION_RECOMPUTE = 'reputation-recompute',
   BLOCKCHAIN_SYNC = 'blockchain-sync',
+  MILESTONE_DIVERGENCE_SCAN = 'milestone-divergence-scan',
 }
 
 /**
@@ -76,6 +78,15 @@ export interface BlockchainSyncPayload {
 }
 
 /**
+ * Milestone divergence scan job payload.
+ *
+ * A bounded comparison job that detects divergence between the backend's
+ * indexed milestone state and the on-chain milestone state (issue #1213).
+ * See `src/milestones/divergence/types.ts` for the full shape.
+ */
+export type { MilestoneDivergenceScanPayload };
+
+/**
  * Union type for all job payloads
  */
 export type JobPayload =
@@ -83,7 +94,8 @@ export type JobPayload =
   | ContractProcessingPayload
   | ReputationUpdatePayload
   | ReputationRecomputePayload
-  | BlockchainSyncPayload;
+  | BlockchainSyncPayload
+  | MilestoneDivergenceScanPayload;
 
 export interface JobEnqueueOptions {
   priority?: number;
