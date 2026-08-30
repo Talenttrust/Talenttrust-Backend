@@ -34,6 +34,15 @@ export interface IEventAuditRepository {
    * when the event is unknown.
    */
   markFinalized(deduplicationKey: string, finalizedAt: string): Promise<void>;
+  /**
+   * Demote finalized events within a ledger range back to provisional.
+   * Used by the rewind service after a chain reorg is detected. Only
+   * affects events whose `network` matches and whose `ledger` falls
+   * within `[fromLedger, toLedger]`.
+   *
+   * @returns The number of events actually demoted.
+   */
+  demoteProvisional(network: string, fromLedger: number, toLedger: number): Promise<number>;
   findByStatus(status: 'accepted' | 'rejected' | 'duplicate', limit?: number): Promise<EventProcessingAudit[]>;
   getEventStatistics(): Promise<{
     total: number;
@@ -108,6 +117,31 @@ export class InMemoryEventAuditRepository implements IEventAuditRepository {
       finalityStatus: 'finalized',
       finalizedAt,
     });
+  }
+
+  async demoteProvisional(
+    network: string,
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<number> {
+    let demoted = 0;
+    for (const [key, audit] of this.audits.entries()) {
+      if (
+        audit.network === network &&
+        audit.ledger !== undefined &&
+        audit.ledger >= fromLedger &&
+        audit.ledger <= toLedger &&
+        audit.finalityStatus === 'finalized'
+      ) {
+        this.audits.set(key, {
+          ...audit,
+          finalityStatus: 'provisional',
+          finalizedAt: undefined,
+        });
+        demoted++;
+      }
+    }
+    return demoted;
   }
 
   async findByStatus(status: 'accepted' | 'rejected' | 'duplicate', limit: number = 100): Promise<EventProcessingAudit[]> {

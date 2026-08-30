@@ -94,6 +94,22 @@ export const DEFAULT_RETRY_POLICIES: Record<JobType, RetryPolicy> = {
     removeOnComplete: 100,
     removeOnFail: 100,
   },
+
+  // Read-only bounded comparison job. Retries are meaningful only when the
+  // chain head fetch fails (per-contract RPC failures are isolated inside the
+  // scan and do not fail the job). Exponential backoff with jitter avoids a
+  // thundering herd when an RPC outage affects every run.
+  [JobType.MILESTONE_DIVERGENCE_SCAN]: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+      multiplier: 2,
+      jitter: 0.2,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  },
 };
 
 /**

@@ -59,6 +59,22 @@ export function validateContractEventPayload(payload: unknown): ValidationResult
   // evaluation. A present-but-invalid value is rejected (fail-closed) so
   // an event can never be silently downgraded to off-chain and exposed
   // before it is safe.
+  // Optional contract schema version. A present-but-invalid value is
+  // rejected (fail-closed) so an event can never be projected under a
+  // guessed version; unknown-but-valid versions are quarantined by the
+  // ingestion boundary instead of being rejected here.
+  let schemaVersion: number | undefined;
+  if (checked.schemaVersion !== undefined) {
+    if (
+      typeof checked.schemaVersion !== 'number' ||
+      !Number.isInteger(checked.schemaVersion) ||
+      checked.schemaVersion < 1
+    ) {
+      return { ok: false, reason: 'schemaVersion must be a positive integer' };
+    }
+    schemaVersion = checked.schemaVersion;
+  }
+
   let network: string | undefined;
   if (checked.network !== undefined) {
     if (typeof checked.network !== 'string' || checked.network.trim().length === 0) {
@@ -84,6 +100,7 @@ export function validateContractEventPayload(payload: unknown): ValidationResult
       timestamp: checked.timestamp as string,
       type: checked.type as ContractEvent['type'],
       payload: checked.payload as Record<string, unknown>,
+      ...(schemaVersion !== undefined && { schemaVersion }),
       ...(network !== undefined && { network }),
       ...(ledger !== undefined && { ledger }),
     },
