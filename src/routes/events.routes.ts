@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_PENDING_EVENTS,
 } from '../events/backpressure';
 import { eventAuditService as sharedEventAuditService } from '../events/registry';
+import { createTenantRateLimiter } from '../middleware/tenantRateLimiter';
 
 export interface EventsRouterOptions {
   /**
@@ -33,7 +34,7 @@ export function createEventsRouter(
     options.backpressure ??
     new EventIngestionBackpressure({ maxPendingEvents: DEFAULT_BACKPRESSURE_MAX_PENDING });
 
-  router.post('/events', async (req: Request, res: Response) => {
+  router.post('/events', eventRateLimiter, async (req: Request, res: Response) => {
     const validation = validateContractEventPayload(req.body);
     if (!validation.ok) {
       return fail(res, 'invalid_event_payload', validation.reason, 400);

@@ -18,6 +18,17 @@ export interface UpdateDisputeDto {
 export interface UpdateDisputePayload {
   status?: DisputeStatus;
   resolution?: string;
+  /**
+   * Actor performing the status change. Persisted atomically with the
+   * transition so every state change is auditable.
+   */
+  statusChangedBy?: string;
+  /**
+   * Optimistic-concurrency token: the `version` the caller read. When
+   * provided and stale, the update is rejected with `dispute_version_conflict`
+   * so concurrent transitions cannot silently overwrite each other.
+   */
+  expectedVersion?: number;
 }
 
 /** Single operation in a batch dispute update. */
@@ -40,6 +51,12 @@ export interface DisputeResponseDto {
   createdAt?: string;
   updatedAt?: string;
   deletedAt?: string | null;
+  /** Optimistic-concurrency version (read it before updating). */
+  version?: number;
+  /** Actor of the last status change. */
+  statusChangedBy?: string;
+  /** Reason for the last status change. */
+  statusChangeReason?: string;
 }
 
 export function mapToDisputeResponse(data: any): DisputeResponseDto {
@@ -63,6 +80,9 @@ export function mapToDisputeResponse(data: any): DisputeResponseDto {
         ? data.deletedAt.toISOString()
         : data.deletedAt;
   }
+  if (data?.version !== undefined) response.version = data.version;
+  if (data?.statusChangedBy !== undefined) response.statusChangedBy = data.statusChangedBy;
+  if (data?.statusChangeReason !== undefined) response.statusChangeReason = data.statusChangeReason;
 
   return response;
 }

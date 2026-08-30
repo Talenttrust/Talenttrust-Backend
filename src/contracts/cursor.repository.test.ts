@@ -246,6 +246,65 @@ describe('InMemoryCursorRepository', () => {
   });
 });
 
+describe('InMemoryCursorRepository checkpoint persistence', () => {
+  it('stores a first checkpoint for a network and contract', async () => {
+    const repo = new InMemoryCursorRepository();
+    expect(await repo.getCheckpoint('mainnet', '0xabc')).toBeNull();
+    await repo.updateCheckpoint('mainnet', '0xabc', 10, 42);
+    const checkpoint = await repo.getCheckpoint('mainnet', '0xabc');
+    expect(checkpoint!.network).toBe('mainnet');
+    expect(checkpoint!.contract).toBe('0xabc');
+    expect(checkpoint!.ledger).toBe(10);
+    expect(checkpoint!.eventSequence).toBe(42);
+  });
+
+  it('resumes after a restart from the last committed checkpoint', async () => {
+    const repo = new InMemoryCursorRepository();
+    await repo.updateCheckpoint('mainnet', '0xabc', 10, 42);
+    const saved = await repo.listCheckpoints();
+    const restarted = new InMemoryCursorRepository();
+    for (const cp of saved) {
+      await restarted.updateCheckpoint(cp.network, cp.contract, cp.ledger, cp.eventSequence);
+    }
+    const checkpoint = await restarted.getCheckpoint('mainnet', '0xabc');
+    expect(checkpoint!.eventSequence).toBe(42);
+  });
+
+  it('does not advance the checkpoint when the projection write fails', async () => {
+    const repo = new InMemoryCursorRepository();
+    await repo.updateCheckpoint('mainnet', '0xabc', 10, 1);
+    const writeProjection = async () => {
+      throw new Error('projection write failed');
+    };
+    const advance = async (ledger: number, eventSequence: number) => {
+      await writeProjection();
+      await repo.updateCheckpoint('mainnet', '0xabc', ledger, eventSequence);
+    };
+    await expect(advance(11, 2)).rejects.toThrow('projection write failed');
+    const checkpoint = await repo.getCheckpoint('mainnet', '0xabc');
+    expect(checkpoint!.eventSequence).toBe(1);
+  });
+
+  it('advances the same contract independently on different networks', async () => {
+    const repo = new InMemoryCursorRepository();
+    await repo.updateCheckpoint('mainnet', '0xabc', 10, 100);
+    await repo.updateCheckpoint('optimism', '0xabc', 20, 200);
+    const mainnet = await repo.getCheckpoint('mainnet', '0xabc');
+    const optimism = await repo.getCheckpoint('optimism', '0xabc');
+    expect(mainnet!.eventSequence).toBe(100);
+    expect(optimism!.eventSequence).toBe(200);
+  });
+
+  it('exposes a checkpoint that is ahead of the available ledger', async () => {
+    const repo = new InMemoryCursorRepository();
+    await repo.updateCheckpoint('mainnet', '0xabc', 100, 50);
+    const checkpoint = await repo.getCheckpoint('mainnet', '0xabc');
+    expect(checkpoint).not.toBeNull();
+    expect(checkpoint!.ledger).toBe(100);
+    expect(checkpoint!.ledger).toBeGreaterThan(90);
+  });
+});
+
 describe('resolveCursorQueryParam', () => {
   const position = { createdAt: '2024-06-01T12:00:00.000Z', id: 'abc-123' };
 

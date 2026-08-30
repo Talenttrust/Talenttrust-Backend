@@ -97,6 +97,18 @@ export class MilestonesSoftDeleteController {
       next(error);
     }
   }
+
+  public payout(req: Request, res: Response, next: NextFunction): void {
+    try {
+      const contractId = req.params.id!;
+      const milestoneId = req.params.milestoneId!;
+      const payoutResult = milestonesService.payout(contractId, milestoneId);
+      ok(res, payoutResult);
+    } catch (error) {
+      if (mapMilestoneError(res, error)) return;
+      next(error);
+    }
+  }
 }
 
 export function createMilestonesSoftDeleteController(): MilestonesSoftDeleteController {
