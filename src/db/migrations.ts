@@ -692,3 +692,74 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 16: raw blockchain event payload retention (issue #1232)
+MIGRATIONS.push({
+  version: 16,
+  name: "add_raw_event_retention_schema",
+  checksumSource: [
+    "ALTER TABLE smart_contract_events ADD COLUMN network TEXT",
+    "ALTER TABLE smart_contract_events ADD COLUMN ledger INTEGER",
+    "ALTER TABLE smart_contract_events ADD COLUMN ingested_at TEXT",
+    "CREATE TABLE IF NOT EXISTS raw_event_archive (",
+    "CREATE TABLE IF NOT EXISTS raw_event_holds (",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(smart_contract_events)") as Array<{
+      name: string;
+    }>;
+    const has = (name: string): boolean =>
+      columns.some((col) => col.name === name);
+
+    if (!has("network")) {
+      db.exec("ALTER TABLE smart_contract_events ADD COLUMN network TEXT");
+    }
+    if (!has("ledger")) {
+      db.exec("ALTER TABLE smart_contract_events ADD COLUMN ledger INTEGER");
+    }
+    if (!has("ingested_at")) {
+      db.exec("ALTER TABLE smart_contract_events ADD COLUMN ingested_at TEXT");
+    }
+
+    // Backfill the retention anchor for pre-existing rows. The event
+    // `timestamp` (as reported by the chain) is the best available anchor;
+    // rows without a usable timestamp fall back to the current time.
+    db.exec(`
+      UPDATE smart_contract_events
+      SET ingested_at = COALESCE(
+        NULLIF(ingested_at, ''),
+        NULLIF(timestamp, ''),
+        datetime('now')
+      )
+      WHERE ingested_at IS NULL OR ingested_at = '';
+
+      CREATE TABLE IF NOT EXISTS raw_event_archive (
+        event_id     TEXT    PRIMARY KEY,
+        contract_id  TEXT    NOT NULL,
+        event_type   TEXT    NOT NULL,
+        network      TEXT,
+        archived_at  TEXT    NOT NULL,
+        payload      TEXT    NOT NULL,
+        payload_hash TEXT    NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS raw_event_holds (
+        id          TEXT    PRIMARY KEY,
+        scope_type  TEXT    NOT NULL
+                            CHECK (scope_type IN ('contract', 'network', 'all')),
+        scope_value TEXT,
+        reason      TEXT    NOT NULL,
+        actor       TEXT    NOT NULL,
+        created_at  TEXT    NOT NULL,
+        expires_at  TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_raw_event_archive_contract_id
+        ON raw_event_archive(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_raw_event_holds_expires_at
+        ON raw_event_holds(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_smart_contract_events_ingested_at
+        ON smart_contract_events(COALESCE(ingested_at, timestamp));
+    `);
+  },
+});

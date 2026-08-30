@@ -6,6 +6,7 @@
  */
 
 import { PriorityLevel } from './fair-scheduler';
+import type { RawEventRetentionJobPayload } from '../events/rawEventRetention.types';
 
 /**
  * Available job types in the system
@@ -16,6 +17,7 @@ export enum JobType {
   REPUTATION_UPDATE = 'reputation-update',
   REPUTATION_RECOMPUTE = 'reputation-recompute',
   BLOCKCHAIN_SYNC = 'blockchain-sync',
+  RAW_EVENT_RETENTION = 'raw-event-retention',
 }
 
 /**
@@ -75,6 +77,8 @@ export interface BlockchainSyncPayload {
   requestId?: string;
 }
 
+export type { RawEventRetentionJobPayload };
+
 /**
  * Union type for all job payloads
  */
@@ -83,7 +87,8 @@ export type JobPayload =
   | ContractProcessingPayload
   | ReputationUpdatePayload
   | ReputationRecomputePayload
-  | BlockchainSyncPayload;
+  | BlockchainSyncPayload
+  | RawEventRetentionJobPayload;
 
 export interface JobEnqueueOptions {
   priority?: number;

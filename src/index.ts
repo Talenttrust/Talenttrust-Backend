@@ -11,6 +11,7 @@ import { createApp, attachTerminalHandlers } from './app';
 import { AppError } from './errors/appError';
 import { JobType, JobPayload, QueueManager } from './queue';
 import { createJobQuarantineRouter } from './queue/job-quarantine.routes';
+import { rawEventRetentionSchedulerService } from './events/rawEventRetention.scheduler';
 import { auditService } from './audit/service';
 import { createAuditRouter } from './audit/router';
 import { createRateLimiter } from './middleware/rateLimiter';
@@ -397,6 +398,12 @@ async function startServer(): Promise<void> {
   }
 
   if (!isJest) {
+    // Optional periodic raw-event retention; opt in via env var. Each run is
+    // bounded, so a scheduled sweep never processes more than maxPerRun.
+    if (process.env['RAW_EVENT_RETENTION_ENABLED'] === 'true') {
+      await rawEventRetentionSchedulerService.start();
+    }
+
     const server = app.listen(PORT, () => {
       console.log(`TalentTrust API listening on http://localhost:${PORT}`);
     });

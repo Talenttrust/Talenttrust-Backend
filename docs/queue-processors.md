@@ -229,6 +229,55 @@ interface BlockchainSyncPayload {
 | **Multiplier** | 1.5× |
 | **Jitter** | 30% |
 
+### 6. Raw Event Retention
+
+| Field | Value |
+|---|---|
+| **Queue name** | `raw-event-retention` |
+| **JobType enum** | `JobType.RAW_EVENT_RETENTION` |
+| **Processor file** | [`src/events/rawEventRetention.processor.ts`](../src/events/rawEventRetention.processor.ts) |
+| **Concurrency** | `QUEUE_CONCURRENCY` (default **5**) |
+
+Defines retention boundaries for raw blockchain event payloads (issue
+#1232): per-network retention classes, legal holds, and archive-then-purge
+that only runs after the event's normalized projection is verified. See
+[`src/events/rawEventRetention.ts`](../src/events/rawEventRetention.ts) for
+the full design.
+
+#### Payload: `RawEventRetentionJobPayload`
+
+```ts
+interface RawEventRetentionJobPayload {
+  network?: 'soroban' | 'stellar' | 'offchain'; // scope one network's class
+  maxEvents?: number;   // bounded per run (default 500, cap 1000)
+  dryRun?: boolean;     // count candidates without archiving/purging
+  correlationId?: string;
+  requestId?: string;
+}
+```
+
+#### Semantics
+
+- **Retention classes**: per-network periods (`soroban` 30d, `stellar` 90d,
+  `offchain` 180d by default; env-overridable). Boundary = `ingestedAt` +
+  period.
+- **Legal holds**: scoped holds (`contract` / `network` / `all`) with optional
+  expiry freeze matching payloads.
+- **Archive then purge**: archival (compliance copy in `raw_event_archive`)
+  and raw-row deletion are atomic; purge only after verification. The run
+  records counts and failures only — never raw payload content.
+- **Projection verification**: fail-closed — unverifiable events are deferred.
+
+#### Retry Policy
+
+| Parameter | Value |
+|---|---|
+| **Max attempts** | 3 |
+| **Backoff type** | exponential |
+| **Initial delay** | 2,000 ms |
+| **Multiplier** | 2× |
+| **Jitter** | 20% |
+
 ---
 
 ## Webhook DLQ
