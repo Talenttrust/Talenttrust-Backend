@@ -741,40 +741,34 @@ MIGRATIONS.push({
   },
 });
 
-// Version 16: milestone divergence reports for the bounded comparison job
+// Version 16: audit_download_tokens table for signed, expiring, one-time-use
+// download tokens bound to a specific export artifact and requester (issue #1222).
 MIGRATIONS.push({
   version: 16,
-  name: "create_milestone_divergence_reports_table",
+  name: "create_audit_download_tokens_table",
   checksumSource: [
-    "CREATE TABLE IF NOT EXISTS milestone_divergence_reports (",
-    "UNIQUE(run_id, contract_id)",
-    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_tenant",
-    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_run",
-    "CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_status",
+    "CREATE TABLE IF NOT EXISTS audit_download_tokens (",
+    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant",
+    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at",
   ].join("\n"),
   up: (db) => {
     db.exec(`
-      CREATE TABLE IF NOT EXISTS milestone_divergence_reports (
-        id                       TEXT    PRIMARY KEY,
-        run_id                   TEXT    NOT NULL,
-        tenant_id                TEXT    NOT NULL DEFAULT 'default',
-        contract_id              TEXT    NOT NULL,
-        status                   TEXT    NOT NULL
-                                       CHECK (status IN ('in_sync', 'divergent', 'unavailable')),
-        block_height             INTEGER,
-        compared_at              TEXT    NOT NULL,
-        milestone_comparisons    TEXT    NOT NULL,
-        differences              TEXT    NOT NULL,
-        rpc_error                TEXT,
-        created_at               TEXT    NOT NULL,
-        UNIQUE(run_id, contract_id)
+      CREATE TABLE IF NOT EXISTS audit_download_tokens (
+        jti           TEXT    PRIMARY KEY,
+        tenant_id     TEXT    NOT NULL,
+        requester_id  TEXT    NOT NULL,
+        artifact_id   TEXT    NOT NULL,
+        issued_at     TEXT    NOT NULL,
+        expires_at    TEXT    NOT NULL,
+        used_at       TEXT,
+        revoked_at    TEXT
       );
-      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_tenant
-        ON milestone_divergence_reports(tenant_id);
-      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_run
-        ON milestone_divergence_reports(run_id);
-      CREATE INDEX IF NOT EXISTS idx_milestone_divergence_reports_status
-        ON milestone_divergence_reports(status);
+
+      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant
+        ON audit_download_tokens(tenant_id);
+
+      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at
+        ON audit_download_tokens(expires_at);
     `);
   },
 });
