@@ -692,3 +692,35 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 16: audit_download_tokens table for signed, expiring, one-time-use
+// download tokens bound to a specific export artifact and requester (issue #1222).
+MIGRATIONS.push({
+  version: 16,
+  name: "create_audit_download_tokens_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS audit_download_tokens (",
+    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant",
+    "CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_download_tokens (
+        jti           TEXT    PRIMARY KEY,
+        tenant_id     TEXT    NOT NULL,
+        requester_id  TEXT    NOT NULL,
+        artifact_id   TEXT    NOT NULL,
+        issued_at     TEXT    NOT NULL,
+        expires_at    TEXT    NOT NULL,
+        used_at       TEXT,
+        revoked_at    TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_tenant
+        ON audit_download_tokens(tenant_id);
+
+      CREATE INDEX IF NOT EXISTS idx_audit_download_tokens_expires_at
+        ON audit_download_tokens(expires_at);
+    `);
+  },
+});
