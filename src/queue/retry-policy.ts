@@ -94,6 +94,22 @@ export const DEFAULT_RETRY_POLICIES: Record<JobType, RetryPolicy> = {
     removeOnComplete: 100,
     removeOnFail: 100,
   },
+
+  // Raw event retention: bounded, idempotent (archival upserts by event_id;
+  // purge happens only after a successful archive in the same transaction).
+  // Per-event failures are isolated inside the run, so retries matter only
+  // for infrastructure-level failures (DB, etc.).
+  [JobType.RAW_EVENT_RETENTION]: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+      multiplier: 2,
+      jitter: 0.2,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  },
 };
 
 /**
