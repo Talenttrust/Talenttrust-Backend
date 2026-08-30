@@ -145,6 +145,173 @@ export async function fetchAndVerify(
   return metadata;
 }
 
+export interface ContractMetadataCacheOptions {
+  /** Cache lifetime for a verified metadata payload, in milliseconds. */
+  ttlMs?: number;
+  /** Maximum number of network+contract entries retained in memory. */
+  maxEntries?: number;
+}
+
+export interface ContractMetadataCacheStats {
+  hits: number;
+  misses: number;
+  entries: number;
+  refreshFailures: number;
+}
+
+interface ContractMetadataCacheEntry<T> {
+  value: T;
+  cachedAt: number;
+}
+
+/**
+ * Use the network and contract id together in the cache key to avoid cross-network
+ * collisions. The same contract address can legitimately exist on multiple chains,
+ * and stale metadata from one network must never be served for another.
+ */
+export function buildContractMetadataCacheKey(network: string, contractId: string): string {
+  const normNetwork = String(network ?? '').trim().toLowerCase();
+  const normContract = String(contractId ?? '').trim();
+  return `${normNetwork}:${normContract}`;
+}
+
+/**
+ * In-memory cache for on-chain contract metadata.
+ *
+ * Design notes:
+ * - Entries are keyed by network + contract id, not contract id alone.
+ * - Entries expire after `ttlMs`; expired values are treated as misses, not stale hits.
+ * - Refresh failures are tracked explicitly so observability can surface upstream RPC issues.
+ * - Explicit invalidation is used by deployment/config change paths instead of silently reusing stale data.
+ */
+export class ContractMetadataCache<T = unknown> {
+  public readonly ttlMs: number;
+  public readonly maxEntries: number;
+
+  private readonly store = new Map<string, ContractMetadataCacheEntry<T>>();
+  private hits = 0;
+  private misses = 0;
+  private refreshFailures = 0;
+
+  constructor(options: ContractMetadataCacheOptions = {}) {
+    const ttlMs = options.ttlMs ?? 60_000;
+    const maxEntries = options.maxEntries ?? 256;
+
+    if (!Number.isInteger(ttlMs) || ttlMs <= 0) {
+      throw new RangeError(`ContractMetadataCache: ttlMs must be a positive integer (got ${String(options.ttlMs)})`);
+    }
+    if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
+      throw new RangeError(`ContractMetadataCache: maxEntries must be a positive integer (got ${String(options.maxEntries)})`);
+    }
+
+    this.ttlMs = ttlMs;
+    this.maxEntries = maxEntries;
+  }
+
+  public stats(): ContractMetadataCacheStats {
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      entries: this.store.size,
+      refreshFailures: this.refreshFailures,
+    };
+  }
+
+  public ageMs(network: string, contractId: string): number | undefined {
+    const key = buildContractMetadataCacheKey(network, contractId);
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    return Date.now() - entry.cachedAt;
+  }
+
+  public async get(
+    network: string,
+    contractId: string,
+    fetcher: () => Promise<T>,
+  ): Promise<T> {
+    const key = buildContractMetadataCacheKey(network, contractId);
+    const existing = this.store.get(key);
+    const now = Date.now();
+
+    if (existing && now - existing.cachedAt < this.ttlMs) {
+      this.store.delete(key);
+      this.store.set(key, existing);
+      this.hits++;
+      return existing.value;
+    }
+
+    if (existing && now - existing.cachedAt >= this.ttlMs) {
+      this.store.delete(key);
+    }
+
+    this.misses++;
+
+    try {
+      const value = await fetcher();
+      const entry: ContractMetadataCacheEntry<T> = { value, cachedAt: Date.now() };
+      this.store.delete(key);
+      this.store.set(key, entry);
+      while (this.store.size > this.maxEntries) {
+        const oldestKey = this.store.keys().next().value;
+        if (oldestKey === undefined) break;
+        this.store.delete(oldestKey);
+      }
+      return value;
+    } catch (error) {
+      this.refreshFailures++;
+      log.warn('Contract metadata refresh failed; cache left empty', {
+        network,
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  public invalidate(network: string, contractId: string): boolean {
+    return this.store.delete(buildContractMetadataCacheKey(network, contractId));
+  }
+
+  public invalidateNetwork(network: string): number {
+    const prefix = `${String(network ?? '').trim().toLowerCase()}:`;
+    let removed = 0;
+    for (const key of [...this.store.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.store.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  public clear(): void {
+    this.store.clear();
+  }
+}
+
+export let contractMetadataCache = new ContractMetadataCache<any>();
+
+export function resetContractMetadataCache(): void {
+  contractMetadataCache.clear();
+  contractMetadataCache = new ContractMetadataCache<any>();
+}
+
+export function invalidateContractMetadataCache(network: string, contractId: string): void {
+  contractMetadataCache.invalidate(network, contractId);
+}
+
+export async function fetchAndVerifyCached(
+  network: string,
+  contractId: string,
+  rpcUrl: string,
+  expectedHash?: string,
+  fetcher?: Fetcher,
+): Promise<any> {
+  return contractMetadataCache.get(network, contractId, async () => {
+    return fetchAndVerify(contractId, rpcUrl, expectedHash, fetcher);
+  });
+}
+
 /** Test helper: allow tests to read/reset the mismatch counter. */
 export function getMismatchMetric(): Counter<string> {
   return mismatchCounter;
@@ -172,6 +339,12 @@ export default {
   computeMetadataHash,
   timingSafeHashEqual,
   fetchAndVerify,
+  fetchAndVerifyCached,
+  ContractMetadataCache,
+  buildContractMetadataCacheKey,
+  contractMetadataCache,
+  invalidateContractMetadataCache,
+  resetContractMetadataCache,
   getMismatchMetric,
   resetMetricsForTest,
 };
