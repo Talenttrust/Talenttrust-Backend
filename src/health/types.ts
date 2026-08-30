@@ -16,8 +16,30 @@ export interface ProbeResult {
   status?: ProbeStatus;
   /** Optional detail message (error text or latency note). */
   detail?: string;
-  /** Round-trip latency in milliseconds. */
+  /** Round-trip latency in milliseconds, bounded to the probe latency budget. */
   latencyMs: number;
+  /**
+   * Freshness of the dependency data in milliseconds: how long ago the latest
+   * observed data point (e.g. last indexed event) was produced. Absent when the
+   * dependency has no notion of fresh data or has no data to measure.
+   */
+  ageMs?: number;
+  /** ISO-8601 timestamp of the last successful observation for this dependency. */
+  lastSuccessfulAt?: string;
+}
+
+/**
+ * Bounds applied to every dependency probe in a health check.
+ *
+ * `maxLatencyMs` caps how long a probe may run before it is treated as timed
+ * out (bounded latency). `maxAgeMs` is the freshness budget: a dependency
+ * whose data is older than this is reported as degraded.
+ */
+export interface HealthBudget {
+  /** Maximum time a probe may take to resolve before it is marked down. */
+  maxLatencyMs: number;
+  /** Maximum age of dependency data before it is reported as degraded. */
+  maxAgeMs: number;
 }
 
 /** Overall health response payload. */

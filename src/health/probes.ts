@@ -287,3 +287,71 @@ export async function circuitBreakerProbe(): Promise<ProbeResult> {
     };
   }
 }
+
+/**
+ * Probe: measures the freshness of indexed smart-contract event data.
+ *
+ * The indexer may be technically reachable while the data it publishes is too
+ * stale (e.g. the poller stopped advancing). This probe reads the timestamp of
+ * the most recently indexed event and returns `ageMs` (how old that data is)
+ * plus `lastSuccessfulAt` (when it was produced). No event timestamps are
+ * exposed.
+ *
+ * State classification (budget enforcement happens in the checker):
+ * - No indexed events yet: `up` with "no indexed events" — nothing to be
+ *   stale about, so a fresh deployment stays green.
+ * - Fresh data: `up` with `ageMs` and `lastSuccessfulAt` set.
+ * - Unreadable or errored store: `down`.
+ *
+ * The checker compares `ageMs` against the freshness budget and downgrades the
+ * probe to `degraded` when the data is too old.
+ */
+export async function indexerProbe(): Promise<ProbeResult> {
+  const start = Date.now();
+  try {
+    const row = getDb()
+      .prepare("SELECT MAX(timestamp) AS latest FROM smart_contract_events")
+      .get() as { latest: string | null } | undefined;
+
+    const latest = row?.latest ?? null;
+
+    if (!latest) {
+      return {
+        name: "indexer",
+        ok: true,
+        status: "up",
+        detail: "no indexed events",
+        latencyMs: Date.now() - start,
+      };
+    }
+
+    const latestTime = Date.parse(latest);
+    if (Number.isNaN(latestTime)) {
+      return {
+        name: "indexer",
+        ok: false,
+        status: "down",
+        detail: "indexer timestamp is not parseable",
+        latencyMs: Date.now() - start,
+      };
+    }
+
+    const ageMs = Math.max(0, Date.now() - latestTime);
+    return {
+      name: "indexer",
+      ok: true,
+      status: "up",
+      latencyMs: Date.now() - start,
+      ageMs,
+      lastSuccessfulAt: new Date(latestTime).toISOString(),
+    };
+  } catch (err: unknown) {
+    return {
+      name: "indexer",
+      ok: false,
+      status: "down",
+      detail: err instanceof Error ? err.message : "unknown error",
+      latencyMs: Date.now() - start,
+    };
+  }
+}

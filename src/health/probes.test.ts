@@ -375,7 +375,7 @@ jest.mock("../queue/queue-manager");
 import { QueueManager } from "../queue/queue-manager";
 import type { QueueHealthInfo } from "../queue/queue-manager";
 import { JobType } from "../queue/types";
-import { queueProbe, circuitBreakerProbe } from "./probes";
+import { queueProbe, circuitBreakerProbe, indexerProbe } from "./probes";
 
 const MockQueueManager = QueueManager as jest.Mocked<typeof QueueManager>;
 
@@ -561,5 +561,99 @@ describe("circuitBreakerProbe", () => {
 
     const result = await circuitBreakerProbe();
     expect(typeof result.latencyMs).toBe("number");
+  });
+});
+
+// ── indexerProbe ──────────────────────────────────────────────────────────────
+
+describe("indexerProbe", () => {
+  beforeEach(() => {
+    jest.resetAllMocks();
+  });
+
+  function mockLatest(latest: string | null): void {
+    mockGetDb.mockReturnValue({
+      prepare: () => ({ get: () => ({ latest }) }),
+    } as unknown as ReturnType<typeof getDb>);
+  }
+
+  // ── Dependency healthy ─────────────────────────────────────────────────────
+  it("returns up with a fresh ageMs for recently indexed events", async () => {
+    mockLatest(new Date(Date.now() - 60_000).toISOString());
+
+    const result = await indexerProbe();
+
+    expect(result.name).toBe("indexer");
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("up");
+    expect(result.ageMs).toBeGreaterThanOrEqual(0);
+    expect(result.ageMs).toBeLessThan(120_000);
+    expect(result.lastSuccessfulAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(typeof result.latencyMs).toBe("number");
+  });
+
+  it("returns up without a freshness alarm when no events have been indexed", async () => {
+    mockLatest(null);
+
+    const result = await indexerProbe();
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("up");
+    expect(result.detail).toBe("no indexed events");
+    expect(result.ageMs).toBeUndefined();
+    expect(result.lastSuccessfulAt).toBeUndefined();
+  });
+
+  // ── Stale indexer ──────────────────────────────────────────────────────────
+  it("reports a large ageMs for old indexed data so the checker can degrade it", async () => {
+    mockLatest(new Date(Date.now() - 10 * 60_000).toISOString());
+
+    const result = await indexerProbe();
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("up");
+    expect(result.ageMs).toBeGreaterThan(9 * 60_000);
+    expect(result.ageMs).toBeLessThan(11 * 60_000);
+  });
+
+  it("handles a timestamp in the future without producing a negative age", async () => {
+    mockLatest(new Date(Date.now() + 5 * 60_000).toISOString());
+
+    const result = await indexerProbe();
+
+    expect(result.ageMs).toBe(0);
+  });
+
+  it("returns down when the indexer store is unavailable", async () => {
+    mockGetDb.mockImplementation(() => {
+      throw new Error("SQLITE_CANTOPEN");
+    });
+
+    const result = await indexerProbe();
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
+    expect(result.detail).toContain("SQLITE_CANTOPEN");
+  });
+
+  it("returns down for a non-parseable indexed timestamp", async () => {
+    mockLatest("not-a-date");
+
+    const result = await indexerProbe();
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("down");
+    expect(result.detail).toContain("not parseable");
+  });
+
+  it("returns down and masks non-Error thrown values", async () => {
+    mockGetDb.mockImplementation(() => {
+      throw "raw error";
+    });
+
+    const result = await indexerProbe();
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toBe("unknown error");
   });
 });
