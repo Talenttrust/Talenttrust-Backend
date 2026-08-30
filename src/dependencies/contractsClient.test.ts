@@ -115,6 +115,7 @@ describe('ContractsClient', () => {
 
     const client = new ContractsClient(defaultConfig, offChaos);
     await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract', providerCode: 'CONTRACT_NOT_FOUND' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'contract-error', providerCode: 'CONTRACT_NOT_FOUND' });
   });
 
   it('classifies unknown provider status as unknown_provider_status', async () => {
@@ -123,5 +124,6 @@ describe('ContractsClient', () => {
 
     const client = new ContractsClient(defaultConfig, offChaos);
     await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown_provider_status' });
+    await expect(client.getContracts()).rejects.toMatchObject({ kind: 'unknown-provider-status', providerCode: 'UNKNOWN' });
   });
 });

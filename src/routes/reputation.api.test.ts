@@ -58,6 +58,7 @@ jest.mock('../controllers/reputation.controller', () => ({
     }),
     correctReputation: jest.fn((_req: Request, res: Response) => {
       res.status(200).json({ status: 'success', data: { freelancerId: _req.params.id } });
+      res.status(200).json({ status: 'success', data: {} });
     }),
     getCorrections: jest.fn((_req: Request, res: Response) => {
       res.status(200).json({ status: 'success', data: [] });

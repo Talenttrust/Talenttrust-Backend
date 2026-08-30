@@ -22,7 +22,7 @@ export interface EventValidationResult {
 
 export interface EventIngestionResult {
   deduplicationKey?: string;
-  status: 'accepted' | 'duplicate' | 'rejected';
+  status: 'accepted' | 'duplicate' | 'rejected' | 'held';
   reason?: string;
   processedAt: Date;
   code?: string;

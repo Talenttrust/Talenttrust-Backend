@@ -7,9 +7,9 @@ import { encodeCursor, decodeCursor, parseLimit } from '../contracts/cursor.repo
 export interface WebhookSubscriptionRepository {
   create(dto: CreateWebhookSubscriptionDto): Promise<WebhookSubscription>;
   findById(id: string): Promise<WebhookSubscription | undefined>;
-  findAll(filter?: { consumerId?: string; eventType?: string; active?: boolean }): Promise<WebhookSubscription[]>;
+  findAll(filter?: { consumerId?: string; tenantId?: string; eventType?: string; active?: boolean }): Promise<WebhookSubscription[]>;
   findAllPaginated(
-    filter: { consumerId?: string; eventType?: string; active?: boolean },
+    filter: { consumerId?: string; tenantId?: string; eventType?: string; active?: boolean },
     input: CursorPaginationInput,
   ): Promise<CursorPage<WebhookSubscription>>;
   update(id: string, dto: UpdateWebhookSubscriptionDto): Promise<WebhookSubscription>;
@@ -28,9 +28,9 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO webhook_subscriptions (id, consumer_id, url, event_type, secret, active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(id, dto.consumerId ?? null, dto.url, dto.eventType, dto.secret ?? null, now, now);
+      INSERT INTO webhook_subscriptions (id, consumer_id, tenant_id, url, event_type, secret, active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(id, dto.consumerId ?? null, dto.tenantId, dto.url, dto.eventType, dto.secret ?? null, now, now);
     return this.findById(id) as Promise<WebhookSubscription>;
   }
 
@@ -39,13 +39,17 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     return row ? this.mapRow(row) : undefined;
   }
 
-  async findAll(filter?: { consumerId?: string; eventType?: string; active?: boolean }): Promise<WebhookSubscription[]> {
+  async findAll(filter?: { consumerId?: string; tenantId?: string; eventType?: string; active?: boolean }): Promise<WebhookSubscription[]> {
     let sql = 'SELECT * FROM webhook_subscriptions';
     const conditions: string[] = [];
     const params: any[] = [];
     if (filter?.consumerId) {
       conditions.push('consumer_id = ?');
       params.push(filter.consumerId);
+    }
+    if (filter?.tenantId) {
+      conditions.push('tenant_id = ?');
+      params.push(filter.tenantId);
     }
     if (filter?.eventType) {
       conditions.push('event_type = ?');
@@ -63,7 +67,7 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
   }
 
   async findAllPaginated(
-    filter: { consumerId?: string; eventType?: string; active?: boolean },
+    filter: { consumerId?: string; tenantId?: string; eventType?: string; active?: boolean },
     input: CursorPaginationInput,
   ): Promise<CursorPage<WebhookSubscription>> {
     const limit = parseLimit(input.limit);
@@ -75,6 +79,10 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     if (filter?.consumerId) {
       conditions.push('consumer_id = ?');
       params.push(filter.consumerId);
+    }
+    if (filter?.tenantId) {
+      conditions.push('tenant_id = ?');
+      params.push(filter.tenantId);
     }
     if (filter?.eventType) {
       conditions.push('event_type = ?');
@@ -115,6 +123,7 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
   async update(id: string, dto: UpdateWebhookSubscriptionDto): Promise<WebhookSubscription> {
     const updates: string[] = [];
     const params: any[] = [];
+    if (dto.tenantId !== undefined) { updates.push('tenant_id = ?'); params.push(dto.tenantId); }
     if (dto.url !== undefined) { updates.push('url = ?'); params.push(dto.url); }
     if (dto.eventType !== undefined) { updates.push('event_type = ?'); params.push(dto.eventType); }
     if (dto.secret !== undefined) { updates.push('secret = ?'); params.push(dto.secret); }
@@ -135,6 +144,7 @@ export class SqliteWebhookSubscriptionRepository implements WebhookSubscriptionR
     return {
       id: row.id,
       consumerId: row.consumer_id ?? undefined,
+      tenantId: row.tenant_id,
       url: row.url,
       eventType: row.event_type,
       secret: row.secret ?? undefined,

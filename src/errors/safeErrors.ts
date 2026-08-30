@@ -54,6 +54,7 @@ const UNSAFE_PATTERNS: ReadonlyArray<RegExp> = [
   /node_modules\//,                      // dependency paths
   /ECONNREFUSED|ENOTFOUND|ETIMEDOUT/,   // raw syscall errors
   /SELECT\s|INSERT\s|UPDATE\s|DELETE\s/i, // SQL fragments
+  /\b(SELECT|INSERT|UPDATE|DELETE)\b/i, // SQL fragments
   /password|secret|token|apikey/i,       // credential field names in messages
 ];
 
@@ -220,6 +221,7 @@ function isTimeoutCode(code?: string | number): boolean {
 }
 
 const TRANSPORT_CODE_PATTERN = /^(ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH)/;
+const TRANSPORT_CODE_PATTERN = /^(ECONNREFUSED|ENOTFOUND|EHOSTUREACH|ENETUREACH)/;
 
 function isTransportCode(code?: string | number): boolean {
   if (typeof code !== 'string') return false;

@@ -127,7 +127,7 @@ export class MilestonesService {
   /**
    * Create a milestone for a contract. New milestones are active (not deleted).
    */
-  public create(contractId: string, input: CreateMilestoneInput): MilestoneRecord {
+  public create(contractId: string, input: CreateMilestoneInput, tenantId?: string): MilestoneRecord {
     const now = new Date();
     const record: MilestoneRecord = {
       id: randomUUID(),
@@ -154,13 +154,13 @@ export class MilestonesService {
           title: record.title,
           amount: record.amount,
           completedAt: record.updatedAt.toISOString(),
-        })
+        }, undefined, tenantId)
         .catch(() => {
           // Webhook delivery failure is observable via DLQ; do not throw.
         });
     }
 
-    return { ...record };
+    return record;
   }
 
   /**
@@ -232,6 +232,27 @@ export class MilestonesService {
    * Past the window → SoftDeleteRetentionError (410).
    * Active (not deleted) → 409.
    */
+  /**
+   * Release a milestone (create a payment intent).
+   */
+  public payout(contractId: string, milestoneId: string): any {
+    const record = milestoneStore.get(milestoneId);
+    if (!record || record.contractId !== contractId) {
+      throw new MilestoneNotFoundError(
+        `Milestone ${milestoneId} not found for contract ${contractId}`,
+      );
+    }
+    if (isSoftDeleted(record.deletedAt)) {
+      throw new MilestoneConflictError(`Milestone ${milestoneId} is soft-deleted`);
+    }
+
+    return {
+      id: `pi_${randomUUID()}`,
+      milestoneId: record.id,
+      amount: record.amount,
+      status: 'created'
+    };
+  }
   public restore(
     contractId: string,
     milestoneId: string,

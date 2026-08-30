@@ -13,9 +13,10 @@
  * authorization. A sliding-window rate limiter (sensitive-tier) is applied
  * to every route to prevent abuse and accidental overload.
  *
- * Responses above {@link DISPUTES_COMPRESSION_THRESHOLD} bytes are automatically
- * compressed using gzip or deflate, honouring the client's `Accept-Encoding`
- * header. Small responses are served uncompressed to avoid unnecessary CPU cost.
+ * Status changes go through the service layer's centralized transition
+ * matrix (`DisputesService.updateDispute`), so every route enforces the
+ * same legal transitions, evidence requirements, and optimistic-concurrency
+ * rules — no route can bypass them.
  *
  * @route GET    /api/v1/disputes       - List disputes
  * @route GET    /api/v1/disputes/:id   - Get a single dispute
@@ -26,7 +27,6 @@
  * @security
  *  - All routes require a valid JWT (Bearer token).
  *  - Rate limiting returns 429 with Retry-After header when exceeded.
- *  - Abuse guard hard-blocks repeat offenders.
  *  - Correlation IDs are validated against a strict pattern before use.
  */
 
@@ -35,7 +35,7 @@ import { z } from 'zod';
 import { createRateLimiter } from '../middleware/rateLimiter';
 import { rateLimitConfig } from '../config/rateLimit';
 import { requireAuth, requirePermission } from '../middleware/authorization';
-import { validateSchema, validateRequest, validateParams, validateQuery } from '../middleware/validate.middleware';
+import { validateRequest, validateParams, validateQuery, validateSchema } from '../middleware/validate.middleware';
 import {
   createDisputeSchema,
   updateDisputeSchema,
@@ -43,8 +43,7 @@ import {
   listDisputesQuerySchema,
 } from './disputes.validation';
 import { features } from '../config/features';
-import { ok, fail } from '../utils/apiResponse';
-import { getRequestLogger, getRequestContext } from '../utils/correlationId';
+import { getRequestLogger } from '../utils/correlationId';
 import { createDisputesController } from '../controllers/disputes.controller';
 import type { Logger } from '../logger';
 import type { MetricsServiceLike } from '../observability/metrics-service';
@@ -55,19 +54,6 @@ export interface DisputesRouterOptions {
   /** Optional logger override (tests). Defaults to request-scoped or root logger. */
   log?: Logger;
 }
-
-// ── Feature flag — gate all disputes routes ───────────────────────────────────
-router.use((_req: Request, res: Response, next: NextFunction) => {
-  if (!features.disputesEnabled) {
-    fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
-    return;
-  }
-  if (error instanceof SoftDeleteRetentionError) {
-    fail(res, error.code, error.message, error.statusCode);
-    return true;
-  }
-  return false;
-});
 
 /**
  * Build the disputes router.
@@ -81,7 +67,10 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   // ── Feature flag — gate all disputes routes ───────────────────────────────────
   router.use((_req: Request, res: Response, next: NextFunction) => {
     if (!features.disputesEnabled) {
-      fail(res, 'feature_disabled', 'Disputes feature is currently disabled.', 404);
+      res.status(404).json({
+        status: 'error',
+        error: { code: 'feature_disabled', message: 'Disputes feature is currently disabled.' },
+      });
       return;
     }
     next();
@@ -98,18 +87,11 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   /** @permission disputes:list — admin, auditor, client (ownOnly), freelancer (ownOnly) */
   router.get(
     '/',
+    requireAuth,
     requirePermission('disputes', 'list'),
     validateQuery(listDisputesQuerySchema),
-    (req: Request, res: Response) => {
-      const log = getRequestLogger(res);
-      const { correlationId } = getRequestContext(res);
-      log.info('Listing disputes', { query: req.query });
-
-      ok(
-        res,
-        { disputes: [], total: 0 },
-        correlationId ? { correlationId } : undefined,
-      );
+    (req: Request, res: Response, next: NextFunction) => {
+      void controller.getDisputes(req, res, next);
     },
   );
 
@@ -117,25 +99,11 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   /** @permission disputes:read — admin, auditor, client (ownOnly), freelancer (ownOnly) */
   router.get(
     '/:id',
+    requireAuth,
     requirePermission('disputes', 'read'),
     validateParams(disputeParamsSchema),
-    (req: Request, res: Response) => {
-      const log = getRequestLogger(res);
-      const { correlationId } = getRequestContext(res);
-      const disputeId = req.params.id;
-      log.info('Getting dispute', { disputeId });
-
-      ok(
-        res,
-        {
-          dispute: {
-            id: disputeId,
-            status: 'open',
-            createdAt: new Date().toISOString(),
-          },
-        },
-        correlationId ? { correlationId } : undefined,
-      );
+    (req: Request, res: Response, next: NextFunction) => {
+      void controller.getDisputeById(req, res, next);
     },
   );
 
@@ -143,58 +111,33 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   /** @permission disputes:create — admin, client, freelancer */
   router.post(
     '/',
+    requireAuth,
     requirePermission('disputes', 'create'),
     validateRequest(createDisputeSchema),
-    (req: Request, res: Response) => {
-      const log = getRequestLogger(res);
-      const { correlationId } = getRequestContext(res);
-      const body = req.body ?? {};
-      const disputeId = `dispute-${Date.now()}`;
-      log.info('Creating dispute', { disputeId });
-
-      ok(
-        res,
-        {
-          dispute: {
-            id: disputeId,
-            ...body,
-            status: 'open',
-            createdAt: new Date().toISOString(),
-          },
-        },
-        correlationId ? { correlationId } : undefined,
-        201,
-      );
+    (req: Request, res: Response, next: NextFunction) => {
+      void controller.createDispute(req, res, next);
     },
   );
 
   // ── PATCH /:id — update a dispute ────────────────────────────────────────────
-  /** @permission disputes:update — admin, client (ownOnly) */
+  /**
+   * @permission disputes:update — admin, client (ownOnly)
+   * @description All status changes are validated by the service layer's
+   * centralized transition matrix; a stale `expectedVersion` is rejected
+   * with 409 so concurrent transitions surface a conflict.
+   */
   router.patch(
     '/:id',
+    requireAuth,
     requirePermission('disputes', 'update'),
+    // Single combined parse: validating params alone would strip `body` from
+    // the parsed result and clobber req.body before the handler runs.
     validateSchema(z.object({
       body: updateDisputeSchema,
       params: disputeParamsSchema,
     })),
-    (req: Request, res: Response) => {
-      const log = getRequestLogger(res);
-      const { correlationId } = getRequestContext(res);
-      const disputeId = req.params.id;
-      const body = req.body ?? {};
-      log.info('Updating dispute', { disputeId, updateFields: Object.keys(body) });
-
-      ok(
-        res,
-        {
-          dispute: {
-            id: disputeId,
-            ...body,
-            updatedAt: new Date().toISOString(),
-          },
-        },
-        correlationId ? { correlationId } : undefined,
-      );
+    (req: Request, res: Response, next: NextFunction) => {
+      void controller.updateDispute(req, res, next);
     },
   );
 
@@ -202,18 +145,11 @@ export function createDisputesRouter(options: DisputesRouterOptions = {}): Route
   /** @permission disputes:delete — admin only */
   router.delete(
     '/:id',
+    requireAuth,
     requirePermission('disputes', 'delete'),
-    (req: Request, res: Response) => {
-      const log = getRequestLogger(res);
-      const { correlationId } = getRequestContext(res);
-      const disputeId = req.params.id;
-      log.info('Deleting dispute', { disputeId });
-
-      ok(
-        res,
-        { message: `Dispute ${disputeId} deleted successfully` },
-        correlationId ? { correlationId } : undefined,
-      );
+    validateParams(disputeParamsSchema),
+    (req: Request, res: Response, next: NextFunction) => {
+      void controller.deleteDispute(req, res, next);
     },
   );
 
@@ -232,7 +168,7 @@ export function createDisputesObservabilityMiddleware(options: DisputesRouterOpt
     res.on('finish', () => {
       const duration = Date.now() - startTime;
       const statusCode = res.statusCode;
-      
+
       // Record metrics if service is available
       if (options.metricsService && options.metricsService.recordDisputesRequest) {
         options.metricsService.recordDisputesRequest(duration);
@@ -249,45 +185,4 @@ export function createDisputesObservabilityMiddleware(options: DisputesRouterOpt
 
     next();
   };
-
-  return router;
-}
-
-function formatExpressPath(path: unknown): string | null {
-  if (typeof path === 'string') {
-    return normalizeRoutePart(path);
-  }
-
-  if (path instanceof RegExp) {
-    return path.toString();
-  }
-
-  if (Array.isArray(path)) {
-    const parts = path
-      .map(formatExpressPath)
-      .filter((part): part is string => part !== null);
-    return parts.length > 0 ? parts.join('|') : null;
-  }
-
-  return null;
-}
-
-function normalizeRoutePart(part: string | undefined): string {
-  if (!part || part === '/') {
-    return '';
-  }
-
-  return part.startsWith('/') ? part : `/${part}`;
-}
-
-function joinRouteParts(baseUrl: string, routePath: string): string {
-  if (!baseUrl) {
-    return routePath;
-  }
-
-  if (!routePath) {
-    return baseUrl;
-  }
-
-  return `${baseUrl}${routePath}`;
 }

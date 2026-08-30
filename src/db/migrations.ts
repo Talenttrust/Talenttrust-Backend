@@ -469,6 +469,7 @@ function verifyAppliedMigrations(
   db: Database.Database,
   appliedMigrations: Map<number, AppliedMigration>,
   migrations: Migration[],
+  options?: { readonly?: boolean },
 ): void {
   const migrationsByVersion = new Map(
     migrations.map((migration) => [migration.version, migration]),
@@ -492,6 +493,9 @@ function verifyAppliedMigrations(
     }
 
     if (applied.checksum === null) {
+      if (options?.readonly) {
+        continue; // Skip backfill in read-only mode
+      }
       // Backfill: row predates checksum tracking
       db.prepare<[string, number]>(
         "UPDATE schema_version SET checksum = ? WHERE version = ?",
@@ -508,6 +512,9 @@ function verifyAppliedMigrations(
       // start, so deployment only requires a one-time automatic upgrade.
       const legacyChecksum = computeLegacyMigrationChecksum(migration);
       if (legacyChecksum !== null && applied.checksum === legacyChecksum) {
+        if (options?.readonly) {
+          continue; // Skip upgrade in read-only mode
+        }
         db.prepare<[string, number]>(
           "UPDATE schema_version SET checksum = ? WHERE version = ?",
         ).run(expectedChecksum, applied.version);
@@ -517,6 +524,47 @@ function verifyAppliedMigrations(
 
       throw new Error(
         `Applied migration ${applied.version} checksum mismatch; refusing to start`,
+      );
+    }
+  }
+}
+
+/**
+ * Verifies that the database schema matches the application requirement exactly.
+ * Fails safely if migrations are missing, mismatched, or corrupted.
+ * 
+ * @param db - Open SQLite database handle.
+ * @param migrations - Ordered migration definitions.
+ * @param options - Configuration for read-only mode verification.
+ */
+export function verifySchemaState(
+  db: Database.Database,
+  migrations: Migration[] = MIGRATIONS,
+  options?: { readonly?: boolean },
+): void {
+  assertMigrationsAreValid(migrations);
+
+  let appliedMigrations: Map<number, AppliedMigration>;
+  try {
+    if (!options?.readonly) {
+      ensureMigrationTable(db);
+    }
+    appliedMigrations = getAppliedMigrations(db);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes('no such table')) {
+      appliedMigrations = new Map();
+    } else {
+      throw err;
+    }
+  }
+
+  verifyAppliedMigrations(db, appliedMigrations, migrations, options);
+
+  // Check for missing migrations
+  for (const migration of migrations) {
+    if (!appliedMigrations.has(migration.version)) {
+      throw new Error(
+        `Missing migration ${migration.version} (${migration.name}); refusing to start`,
       );
     }
   }
@@ -724,6 +772,80 @@ MIGRATIONS.push({
     }
     if (!hasLeaseExpiresAt) {
       db.exec("ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT");
+// Version 16: event audit + projection tables for atomic event ingestion.
+//
+// `event_audit` is the durable event checkpoint (the accepted/rejected record
+// plus finality metadata). Its primary key is `deduplication_key`, which is
+// **event identity** (`contractId:eventId:sequence`) — it uniquely identifies
+// one incoming event, not the projection it affects.
+//
+// `event_projection` is the accumulated read-model state for an entity and is
+// keyed by **entity identity** (`entity_id`). Multiple events may legally
+// update the same projection, so its primary key is deliberately NOT the
+// event deduplication key. `last_event_id` records which event last advanced
+// the projection, enabling duplicate-replay idempotency (a replay of the same
+// `last_event_id` is a no-op within the projection upsert).
+MIGRATIONS.push({
+  version: 16,
+  name: "create_event_audit_and_projection_tables",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS event_audit (",
+    "deduplication_key TEXT PRIMARY KEY,",
+    "CREATE TABLE IF NOT EXISTS event_projection (",
+    "entity_id TEXT PRIMARY KEY,",
+    "UNIQUE(tenant_id)",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS event_audit (
+        deduplication_key TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
+        contract_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        payload_hash TEXT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT 'default',
+        network TEXT,
+        ledger INTEGER,
+        finality_status TEXT,
+        finalized_at TEXT,
+        processed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        correlation_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_audit_contract_id ON event_audit(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_event_audit_status ON event_audit(status);
+      CREATE INDEX IF NOT EXISTS idx_event_audit_tenant_id ON event_audit(tenant_id);
+
+      CREATE TABLE IF NOT EXISTS event_projection (
+        entity_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL DEFAULT 'default',
+        data TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0,
+        last_event_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_projection_tenant_id ON event_projection(tenant_id);
+    `);
+  },
+});
+
+// Version 17: add tenant_id to webhook_subscriptions
+MIGRATIONS.push({
+  version: 17,
+  name: "add_tenant_id_to_webhook_subscriptions",
+  checksumSource: [
+    "ALTER TABLE webhook_subscriptions ADD COLUMN tenant_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_tenant ON webhook_subscriptions(tenant_id)",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(webhook_subscriptions)") as Array<{ name: string }>;
+    const hasTenantId = columns.some((column) => column.name === "tenant_id");
+
+    if (!hasTenantId) {
+      db.exec("ALTER TABLE webhook_subscriptions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_tenant ON webhook_subscriptions(tenant_id)");
     }
   },
 });

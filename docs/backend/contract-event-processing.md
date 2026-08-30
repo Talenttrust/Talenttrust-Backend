@@ -39,8 +39,34 @@ contractId:eventId:sequence
 
 - `accepted`: event is valid and persisted.
 - `duplicate`: event identity was already processed; request is idempotent.
+- `held`: event is valid but out of ledger order for its contract; it is
+  retained in a bounded buffer and applied once the sequence gap fills.
 - `invalid`: payload violated schema or semantic constraints.
 - `error`: unexpected runtime failure in processor/repository interaction.
+
+## Per-Contract Ordering
+
+Events from the same contract must be applied in ledger (`sequence`) order
+even when RPC pages or workers deliver them out of order. The ingestion
+funnel runs through a per-contract ordering gate (`src/events/ordering.ts`)
+when enabled (`EVENT_ORDERING_ENABLED`, default `true`):
+
+- In-order events are applied immediately.
+- Out-of-order events are **held** in a bounded buffer (per-contract and
+  aggregate caps) until their predecessor arrives; the gap is then drained
+  in ledger order.
+- A held event whose predecessor never arrives within
+  `EVENT_ORDERING_HOLD_TIMEOUT_MS` (default 30s) expires and is recorded as
+  an `ordering_gap_timeout` rejection.
+- A sequence jump larger than the per-contract hold bound is rejected as
+  `ordering_gap_too_large` (400); a full aggregate buffer is rejected as
+  `ordering_buffer_full` (503). Neither is silently dropped.
+- Replayed sequences are returned as `duplicate` (idempotent).
+
+`GET /api/v1/events/ordering` exposes the gate snapshot (high-water marks,
+held counts per contract, recent rejections) for operators.
+
+## Threat Scenarios and Security Assumptions
 
 ## Threat Scenarios and Security Assumptions
 

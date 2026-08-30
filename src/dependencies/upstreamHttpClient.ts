@@ -3,9 +3,15 @@ import { ChaosPolicy } from '../chaos/chaosPolicy';
 import { RetryOptions, withRetry } from '../utils/retry';
 
 export class DependencyError extends Error {
-  constructor(message: string) {
+  /** The original upstream error, preserved for classification and diagnostics. */
+  readonly cause?: unknown;
+
+  constructor(message: string, options?: { cause?: unknown }) {
     super(message);
     this.name = 'DependencyError';
+    if (options?.cause !== undefined) {
+      this.cause = options.cause;
+    }
   }
 }
 
@@ -90,6 +96,7 @@ export class UpstreamHttpClient {
           }
           if (axios.isAxiosError(error) && error.response) {
             throw preserveDiagnostics(new DependencyError('Upstream returned non-success response'), error);
+            throw new DependencyError('Upstream returned non-success response', { cause: error });
           }
           throw error;
         }
@@ -110,6 +117,7 @@ export class UpstreamHttpClient {
         throw error;
       }
       throw preserveDiagnostics(new DependencyError('Upstream dependency unavailable'), error);
+      throw new DependencyError('Upstream dependency unavailable', { cause: error });
     } finally {
       clearTimeout(globalTimeout);
     }
