@@ -12,6 +12,7 @@ import { ProbeResult } from "./types";
 import { QueueManager } from "../queue/queue-manager";
 import { circuitBreakerRegistry } from "../circuit-breaker/registry";
 import { HealthProbeConfig } from "../appConfiguration";
+import { verifySchemaState } from "../db/migrations";
 
 const DEFAULT_HEALTH_PROBE_CONFIG: Required<HealthProbeConfig> = {
   queueFailedThreshold: 10,
@@ -113,7 +114,11 @@ export async function dbProbe(): Promise<ProbeResult> {
     // loop alive after the probe resolves.
     let dbTimerId: NodeJS.Timeout | undefined;
     await Promise.race([
-      Promise.resolve(getDb().prepare("SELECT 1").run()),
+      Promise.resolve().then(() => {
+        const db = getDb();
+        db.prepare("SELECT 1").run();
+        verifySchemaState(db, undefined, { readonly: true });
+      }),
       new Promise<never>((_, reject) => {
         dbTimerId = setTimeout(
           () => reject(new Error("db probe timeout")),
