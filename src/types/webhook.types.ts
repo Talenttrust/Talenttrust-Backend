@@ -16,6 +16,7 @@ export interface DLQEntry extends WebhookPayload {
 export interface WebhookSubscription {
   id: string;
   consumerId?: string; // optional if not tied to a consumer entity
+  tenantId: string;
   url: string;
   eventType: string;
   secret?: string;
@@ -27,12 +28,14 @@ export interface WebhookSubscription {
 /** DTOs used by the subscription API */
 export interface CreateWebhookSubscriptionDto {
   consumerId?: string;
+  tenantId: string;
   url: string;
   eventType: string;
   secret?: string;
 }
 
 export interface UpdateWebhookSubscriptionDto {
+  tenantId?: string;
   url?: string;
   eventType?: string;
   secret?: string;

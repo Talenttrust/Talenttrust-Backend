@@ -127,7 +127,7 @@ export class MilestonesService {
   /**
    * Create a milestone for a contract. New milestones are active (not deleted).
    */
-  public create(contractId: string, input: CreateMilestoneInput): MilestoneRecord {
+  public create(contractId: string, input: CreateMilestoneInput, tenantId?: string): MilestoneRecord {
     const now = new Date();
     const record: MilestoneRecord = {
       id: randomUUID(),
@@ -154,13 +154,13 @@ export class MilestonesService {
           title: record.title,
           amount: record.amount,
           completedAt: record.updatedAt.toISOString(),
-        })
+        }, undefined, tenantId)
         .catch(() => {
           // Webhook delivery failure is observable via DLQ; do not throw.
         });
     }
 
-    return { ...record };
+    return record;
   }
 
   /**

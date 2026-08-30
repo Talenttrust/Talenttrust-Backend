@@ -799,3 +799,22 @@ MIGRATIONS.push({
     `);
   },
 });
+
+// Version 17: add tenant_id to webhook_subscriptions
+MIGRATIONS.push({
+  version: 17,
+  name: "add_tenant_id_to_webhook_subscriptions",
+  checksumSource: [
+    "ALTER TABLE webhook_subscriptions ADD COLUMN tenant_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_tenant ON webhook_subscriptions(tenant_id)",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(webhook_subscriptions)") as Array<{ name: string }>;
+    const hasTenantId = columns.some((column) => column.name === "tenant_id");
+
+    if (!hasTenantId) {
+      db.exec("ALTER TABLE webhook_subscriptions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_tenant ON webhook_subscriptions(tenant_id)");
+    }
+  },
+});
