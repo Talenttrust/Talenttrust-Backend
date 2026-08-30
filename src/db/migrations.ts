@@ -469,6 +469,7 @@ function verifyAppliedMigrations(
   db: Database.Database,
   appliedMigrations: Map<number, AppliedMigration>,
   migrations: Migration[],
+  options?: { readonly?: boolean },
 ): void {
   const migrationsByVersion = new Map(
     migrations.map((migration) => [migration.version, migration]),
@@ -492,6 +493,9 @@ function verifyAppliedMigrations(
     }
 
     if (applied.checksum === null) {
+      if (options?.readonly) {
+        continue; // Skip backfill in read-only mode
+      }
       // Backfill: row predates checksum tracking
       db.prepare<[string, number]>(
         "UPDATE schema_version SET checksum = ? WHERE version = ?",
@@ -508,6 +512,9 @@ function verifyAppliedMigrations(
       // start, so deployment only requires a one-time automatic upgrade.
       const legacyChecksum = computeLegacyMigrationChecksum(migration);
       if (legacyChecksum !== null && applied.checksum === legacyChecksum) {
+        if (options?.readonly) {
+          continue; // Skip upgrade in read-only mode
+        }
         db.prepare<[string, number]>(
           "UPDATE schema_version SET checksum = ? WHERE version = ?",
         ).run(expectedChecksum, applied.version);
@@ -517,6 +524,47 @@ function verifyAppliedMigrations(
 
       throw new Error(
         `Applied migration ${applied.version} checksum mismatch; refusing to start`,
+      );
+    }
+  }
+}
+
+/**
+ * Verifies that the database schema matches the application requirement exactly.
+ * Fails safely if migrations are missing, mismatched, or corrupted.
+ * 
+ * @param db - Open SQLite database handle.
+ * @param migrations - Ordered migration definitions.
+ * @param options - Configuration for read-only mode verification.
+ */
+export function verifySchemaState(
+  db: Database.Database,
+  migrations: Migration[] = MIGRATIONS,
+  options?: { readonly?: boolean },
+): void {
+  assertMigrationsAreValid(migrations);
+
+  let appliedMigrations: Map<number, AppliedMigration>;
+  try {
+    if (!options?.readonly) {
+      ensureMigrationTable(db);
+    }
+    appliedMigrations = getAppliedMigrations(db);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes('no such table')) {
+      appliedMigrations = new Map();
+    } else {
+      throw err;
+    }
+  }
+
+  verifyAppliedMigrations(db, appliedMigrations, migrations, options);
+
+  // Check for missing migrations
+  for (const migration of migrations) {
+    if (!appliedMigrations.has(migration.version)) {
+      throw new Error(
+        `Missing migration ${migration.version} (${migration.name}); refusing to start`,
       );
     }
   }

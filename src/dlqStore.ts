@@ -134,7 +134,7 @@ export interface DlqEntry {
  */
 export interface SqliteDlqStoreOptions {
   capacity?: number;
-  db:: BetterSqlite3.Database;
+  db?: BetterSqlite3.Database;
 }
 
 /**

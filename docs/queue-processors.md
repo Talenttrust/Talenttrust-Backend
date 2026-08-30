@@ -229,6 +229,56 @@ interface BlockchainSyncPayload {
 | **Multiplier** | 1.5× |
 | **Jitter** | 30% |
 
+### 6. Milestone Divergence Scan
+
+| Field | Value |
+|---|---|
+| **Queue name** | `milestone-divergence-scan` |
+| **JobType enum** | `JobType.MILESTONE_DIVERGENCE_SCAN` |
+| **Processor file** | [`src/milestones/divergence/processor.ts`](../src/milestones/divergence/processor.ts) |
+| **Concurrency** | `QUEUE_CONCURRENCY` (default **5**) |
+
+Detects divergence between the backend's **indexed** milestone state and the
+**on-chain** milestone state (missed events, reorgs, partial ingestion). The
+job is **report-only**: it never writes canonical milestone/contract state —
+it persists divergence report rows (`milestone_divergence_reports`) and logs
+structured summaries. See [`src/milestones/divergence`](../src/milestones/divergence)
+for the full design.
+
+#### Payload: `MilestoneDivergenceScanPayload`
+
+```ts
+interface MilestoneDivergenceScanPayload {
+  tenantId?: string;        // Scope the scan (reports are tenant-tagged)
+  maxContracts?: number;    // Bounded per run (default 100, cap 500)
+  cursor?: string;          // Offset cursor for incremental runs
+  runId?: string;           // Opaque id; reports upsert under it (retry-safe)
+  correlationId?: string;
+  requestId?: string;
+}
+```
+
+#### Bounding, failure isolation, and retry semantics
+
+- One run compares at most `maxContracts` contracts, walking the contract
+  provider with a cursor — a large contract set is processed across many
+  runs, never loaded at once.
+- A **per-contract** RPC failure becomes an `unavailable` report and the run
+  continues.
+- A **head-ledger** RPC failure aborts the run so the queue retries it
+  (retried runs are idempotent: reports upsert under `runId`).
+- Invalid payloads throw `InvalidJobPayloadError` (terminal; quarantined).
+
+#### Retry Policy
+
+| Parameter | Value |
+|---|---|
+| **Max attempts** | 3 |
+| **Backoff type** | exponential |
+| **Initial delay** | 2,000 ms |
+| **Multiplier** | 2× |
+| **Jitter** | 20% |
+
 ---
 
 ## Webhook DLQ

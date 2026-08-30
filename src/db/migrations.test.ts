@@ -3,6 +3,7 @@ import {
   Migration,
   computeMigrationChecksum,
   runMigrations,
+  verifySchemaState,
   getLatestSchemaVersion,
 } from "./migrations";
 
@@ -296,5 +297,78 @@ describe("runMigrations", () => {
       .prepare<[], { total: number }>("SELECT COUNT(*) AS total FROM demo")
       .get();
     expect(row?.total).toBe(0);
+  });
+});
+
+describe("verifySchemaState", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    // We do NOT use getDb() because that would trigger `runMigrations` automatically.
+    // Wait, getDb() for `:memory:` DOES run migrations. 
+    // We want a fresh database without migrations.
+    db = new Database(":memory:");
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("fails if the database is unavailable (throws on open, but here we test empty DB behavior)", () => {
+    const migrations: Migration[] = [
+      {
+        version: 1,
+        name: "test",
+        up: () => {},
+      }
+    ];
+    // Empty database -> missing migration
+    expect(() => verifySchemaState(db, migrations)).toThrow(/Missing migration 1/);
+  });
+
+  it("fails safely if a migration is missing", () => {
+    const migrations: Migration[] = [
+      { version: 1, name: "m1", up: (d) => d.exec("CREATE TABLE t1 (id INT)") },
+      { version: 2, name: "m2", up: (d) => d.exec("CREATE TABLE t2 (id INT)") },
+    ];
+    runMigrations(db, [migrations[0]!]); // apply only the first
+    expect(() => verifySchemaState(db, migrations)).toThrow(/Missing migration 2/);
+  });
+
+  it("fails safely if there is an extra applied migration", () => {
+    const migrations: Migration[] = [
+      { version: 1, name: "m1", up: (d) => d.exec("CREATE TABLE t1 (id INT)") },
+    ];
+    runMigrations(db, migrations);
+    
+    // Now verify against an empty list (meaning m1 is extra)
+    expect(() => verifySchemaState(db, [])).toThrow(/is not present in the migration list/);
+  });
+
+  it("fails safely if the migration table is corrupt", () => {
+    db.exec("CREATE TABLE schema_version (corrupted TEXT);");
+    expect(() => verifySchemaState(db, [])).toThrow(/no such column/i);
+  });
+
+  it("succeeds for read-only startup without backfilling checksums", () => {
+    const migrations: Migration[] = [
+      { version: 1, name: "m1", up: (d) => d.exec("CREATE TABLE legacy (id INT)") },
+    ];
+    db.exec(`
+      CREATE TABLE schema_version (
+        version     INTEGER PRIMARY KEY,
+        name        TEXT    NOT NULL,
+        applied_at  TEXT    NOT NULL,
+        checksum    TEXT
+      );
+      INSERT INTO schema_version (version, name, applied_at, checksum)
+      VALUES (1, 'm1', '2026-05-27T00:00:00.000Z', NULL);
+    `);
+
+    // Verify should pass in read-only mode, and NOT update the checksum
+    expect(() => verifySchemaState(db, migrations, { readonly: true })).not.toThrow();
+
+    const row = db.prepare("SELECT checksum FROM schema_version WHERE version = 1").get() as any;
+    expect(row.checksum).toBeNull();
   });
 });

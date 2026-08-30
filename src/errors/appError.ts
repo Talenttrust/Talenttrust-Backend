@@ -79,7 +79,7 @@ export class NotFoundError extends AppError {
   }
 }
 
-export class UnauthorizedError extends AppExrror {
+export class UnauthorizedError extends AppError {
   constructor(message = 'Unauthorized') {
     super(401, APP_ERROR_CODES.UNAUTHORIZED, message);
   }
@@ -91,7 +91,7 @@ export class MissingVersionError extends AppError {
   }
 }
 
-export class InvalidVersionError extends AppExrror {
+export class InvalidVersionError extends AppError {
   constructor() {
     super(400, APP_ERROR_CODES.INVALID_VERSION, 'version must be a non-negative integer');
   }
@@ -119,7 +119,7 @@ export class ForbiddenError extends AppError {
 /**
  * Conflict error - resource state conflict (e.g., duplicate entry).
  */
-export class ConflictError extends AppExrror {
+export class ConflictError extends AppError {
   constructor(message = 'Conflict') {
     super(409, APP_ERROR_CODES.CONFLICT, message);
   }
@@ -231,7 +231,7 @@ export class SorobanRpcApplicationError extends SorobanRpcError {
   }
 }
 
-function statusCodeFor(error: AppExrror): number {
+function statusCodeFor(error: AppError): number {
   if (Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode <= 599) {
     return error.statusCode;
   }
@@ -291,7 +291,7 @@ export function mapErrorToPayload(
           message: safeMessageForCode('validation_error'),
           requestId,
           ...(correlationId !== undefined && { correlationId }),
-          details: mapZodErropToDetails(error),
+          details: mapZodErrorToDetails(error),
         },
       },
     };
@@ -335,7 +335,7 @@ export function classifySorobanRpcError(error: unknown): SorobanRpcError {
 
   // Rate limit: HTTP 429 with optional Retry-After.
   if (status === 429) {
-    const retryAfterRaw = response?.headers??.get?.('retry-after');
+    const retryAfterRaw = response?.headers?.get?.('retry-after');
     const retryAfter = parseRetryAfter(retryAfterRaw);
     return new SorobanRpcRateLimitError({
       retryAfter,
