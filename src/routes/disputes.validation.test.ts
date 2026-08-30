@@ -101,11 +101,23 @@ describe('updateDisputeSchema', () => {
 
   it('accepts a full update payload', () => {
     const result = updateDisputeSchema.safeParse({
-      status: 'cancelled',
+      status: 'resolved',
       resolution: 'Client agreed to cancel',
       resolvedBy: validUuid,
     });
     expect(result.success).toBe(true);
+  });
+
+  it('accepts an optimistic-concurrency expectedVersion', () => {
+    const result = updateDisputeSchema.safeParse({ status: 'under_review', expectedVersion: 3 });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a non-positive expectedVersion', () => {
+    for (const bad of [0, -1, 1.5, '2']) {
+      const result = updateDisputeSchema.safeParse({ expectedVersion: bad });
+      expect(result.success).toBe(false);
+    }
   });
 
   it('rejects invalid status', () => {
@@ -137,10 +149,17 @@ describe('updateDisputeSchema', () => {
   });
 
   it('accepts valid status enum values', () => {
-    const statuses = ['open', 'resolved', 'cancelled'] as const;
+    const statuses = ['open', 'under_review', 'resolved', 'escalated'] as const;
     for (const status of statuses) {
       const result = updateDisputeSchema.safeParse({ status });
       expect(result.success).toBe(true);
+    }
+  });
+
+  it('rejects statuses outside the legal state machine', () => {
+    for (const status of ['cancelled', 'closed', 'invalid_status']) {
+      const result = updateDisputeSchema.safeParse({ status });
+      expect(result.success).toBe(false);
     }
   });
 });

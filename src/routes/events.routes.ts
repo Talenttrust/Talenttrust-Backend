@@ -14,6 +14,20 @@ import { validateSchema } from '../middleware/validate.middleware';
 import { requireAuth, requireRole } from '../middleware/authorization';
 import { auditService } from '../audit/service';
 import { eventAuditService as sharedEventAuditService } from '../events/registry';
+import { createTenantRateLimiter } from '../middleware/tenantRateLimiter';
+
+export interface EventsRouterOptions {
+  /**
+   * Bounded admission gate for the ingestion pipeline. When omitted, a
+   * default instance is created from EVENT_INGESTION_MAX_PENDING (default
+   * 100). Inject a fresh instance in tests for deterministic state.
+   */
+  backpressure?: EventIngestionBackpressure;
+}
+
+const DEFAULT_BACKPRESSURE_MAX_PENDING = Number(
+  process.env.EVENT_INGESTION_MAX_PENDING ?? DEFAULT_MAX_PENDING_EVENTS,
+);
 
 export interface EventsRouterOptions {
   /**
@@ -135,6 +149,17 @@ export function createEventsRouter(
         },
         undefined,
         202,
+      );
+    }
+
+    const admission = backpressure.tryAdmit(validation.event);
+    if (!admission.admitted) {
+      res.setHeader('Retry-After', '1');
+      return fail(
+        res,
+        'ingestion_backpressure',
+        'Event ingestion is at capacity; retry shortly',
+        429,
       );
     }
 

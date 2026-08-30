@@ -13,7 +13,7 @@
 
 import type { CursorPosition } from './cursor.types';
 import { CURSOR_MAX_LIMIT, CURSOR_DEFAULT_LIMIT, CURSOR_MAX_LENGTH } from './cursor.types';
-import { IndexerCursor, CursorUpdateResult } from './cursor.types';
+import { IndexerCursor, CursorUpdateResult, CursorRewindResult } from './cursor.types';
 
 /**
  * Encodes a {@link CursorPosition} into an opaque base-64 string suitable for
@@ -43,7 +43,7 @@ export function decodeCursor(cursor: string): CursorPosition {
     throw new Error('Invalid pagination cursor: malformed');
   }
 
-  // Base64url strict charset (RFC 4648 §5). Rejects padding (=), whitespace, or other encodings.
+  // Base64url strict charset (RFC 4648 §5). Rejects padding =), whitespace, or other encodings.
   if (!/^[A-Za-z0-9_-]+$/.test(cursor)) {
     throw new Error('Invalid pagination cursor: malformed');
   }
@@ -60,7 +60,7 @@ export function decodeCursor(cursor: string): CursorPosition {
     typeof parsed !== 'object' ||
     parsed === null ||
     typeof (parsed as Record<string, unknown>)['createdAt'] !== 'string' ||
-    typeof (parsed as Record<string, unknown>)['id'] !== 'string'
+    typeof (parsed as Record<string, unknown>)[id'] !== 'string'
   ) {
     throw new Error('Invalid pagination cursor: missing required fields');
   }
@@ -121,7 +121,7 @@ export interface CursorQueryError {
  * decode-then-catch block.
  *
  * @param rawCursor - The raw `req.query['cursor']` value (usually `string | undefined`).
- * @returns `{ ok: true, cursor }` when the value is absent or decodes successfully,
+ * @returns `{ ok: true, cursor }`when the value is absent or decodes successfully,
  *   otherwise `{ ok: false, message }` with the same message `decodeCursor` throws.
  */
 export function resolveCursorQueryParam(rawCursor: unknown): CursorQueryOk | CursorQueryError {
@@ -139,7 +139,22 @@ export function resolveCursorQueryParam(rawCursor: unknown): CursorQueryOk | Cur
   return { ok: true, cursor };
 }
 
-
+/**
+ * Parses a source identifier into its structured network/contract/ledger parts.
+ *
+ * Source IDs are normally formatted as `network:contract:ledger`. For legacy
+ * identifiers that are not composite, we fall back to a default network/ledger
+ * and use the whole sourceId as the contract component. This keeps existing
+ * stored cursors readable while ensuring every checkpoint carries the
+ * structured fields required for isolation.
+ */
+export function parseSourceId(sourceId: string): Pick<IndexerCursor, 'network' | 'contract' | 'ledger'> {
+  const parts = sourceId.split(':');
+  if (parts.length === 3) {
+    return { network: parts[0], contract: parts[1], ledger: parts[2] };
+  }
+  return { network: 'default', contract: sourceId, ledger: 'default' };
+}
 
 /**
  * @notice Persistence interface for indexer cursors.
@@ -157,6 +172,18 @@ export interface CursorRepository {
    * Must be idempotent - replaying the update should be safe.
    */
   updateCursor(sourceId: string, newSequence: number, metadata?: Record<string, unknown>): Promise<CursorUpdateResult>;
+
+  /**
+   * Rewind cursor to an earlier sequence number.
+   *
+   * Unlike `updateCursor`, this is explicitly allowed to move the
+   * cursor backwards and is used exclusively during chain reorg
+   * recovery.  Normal forward progression MUST use `updateCursor`.
+   *
+   * @param sourceId - The source whose cursor to rewind.
+   * @param toSequence - The target sequence (must be < current).
+   */
+  rewindCursor(sourceId: string, toSequence: number): Promise<CursorRewindResult>;
 
   /**
    * List all cursors in storage.
@@ -185,9 +212,11 @@ export class InMemoryCursorRepository implements CursorRepository {
     metadata?: Record<string, unknown>,
   ): Promise<CursorUpdateResult> {
     const now = new Date().toISOString();
+    const parsed = parseSourceId(sourceId);
 
     const cursor: IndexerCursor = {
       sourceId,
+      ...parsed,
       lastSequence: newSequence,
       updatedAt: now,
       metadata,
@@ -195,10 +224,42 @@ export class InMemoryCursorRepository implements CursorRepository {
 
     this.cursorsBySourceId.set(sourceId, cursor);
 
-    return {
-      success: true,
-      cursor,
+    return { success: true, cursor };
+  }
+
+  async rewindCursor(
+    sourceId: string,
+    toSequence: number,
+  ): Promise<CursorRewindResult> {
+    const existing = this.cursorsBySourceId.get(sourceId);
+    if (existing === undefined) {
+      // No cursor to rewind — create one at the target sequence.
+      const now = new Date().toISOString();
+      const cursor: IndexerCursor = {
+        sourceId,
+        lastSequence: toSequence,
+        updatedAt: now,
+      };
+      this.cursorsBySourceId.set(sourceId, cursor);
+      return { success: true, cursor };
+    }
+
+    if (toSequence >= existing.lastSequence) {
+      return {
+        success: false,
+        cursor: existing,
+        reason: 'Cannot rewind cursor: target sequence is not before current',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const cursor: IndexerCursor = {
+      ...existing,
+      lastSequence: toSequence,
+      updatedAt: now,
     };
+    this.cursorsBySourceId.set(sourceId, cursor);
+    return { success: true, cursor };
   }
 
   async listCursors(): Promise<IndexerCursor[]> {
