@@ -4,12 +4,14 @@ import type { CreateWebhookSubscriptionDto, UpdateWebhookSubscriptionDto, Webhoo
 
 export interface CreateWebhookSubscriptionRequestDto {
   consumerId?: string;
+  tenantId?: string;
   url: string;
   eventType: string;
   secret?: string;
 }
 
 export interface UpdateWebhookSubscriptionRequestDto {
+  tenantId?: string;
   url?: string;
   eventType?: string;
   secret?: string;
@@ -18,6 +20,7 @@ export interface UpdateWebhookSubscriptionRequestDto {
 
 export interface ListWebhookSubscriptionsQueryDto {
   consumerId?: string;
+  tenantId?: string;
   eventType?: string;
   active?: boolean;
   cursor?: string;
@@ -27,6 +30,7 @@ export interface ListWebhookSubscriptionsQueryDto {
 export interface WebhookSubscriptionResponseDto {
   id: string;
   consumerId?: string;
+  tenantId: string;
   url: string;
   eventType: string;
   active: boolean;
@@ -39,6 +43,7 @@ export function toCreateWebhookSubscriptionDto(
 ): CreateWebhookSubscriptionDto {
   return {
     ...(request.consumerId !== undefined && { consumerId: request.consumerId }),
+    tenantId: request.tenantId || 'default',
     url: request.url,
     eventType: request.eventType,
     ...(request.secret !== undefined && { secret: request.secret }),
@@ -49,6 +54,7 @@ export function toUpdateWebhookSubscriptionDto(
   request: UpdateWebhookSubscriptionRequestDto,
 ): UpdateWebhookSubscriptionDto {
   return {
+    ...(request.tenantId !== undefined && { tenantId: request.tenantId }),
     ...(request.url !== undefined && { url: request.url }),
     ...(request.eventType !== undefined && { eventType: request.eventType }),
     ...(request.secret !== undefined && { secret: request.secret }),
@@ -61,6 +67,7 @@ export function toListWebhookSubscriptionsQueryDto(
 ): ListWebhookSubscriptionsQueryDto {
   return {
     ...(query.consumerId !== undefined && { consumerId: query.consumerId }),
+    ...(query.tenantId !== undefined && { tenantId: query.tenantId }),
     ...(query.eventType !== undefined && { eventType: query.eventType }),
     ...(query.active !== undefined && { active: query.active }),
     ...(query.cursor !== undefined && { cursor: query.cursor }),
@@ -74,6 +81,7 @@ export function toWebhookSubscriptionResponseDto(
   return {
     id: subscription.id,
     ...(subscription.consumerId !== undefined && { consumerId: subscription.consumerId }),
+    tenantId: subscription.tenantId,
     url: subscription.url,
     eventType: subscription.eventType,
     active: subscription.active,
@@ -88,6 +96,7 @@ export function fromWebhookSubscriptionResponseDto(
   return {
     id: dto.id,
     consumerId: dto.consumerId,
+    tenantId: dto.tenantId,
     url: dto.url,
     eventType: dto.eventType,
     active: dto.active,
@@ -99,6 +108,7 @@ export function fromWebhookSubscriptionResponseDto(
 export const createWebhookSubscriptionSchema = z.object({
   body: z.object({
     consumerId: z.string().uuid().optional(),
+    tenantId: z.string().min(1).max(100).optional(),
     url: z.string().url(),
     eventType: z.string().min(1).max(100),
     secret: z.string().min(1).max(256).optional(),
@@ -110,6 +120,7 @@ export const updateWebhookSubscriptionSchema = z.object({
     id: z.string().uuid(),
   }),
   body: z.object({
+    tenantId: z.string().min(1).max(100).optional(),
     url: z.string().url().optional(),
     eventType: z.string().min(1).max(100).optional(),
     secret: z.string().min(1).max(256).optional(),
@@ -126,6 +137,7 @@ export const getWebhookSubscriptionSchema = z.object({
 export const listWebhookSubscriptionsQuerySchema = z.object({
   query: z.object({
     consumerId: z.string().uuid().optional(),
+    tenantId: z.string().min(1).max(100).optional(),
     eventType: z.string().optional(),
     active: z.preprocess((val) => {
       if (val === 'true') return true;

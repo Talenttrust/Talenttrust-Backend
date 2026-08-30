@@ -131,13 +131,14 @@ export class WebhookService {
    * @param eventType - The event type name.
    * @param data - The event body/data.
    * @param correlationId - Optional correlation ID.
+   * @param tenantId - Optional tenant ID.
    */
-  async trigger(eventType: string, data: unknown, correlationId?: string): Promise<void> {
+  async trigger(eventType: string, data: unknown, correlationId?: string, tenantId?: string): Promise<void> {
     if (!this.webhooksEnabled) {
       return;
     }
 
-    const subscriptions = await this.repo.findAll({ eventType, active: true });
+    const subscriptions = await this.repo.findAll({ eventType, tenantId: tenantId ?? 'default', active: true });
     log.info('Webhook delivery started', {
       eventType,
       subscriberCount: subscriptions.length,
