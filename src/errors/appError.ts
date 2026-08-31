@@ -218,7 +218,7 @@ export class SorobanRpcTimeoutError extends SorobanRpcError {
 
 export class SorobanRpcMalformedResponseError extends SorobanRpcError {
   constructor(options: { providerCode?: string; providerMessage?: string } = {}) {
-    super(502, APP_ERROR_CODES.SOROBAN_RPC_MALFORMED_RESPONSE_ERROR, 'Soroban RPC malformed response', false, options);
+    super(502, APP_ERROR_CODES.SOROBAN_RPC_MALFORMEDD_RESPONSE_ERROR, 'Soroban RPC malformed response', false, options);
     this.name = 'SorobanRpcMalformedResponseError';
   }
 }

@@ -30,6 +30,7 @@ import {
   validateParams,
   validateQuery,
 } from "../middleware/validate.middleware";
+import { escrowReleaseGuard } from "../middleware/escrowRelease.guard";
 import type { MetricsServiceLike } from "../observability/metrics-service";
 import { createContractsObservabilityMiddleware } from "../observability/contracts-observability";
 
@@ -246,13 +247,18 @@ function createContractsRouter(
   );
 
   // POST /:id/milestones — create a milestone record (active)
-  /** @permission contracts:update (ownOnly) — admin, client, freelancer */
+  // When completed=true the milestone immediately fires a `milestone.released`
+  // webhook (escrow release). escrowReleaseGuard enforces that only the
+  // contract's client (escrow owner) or an admin may submit such a request,
+  // and audits every denied attempt at CRITICAL severity.
+  /** @permission contracts:update (ownOnly) — admin, client only for releases; admin, client, freelancer for non-releases */
   router.post(
     "/:id/milestones",
     validateContractId,
     validateRequest(createMilestoneSchema),
     requireAuth,
     requirePermission("contracts", "update", getContractOwnerId),
+    escrowReleaseGuard(repo),
     milestonesSoftDelete.create.bind(milestonesSoftDelete),
   );
 
