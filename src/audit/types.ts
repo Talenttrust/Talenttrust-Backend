@@ -40,6 +40,12 @@ export const AUDIT_ACTIONS = [
   'ENDPOINT_MUTATION',
   'DEPLOYMENT_PROMOTED',
   'DEPLOYMENT_ROLLED_BACK',
+  // Override request workflow (#1221)
+  'OVERRIDE_REQUESTED',
+  'OVERRIDE_APPROVED',
+  'OVERRIDE_REJECTED',
+  'OVERRIDE_APPLIED',
+  'OVERRIDE_EXPIRED',
 ] as const;
 
 /** Categories of sensitive state changes that must be audited. */
@@ -69,7 +75,13 @@ export type AuditAction =
   | 'DEPLOYMENT_ROLLED_BACK'
   | 'MILESTONES_CREATED'
   | 'MILESTONES_UPDATED'
-  | 'MILESTONES_DELETED';
+  | 'MILESTONES_DELETED'
+  // Override request workflow (#1221)
+  | 'OVERRIDE_REQUESTED'
+  | 'OVERRIDE_APPROVED'
+  | 'OVERRIDE_REJECTED'
+  | 'OVERRIDE_APPLIED'
+  | 'OVERRIDE_EXPIRED';
 
 export const AUDIT_SEVERITIES = ['INFO', 'WARNING', 'CRITICAL'] as const;
 

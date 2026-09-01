@@ -28,6 +28,7 @@ import { httpLoggerMiddleware } from './middleware/httpLogger';
 import { ReputationService } from './services/reputation.service';
 import { getDb } from './db/database';
 import { requestContextMiddleware } from './context';
+import { createOverrideRequestsRouter } from './modules/overrideRequests/overrideRequest.routes';
 
 interface AppFactoryOptions {
   includeTerminalHandlers?: boolean;
@@ -88,6 +89,7 @@ export function createApp(options?: AppFactoryOptions): express.Application {
     app.use('/api/v1/webhook-subscriptions', webhookSubscriptionRouter);
   }
   app.use('/api/v1/metrics', metricsAuthMiddleware, createMetricsRouter(metricsService));
+  app.use('/api/v1/override-requests', createOverrideRequestsRouter());
 
   if (includeTerminalHandlers) {
     attachTerminalHandlers(app);

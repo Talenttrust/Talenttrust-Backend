@@ -17,7 +17,8 @@ export type Resource =
   | "settings"
   | "disputes"
   | "health"
-  | "reputation";
+  | "reputation"
+  | "override-requests";
 
 export type Action = "create" | "read" | "update" | "delete" | "list" | "correct";
 
