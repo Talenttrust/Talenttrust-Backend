@@ -818,3 +818,79 @@ MIGRATIONS.push({
     }
   },
 });
+
+// Version 18: override_requests table for high-impact override approval workflow.
+//
+// Each row tracks one override request through its state machine:
+//   requested → approved → applied   (happy path)
+//   requested → rejected             (denied)
+//   requested/approved → expired     (TTL elapsed before apply)
+//
+// Security notes:
+//  - requester_id and approver_id must be different (enforced at service layer).
+//  - tenant_id provides row-level isolation between tenants.
+//  - expires_at is written at creation time and evaluated on every read/apply.
+//  - applied_at records when the override was actually executed.
+MIGRATIONS.push({
+  version: 18,
+  name: "create_override_requests_table",
+  checksumSource: [
+    "CREATE TABLE IF NOT EXISTS override_requests (",
+    "id TEXT PRIMARY KEY,",
+    "tenant_id TEXT NOT NULL,",
+    "resource_type TEXT NOT NULL,",
+    "resource_id TEXT NOT NULL,",
+    "action TEXT NOT NULL,",
+    "requester_id TEXT NOT NULL,",
+    "approver_id TEXT,",
+    "status TEXT NOT NULL DEFAULT 'requested',",
+    "reason TEXT NOT NULL,",
+    "rejection_reason TEXT,",
+    "expires_at TEXT NOT NULL,",
+    "approved_at TEXT,",
+    "applied_at TEXT,",
+    "rejected_at TEXT,",
+    "metadata TEXT NOT NULL DEFAULT '{}',",
+    "created_at TEXT NOT NULL,",
+    "updated_at TEXT NOT NULL",
+  ].join("\n"),
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS override_requests (
+        id              TEXT    PRIMARY KEY,
+        tenant_id       TEXT    NOT NULL,
+        resource_type   TEXT    NOT NULL,
+        resource_id     TEXT    NOT NULL,
+        action          TEXT    NOT NULL,
+        requester_id    TEXT    NOT NULL,
+        approver_id     TEXT,
+        status          TEXT    NOT NULL DEFAULT 'requested'
+                                CHECK (status IN ('requested', 'approved', 'rejected', 'applied', 'expired')),
+        reason          TEXT    NOT NULL CHECK (length(reason) >= 10 AND length(reason) <= 5000),
+        rejection_reason TEXT,
+        expires_at      TEXT    NOT NULL,
+        approved_at     TEXT,
+        applied_at      TEXT,
+        rejected_at     TEXT,
+        metadata        TEXT    NOT NULL DEFAULT '{}',
+        created_at      TEXT    NOT NULL,
+        updated_at      TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_override_requests_tenant_id
+        ON override_requests(tenant_id);
+
+      CREATE INDEX IF NOT EXISTS idx_override_requests_status
+        ON override_requests(status);
+
+      CREATE INDEX IF NOT EXISTS idx_override_requests_requester_id
+        ON override_requests(requester_id);
+
+      CREATE INDEX IF NOT EXISTS idx_override_requests_resource
+        ON override_requests(resource_type, resource_id);
+
+      CREATE INDEX IF NOT EXISTS idx_override_requests_expires_at
+        ON override_requests(expires_at);
+    `);
+  },
+});
