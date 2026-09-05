@@ -53,18 +53,28 @@ Each `ProbeResult`:
 
 ```ts
 {
-  name:      string;                         // probe identifier
-  ok?:       boolean;                        // true when status is "up"
-  status?:   "up" | "degraded" | "down";    // canonical health status
-  detail?:   string;                         // error text or latency note (non-production only)
-  latencyMs: number;                         // probe round-trip in milliseconds
+  name:             string;                       // probe identifier
+  ok?:              boolean;                      // true when status is "up"
+  status?:          "up" | "degraded" | "down";  // canonical health status
+  detail?:          string;                       // error text or latency note (non-production only)
+  latencyMs:        number;                       // probe round-trip in ms, bounded to the latency budget
+  ageMs?:           number;                       // age of the dependency's data in ms (freshness)
+  lastSuccessfulAt?: string;                      // ISO-8601 time the data was last produced
 }
 ```
 
 > **Production security**: when `NODE_ENV=production` the `detail` field is
 > stripped from every probe before the response is sent, preventing internal
-> topology leakage to unauthenticated callers. `name`, `ok`, and `latencyMs`
-> are always present.
+> topology leakage to unauthenticated callers. `name`, `ok`, `latencyMs`,
+> `ageMs`, and `lastSuccessfulAt` are always present when known.
+
+> **Latency and freshness budgets**: every probe runs under a per-probe
+> latency bound (`DEFAULT_HEALTH_BUDGET.maxLatencyMs`, 5500 ms). A probe that
+> exceeds the bound is reported `down` with `detail: "probe timeout"` and its
+> measured latency is clamped to the bound, so the check always settles within
+> a bounded window. A dependency that reports `ageMs` larger than the freshness
+> budget (`maxAgeMs`, 5 minutes) is downgraded to `degraded` — reachable but
+> too stale.
 
 ### Example — healthy (200)
 
@@ -84,7 +94,8 @@ curl http://localhost:3001/health
     { "name": "redis",          "ok": true,  "status": "up",   "latencyMs": 11 },
     { "name": "stellar-rpc",    "ok": true,  "status": "up",   "latencyMs": 87 },
     { "name": "queue",          "ok": true,  "status": "up",   "latencyMs": 5  },
-    { "name": "circuit-breaker","ok": true,  "status": "up",   "latencyMs": 0  }
+    { "name": "circuit-breaker","ok": true,  "status": "up",   "latencyMs": 0  },
+    { "name": "indexer",        "ok": true,  "status": "up",   "latencyMs": 1,  "ageMs": 45000, "lastSuccessfulAt": "2026-07-24T12:48:46.000Z" }
   ]
 }
 ```
@@ -103,7 +114,8 @@ curl http://localhost:3001/health
     { "name": "redis",          "ok": true,  "status": "up",       "latencyMs": 9    },
     { "name": "stellar-rpc",    "ok": true,  "status": "up",       "latencyMs": 90   },
     { "name": "queue",          "ok": false, "status": "degraded", "latencyMs": 12,   "detail": "contract-processing: 15 failed jobs" },
-    { "name": "circuit-breaker","ok": true,  "status": "up",       "latencyMs": 0    }
+    { "name": "circuit-breaker","ok": true,  "status": "up",       "latencyMs": 0    },
+    { "name": "indexer",        "ok": false, "status": "degraded", "latencyMs": 1,    "ageMs": 540000, "lastSuccessfulAt": "2026-07-24T12:40:31.000Z", "detail": "data age exceeds freshness budget" }
   ]
 }
 ```
@@ -423,6 +435,25 @@ querying `circuitBreakerRegistry.getAll()`. No external I/O is performed.
 | `degraded` | One or more breakers are open |
 | `down` | Registry query throws |
 
+### `indexer`
+
+Measures the freshness of indexed smart-contract event data by reading the
+newest event timestamp from the `smart_contract_events` table. The probe is
+reachability-neutral: it reports `ageMs` (age of the newest indexed event) and
+`lastSuccessfulAt`, and the checker downgrades the probe to `degraded` when the
+data age exceeds the freshness budget (`DEFAULT_HEALTH_BUDGET.maxAgeMs`,
+default 5 minutes). The indexer is not a hard readiness gate on fresh
+deployments: when no events have ever been indexed the probe reports `up` with
+`detail: "no indexed events"`.
+
+| State | Condition |
+|---|---|
+| `up` | No events indexed yet, or newest event is younger than the freshness budget |
+| `degraded` | Newest event is older than the freshness budget |
+| `down` | Indexer store is unavailable or the stored timestamp is unparseable |
+
+No event payloads or timestamps beyond the newest one's age are exposed.
+
 ---
 
 ## Security notes
@@ -432,9 +463,14 @@ querying `circuitBreakerRegistry.getAll()`. No external I/O is performed.
 - `detail` fields are stripped from `GET /health` and `GET /health/ready`
   responses when `NODE_ENV=production`, preventing internal error messages,
   hostnames, and latency thresholds from reaching unauthenticated callers.
+- Latency (`latencyMs`) and freshness (`ageMs`, `lastSuccessfulAt`) are bound
+  by budgets and exposed because they are measurements, not connection
+  details; budget thresholds themselves (e.g. `maxAgeMs`) stay internal.
 - The `env` probe checks variable existence only — it never includes values.
 - The `db` probe runs a hardcoded `SELECT 1` with no user input, making SQL
   injection impossible.
+- The `indexer` probe uses a hardcoded `SELECT MAX(timestamp)` with no user
+  input and never exposes event payloads.
 - The `stellar-rpc` probe performs outbound HTTP; the target URL is controlled
   by `STELLAR_RPC_URL` which is validated at startup by the config schema.
 

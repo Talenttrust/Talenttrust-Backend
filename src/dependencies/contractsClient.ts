@@ -43,6 +43,25 @@ function getErrorProperty(error: unknown, ...keys: string[]): any {
   return undefined;
 }
 
+/**
+ * Resolve the upstream provider's error code. Prefers an explicit code
+ * carried on the failing error, then falls back to the `error.code` field of
+ * a structured JSON failure body (`{ error: { code } }`).
+ */
+function getProviderCode(error: unknown): string | undefined {
+  const direct = getErrorProperty(error, 'providerCode', 'code');
+  if (direct != null && typeof direct === 'string') return direct;
+
+  const responseBody = getErrorProperty(error, 'responseBody', 'body', 'response.data');
+  if (responseBody && typeof responseBody === 'object' && !Array.isArray(responseBody)) {
+    const nested = (responseBody as ErrorLike).error;
+    if (nested && typeof nested === 'object' && typeof nested.code === 'string') {
+      return nested.code;
+    }
+  }
+  return undefined;
+}
+
 /** Returns the root error, unwrapping DependencyError causes. */
 function unwrapCause(error: unknown): unknown {
   let current = error;

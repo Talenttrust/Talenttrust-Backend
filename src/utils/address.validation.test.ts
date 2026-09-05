@@ -2,6 +2,7 @@ import { validateDestinationAddress } from './address.validation';
 import { ValidationError } from '../errors/appError';
 
 describe('validateDestinationAddress', () => {
+  const VALID_ACCOUNT = 'GCV3AJVBLBT6DX7TTKNI5LTJKNGVW6MKK6KKREX27HBAUG43GWJ3H4ON';
   const VALID_ACCOUNT = 'GAIHGRGXET76OMA3VERY4OILKXCT2Y67OHEP7UBNL4CRHOER6IOHU4IC';
   const VALID_CONTRACT = 'CCJZ5DGASBWQXR5MPFCJXMBI333XE5U3FSJTNQU7RIKE3P5GN2K2WYD5';
 

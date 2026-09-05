@@ -23,7 +23,7 @@
 
 import { Router, Request, Response } from "express";
 import { runHealthCheck } from "./checker";
-import { Probe, HealthResponse, ProbeResult } from "./types";
+import { Probe, ProbeResult } from "./types";
 import { logger as rootLogger, Logger } from "../logger";
 import type { MetricsServiceLike } from "../observability/metrics-service";
 import { validateQuery } from "../middleware/validation";
@@ -95,6 +95,7 @@ export function buildHealthRouter(
       name: p.name,
       ok: p.ok ?? p.status === "up",
       latencyMs: p.latencyMs,
+      ageMs: p.ageMs,
     }));
 
     log.info("health_check", {
@@ -153,7 +154,13 @@ export function buildHealthRouter(
 
     const sanitizeProbe = (p: ProbeResult): ProbeResult =>
       isProduction || !isVerbose
-        ? { name: p.name, ok: p.ok, latencyMs: p.latencyMs }
+        ? {
+            name: p.name,
+            ok: p.ok,
+            latencyMs: p.latencyMs,
+            ageMs: p.ageMs,
+            lastSuccessfulAt: p.lastSuccessfulAt,
+          }
         : p;
 
     const sanitizedProbes = page.items.map(sanitizeProbe);

@@ -72,7 +72,9 @@
     },
     "bullmq": {
       "uuid": "^11.1.1"
-    }
+    },
+    "qs": "^6.16.0",
+    "toml": "^4.3.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

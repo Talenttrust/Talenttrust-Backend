@@ -741,6 +741,41 @@ MIGRATIONS.push({
   },
 });
 
+// Version 16: poll lease columns on the transactions table.
+//
+// Lease fencing prevents two poller instances from updating the same transaction
+// after a lease owner has changed: `lease_owner` names the poller instance that
+// currently owns the transaction and `lease_expires_at` bounds that ownership.
+// Writes are only applied while the stored owner matches the writer's token, so
+// a poller whose lease expired (or was taken over) while an RPC call was in
+// flight abandons its poll instead of clobbering the new owner's state. The
+// SqliteTransactionStore already persists these columns; this migration adds
+// them to databases created before the transactions table gained lease support.
+MIGRATIONS.push({
+  version: 16,
+  name: "add_transaction_lease_columns",
+  checksumSource: [
+    "ALTER TABLE transactions ADD COLUMN lease_owner TEXT",
+    "ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT",
+  ].join("\n"),
+  up: (db) => {
+    const columns = db.pragma("table_info(transactions)") as Array<{
+      name: string;
+    }>;
+    const hasLeaseOwner = columns.some((column) => column.name === "lease_owner");
+    const hasLeaseExpiresAt = columns.some(
+      (column) => column.name === "lease_expires_at",
+    );
+
+    if (!hasLeaseOwner) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_owner TEXT");
+    }
+    if (!hasLeaseExpiresAt) {
+      db.exec("ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT");
+    }
+  },
+});
+
 // Version 16: event audit + projection tables for atomic event ingestion.
 //
 // `event_audit` is the durable event checkpoint (the accepted/rejected record

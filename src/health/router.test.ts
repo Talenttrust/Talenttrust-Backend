@@ -122,6 +122,80 @@ describe("GET /health", () => {
   });
 });
 
+// ── #1228: dependency latency and age budgets ────────────────────────────────
+
+describe("GET /health — latency and age budgets", () => {
+  const freshIndexerProbe: Probe = async () => ({
+    name: "indexer",
+    ok: true,
+    status: "up",
+    latencyMs: 5,
+    ageMs: 30_000,
+    lastSuccessfulAt: "2026-03-24T00:00:00.000Z",
+  });
+
+  const staleIndexerProbe: Probe = async () => ({
+    name: "indexer",
+    ok: true,
+    status: "up",
+    latencyMs: 5,
+    ageMs: 30 * 60_000,
+    lastSuccessfulAt: "2026-03-24T00:00:00.000Z",
+  });
+
+  it("passes latency and freshness measurements through in production", async () => {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    const res = await request(buildApp([freshIndexerProbe])).get("/health");
+    process.env.NODE_ENV = original;
+
+    expect(res.status).toBe(200);
+    const indexer = res.body.probes.find((p: { name: string }) => p.name === "indexer");
+    expect(indexer.latencyMs).toBe(5);
+    expect(indexer.ageMs).toBe(30_000);
+    expect(indexer.lastSuccessfulAt).toBe("2026-03-24T00:00:00.000Z");
+    expect(indexer.detail).toBeUndefined();
+  });
+
+  it("returns 200 with a fresh (non-stale) dependency", async () => {
+    const res = await request(buildApp([freshIndexerProbe, okProbe])).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.probes.find((p: { name: string }) => p.name === "indexer").ok).toBe(true);
+  });
+
+  it("returns 503 when a dependency's data exceeds the freshness budget (stale indexer)", async () => {
+    const res = await request(buildApp([staleIndexerProbe])).get("/health?verbose=true");
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe("degraded");
+    const indexer = res.body.probes.find((p: { name: string }) => p.name === "indexer");
+    expect(indexer.ok).toBe(false);
+    expect(indexer.status).toBe("degraded");
+    expect(indexer.ageMs).toBe(30 * 60_000);
+  });
+
+  it("keeps a stale dependency degraded when another dependency is healthy (one unavailable)", async () => {
+    const res = await request(buildApp([okProbe, staleIndexerProbe])).get("/health");
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe("degraded");
+  });
+
+  it("does not leak freshness-budget detail to unauthenticated callers in production", async () => {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    const res = await request(buildApp([staleIndexerProbe])).get("/health");
+    process.env.NODE_ENV = original;
+
+    res.body.probes.forEach((p: { detail?: string }) => {
+      expect(p.detail).toBeUndefined();
+    });
+    expect(res.body.probes[0].ageMs).toBe(30 * 60_000);
+  });
+});
+
 // ── Issue #773: Structured metrics and logging ─────────────────────────────
 
 describe("health router — observability", () => {
