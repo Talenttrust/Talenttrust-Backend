@@ -48,14 +48,14 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Contract 1",
-          description: "Desc 1",
-          clientId: "client-1",
+          description: "Contract one description",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 1000,
         },
         {
           title: "Contract 2",
-          description: "Desc 2",
-          clientId: "client-2",
+          description: "Contract two description",
+          clientId: "22222222-2222-4222-8222-222222222222",
           budget: 2000,
         },
       ];
@@ -64,24 +64,22 @@ describe("ContractsBulkController", () => {
         {
           id: "contract-1",
           title: "Contract 1",
-          clientId: "client-1",
+          clientId: "11111111-1111-4111-8111-111111111111",
           freelancerId: "",
           amount: 1000,
           status: "draft",
           version: 1,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: "2026-09-05T00:00:00.000Z",
         },
         {
           id: "contract-2",
           title: "Contract 2",
-          clientId: "client-2",
+          clientId: "22222222-2222-4222-8222-222222222222",
           freelancerId: "",
           amount: 2000,
           status: "draft",
           version: 1,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: "2026-09-05T00:00:00.000Z",
         },
       ];
 
@@ -114,14 +112,14 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Valid Contract",
-          description: "Valid desc",
-          clientId: "client-1",
+          description: "Valid item description",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 1000,
         },
         {
           title: "Invalid Budget",
-          description: "Invalid desc",
-          clientId: "client-2",
+          description: "Invalid budget description",
+          clientId: "22222222-2222-4222-8222-222222222222",
           budget: 1000000000000, // Exceeds max
         },
       ];
@@ -129,13 +127,12 @@ describe("ContractsBulkController", () => {
       const contract: Contract = {
         id: "contract-1",
         title: "Valid Contract",
-        clientId: "client-1",
+        clientId: "11111111-1111-4111-8111-111111111111",
         freelancerId: "",
         amount: 1000,
         status: "draft",
         version: 1,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: "2026-09-05T00:00:00.000Z",
       };
 
       mockService.createContract
@@ -170,14 +167,14 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Invalid 1",
-          description: "Desc",
-          clientId: "client-1",
+          description: "Valid description enough",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 10000000000,
         },
         {
           title: "Invalid 2",
-          description: "Desc",
-          clientId: "client-2",
+          description: "Bounds error description",
+          clientId: "22222222-2222-4222-8222-222222222222",
           budget: 20000000000,
         },
       ];
@@ -210,8 +207,8 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Over Budget",
-          description: "Desc",
-          clientId: "client-1",
+          description: "Not found description",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 100000000000,
         },
       ];
@@ -242,8 +239,8 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Not Found",
-          description: "Desc",
-          clientId: "unknown-client",
+          description: "Generic error description",
+          clientId: "33333333-3333-4333-8333-333333333333",
           budget: 1000,
         },
       ];
@@ -274,8 +271,8 @@ describe("ContractsBulkController", () => {
       const requests: CreateContractRequestDto[] = [
         {
           title: "Generic Error",
-          description: "Desc",
-          clientId: "client-1",
+          description: "Valid description enough",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 1000,
         },
       ];
@@ -307,7 +304,7 @@ describe("ContractsBulkController", () => {
         {
           title: "Test",
           description: "Desc",
-          clientId: "client-1",
+          clientId: "11111111-1111-4111-8111-111111111111",
           budget: 1000,
         },
       ];
@@ -335,9 +332,9 @@ describe("ContractsBulkController", () => {
 
     it("positional mapping: items in response correspond to request items by index", async () => {
       const requests: CreateContractRequestDto[] = [
-        { title: "Item 0", description: "Desc", clientId: "c1", budget: 1000 },
-        { title: "Item 1", description: "Desc", clientId: "c2", budget: 2000 },
-        { title: "Item 2", description: "Desc", clientId: "c3", budget: 3000 },
+        { title: "Item 0", description: "First valid description", clientId: "11111111-1111-4111-8111-111111111111", budget: 1000 },
+        { title: "Item 1", description: "Second valid description", clientId: "22222222-2222-4222-8222-222222222222", budget: 2000 },
+        { title: "Item 2", description: "Third valid description", clientId: "33333333-3333-4333-8333-333333333333", budget: 3000 },
       ];
 
       mockService.createContract
@@ -350,8 +347,7 @@ describe("ContractsBulkController", () => {
           amount: 2000,
           status: "draft",
           version: 1,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: "2026-09-05T00:00:00.000Z",
         })
         .mockRejectedValueOnce(new Error("Item 2 fails"));
 
