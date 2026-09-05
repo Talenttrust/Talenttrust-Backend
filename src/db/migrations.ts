@@ -772,6 +772,10 @@ MIGRATIONS.push({
     }
     if (!hasLeaseExpiresAt) {
       db.exec("ALTER TABLE transactions ADD COLUMN lease_expires_at TEXT");
+    }
+  },
+});
+
 // Version 16: event audit + projection tables for atomic event ingestion.
 //
 // `event_audit` is the durable event checkpoint (the accepted/rejected record

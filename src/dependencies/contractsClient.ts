@@ -60,6 +60,8 @@ function getProviderCode(error: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
 /** Returns the root error, unwrapping DependencyError causes. */
 function unwrapCause(error: unknown): unknown {
   let current = error;
@@ -170,8 +172,6 @@ function classifyError(error: unknown): DependencyError {
   classified.kind = kind;
   classified.retryable = isRetryable(kind);
 
-  const providerCode = getProviderCode(error);
-  if (providerCode != null) {
   // Provider code resolution: prefer an explicit code, then the upstream
   // response body (e.g. RPC `{ error: { code } }` payloads).
   const root = unwrapCause(error);

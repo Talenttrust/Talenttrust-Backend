@@ -61,7 +61,7 @@ function buildPayoutScopeKey(
   idempotencyKey: string,
 ): string {
   return createHash("sha256")
-    .update(${tenantId}::::)
+    .update(`${tenantId}:${method}:${path}:${milestoneId}:${idempotencyKey}`)
     .digest("hex");
 }
 
@@ -99,7 +99,7 @@ export function createPayoutIdempotencyMiddleware(
         res,
         400,
         "invalid_idempotency_key",
-        \Idempotency-Key must be a non-empty string of at most \ characters.\,
+        `Idempotency-Key must be a non-empty string of at most ${IDEMPOTENCY_KEY_MAX_LENGTH} characters.`,
       );
       return;
     }
