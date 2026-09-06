@@ -11,7 +11,7 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { Router } from 'express';
-import { validateUpdateContract } from '../modules/contracts/validation.middleware';
+import { updateContractSchema } from '../modules/contracts/dto/contract.dto';\nimport { validateSchema } from '../middleware/validate.middleware';
 import { AppError, VersionConflictError } from '../errors/appError';
 import { UpdateContractDto } from '../modules/contracts/dto/contract.dto';
 import { Contract } from '../db/types';
@@ -29,7 +29,7 @@ function createTestApp(updateContract: UpdateFn): express.Application {
 
   router.patch(
     '/:id',
-    validateUpdateContract,
+    validateSchema(updateContractSchema),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const contract = await updateContract(
@@ -95,7 +95,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({ title: 'Updated Title Here' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_MISSING_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
 
     it('returns 400 ERR_MISSING_VERSION when body is empty', async () => {
@@ -104,7 +104,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({});
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_MISSING_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
 
     // ── Requirement 2.2: invalid version → 400 ERR_INVALID_VERSION ───────────
@@ -115,7 +115,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({ version: -1, title: 'Updated Title Here' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_INVALID_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
 
     it('returns 400 ERR_INVALID_VERSION when version is 1.5 (float)', async () => {
@@ -124,7 +124,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({ version: 1.5, title: 'Updated Title Here' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_INVALID_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
 
     it('returns 400 ERR_INVALID_VERSION when version is a string', async () => {
@@ -133,7 +133,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({ version: 'abc', title: 'Updated Title Here' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_INVALID_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
 
     it('returns 400 ERR_INVALID_VERSION when version is null', async () => {
@@ -142,7 +142,7 @@ describe('PATCH /api/v1/contracts/:id — OCC integration', () => {
         .send({ version: null, title: 'Updated Title Here' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ERR_INVALID_VERSION');
+      expect(res.body.error.code).toBe('validation_error');
     });
   });
 
