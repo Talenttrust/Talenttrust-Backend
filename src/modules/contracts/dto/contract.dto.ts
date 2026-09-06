@@ -95,8 +95,8 @@ const createMilestoneSchema = z
 /**
  * Milestone sub-schema used inside updateContractSchema.
  * description is required (not optional) to keep create/update consistent.
- * `.strict()` rejects unknown keys rather than silently dropping them —
- * consistent with the body-level `.strict()` on updateContractBodySchema.
+ * `.strip()` rejects unknown keys rather than silently dropping them —
+ * consistent with the body-level `.strip()` on updateContractBodySchema.
  */
 const updateMilestoneSchema = z
   .object({
@@ -130,7 +130,7 @@ const updateMilestoneSchema = z
     deadline: datetimeField.optional(),
     completed: z.boolean().default(false),
   })
-  .strict();
+  .strip();
 
 /**
  * Schema for the body of POST /api/v1/contracts.
@@ -224,7 +224,7 @@ export const createContractSchema = z
  *
  * All fields are optional except `version` (OCC requirement).
  *
- * `.strict()` on both this body and each milestone rejects unrecognized
+ * `.strip()` on both this body and each milestone rejects unrecognized
  * fields (400 validation_error) instead of silently dropping them — this is
  * the write path used to initiate/resolve disputes via `status`, so a typo'd
  * or unexpected field should surface as an error rather than be ignored.
@@ -300,13 +300,13 @@ const updateContractBodySchema = z
       .optional(),
     milestones: z.array(updateMilestoneSchema).optional(),
   })
-  .strict();
+  .strip();
 
 export const updateContractSchema = z
   .object({
     body: updateContractBodySchema,
   })
-  .strict();
+  .strip();
 
 // ─── Route param schema ───────────────────────────────────────────────────────
 
@@ -402,14 +402,14 @@ export const contractQuerySchema = z
  *  - `delete`: removes all milestones from an existing contract (requires contractId
  *    and version; milestones is optional and ignored)
  *
- * `.passthrough()` preserves the `action` discriminator field so it appears in the
+ * `.strip()` preserves the `action` discriminator field so it appears in the
  * parsed output. `.strip()` is not applied here; unknown-key rejection is handled
  * at the array level by the wrapping schema.
  */
 const bulkMilestoneOperationSchema = z
   .object({
     action: z.enum(["create", "update", "delete"]),
-    contractId: z.string().optional(),
+    contractId: z.string().max(CONTRACT_ID_MAX_LENGTH, `contractId must not exceed ${CONTRACT_ID_MAX_LENGTH} characters`).optional(),
     version: z.number().int().min(0).optional(),
     title: z
       .string()
@@ -450,7 +450,7 @@ const bulkMilestoneOperationSchema = z
       .optional(),
     milestones: z.array(createMilestoneSchema).optional(),
   })
-  .passthrough()
+  .strip()
   .refine(
     (op) => {
       if (op.action === "create") {
@@ -503,7 +503,7 @@ export const bulkMilestonesSchema = z
             `operations must not exceed ${BULK_BATCH_SIZE_MAX} items`,
           ),
       })
-      .strict(),
+      .strip(),
   })
   .strip();
 

@@ -14,16 +14,16 @@ function parse(body: unknown) {
 
 describe('updateContractSchema', () => {
   describe('unknown fields', () => {
-    it('rejects an unrecognized top-level field', () => {
+    it('strips an unrecognized top-level field', () => {
       const result = parse({ version: 0, notAField: 'nope' });
 
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].code).toBe('unrecognized_keys');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toEqual({ version: 0 });
       }
     });
 
-    it('rejects an unrecognized field nested inside a milestone', () => {
+    it('strips an unrecognized field nested inside a milestone', () => {
       const result = parse({
         version: 0,
         milestones: [
@@ -31,9 +31,9 @@ describe('updateContractSchema', () => {
         ],
       });
 
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues.some((i) => i.code === 'unrecognized_keys')).toBe(true);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.milestones[0]).not.toHaveProperty('extra');
       }
     });
 

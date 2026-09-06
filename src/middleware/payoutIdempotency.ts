@@ -61,7 +61,7 @@ function buildPayoutScopeKey(
   idempotencyKey: string,
 ): string {
   return createHash("sha256")
-    .update(${tenantId}::::)
+    .update(`${tenantId}:${method}:${path}:${milestoneId}:${idempotencyKey}`)
     .digest("hex");
 }
 
