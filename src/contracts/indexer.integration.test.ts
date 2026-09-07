@@ -237,4 +237,4 @@ describe('ContractEventIndexer Integration (Replay & Cursor Pagination)', () => 
       expect(result.newCursor!.network).toBe('testnet');
     });
   });
-}
+});
