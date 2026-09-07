@@ -9,7 +9,11 @@
  */
 
 import { z } from "zod";
-import { createContractSchema, QUERY_LIMIT_MAX } from "./contract.dto";
+import {
+  CONTRACT_ID_MAX_LENGTH,
+  createContractSchema,
+  updateContractSchema,
+} from "./contract.dto";
 
 /**
  * Maximum number of items in a single bulk operation batch.
@@ -18,12 +22,74 @@ import { createContractSchema, QUERY_LIMIT_MAX } from "./contract.dto";
  */
 export const BULK_OPERATION_MAX_BATCH_SIZE = 100;
 
+const contractIdField = z
+  .string()
+  .min(1, "contractId must not be empty")
+  .max(
+    CONTRACT_ID_MAX_LENGTH,
+    `contractId must not exceed ${CONTRACT_ID_MAX_LENGTH} characters`,
+  )
+  .optional();
+
+const bulkCreateItemSchema = z
+  .object({
+    action: z.literal("create").optional().default("create"),
+  })
+  .merge(createContractSchema.shape.body.strip());
+
+const bulkUpdateItemSchema = z
+  .object({
+    action: z.literal("update"),
+    contractId: contractIdField,
+    id: contractIdField,
+  })
+  .merge(updateContractSchema.shape.body.strip());
+
+const bulkDeleteItemSchema = z
+  .object({
+    action: z.literal("delete"),
+    version: updateContractSchema.shape.body.shape.version,
+    contractId: contractIdField,
+    id: contractIdField,
+  })
+  .strip();
+
+/**
+ * Schema for a single item inside a bulk request.
+ * Supports create (default), update, and delete actions.
+ * Unknown fields are stripped so unvalidated payloads never reach the service layer.
+ */
+export const bulkContractItemSchema = z
+  .discriminatedUnion("action", [
+    bulkCreateItemSchema,
+    bulkUpdateItemSchema,
+    bulkDeleteItemSchema,
+  ])
+  .superRefine((value, ctx) => {
+    if (
+      (value.action === "update" || value.action === "delete") &&
+      !value.contractId &&
+      !value.id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["contractId"],
+        message: "update and delete items require contractId or id",
+      });
+    }
+  });
+
 /**
  * Schema for bulk create contracts request.
  *
- * Array of items, each shaped exactly like a single POST /contracts request body.
+ * Array of items, each validated against bulkContractItemSchema with explicit bounds.
  * Must have between 1 and BULK_OPERATION_MAX_BATCH_SIZE items.
  * Empty array is rejected (almost certainly a client bug).
+ */
+/**
+ * Loose middleware schema for bulk requests.
+ * Validates batch size and structure only; per-item validation is done
+ * in the controller so that one invalid item does not fail the whole batch.
  */
 export const bulkCreateContractsSchema = z.object({
   body: z.union([

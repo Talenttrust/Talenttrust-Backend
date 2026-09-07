@@ -60,7 +60,7 @@ export function decodeCursor(cursor: string): CursorPosition {
     typeof parsed !== 'object' ||
     parsed === null ||
     typeof (parsed as Record<string, unknown>)['createdAt'] !== 'string' ||
-    typeof (parsed as Record<string, unknown>)[id'] !== 'string'
+    typeof (parsed as Record<string, unknown>)['id'] !== 'string'
   ) {
     throw new Error('Invalid pagination cursor: missing required fields');
   }

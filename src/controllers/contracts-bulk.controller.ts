@@ -23,40 +23,25 @@
 import type { NextFunction, Request, Response } from "express";
 import type { ContractsService } from "../services/contracts.service";
 import type {
-  CreateContractRequestDto,
+  UpdateContractRequestDto,
   ContractResponseDto,
 } from "../modules/contracts/dto/contracts-boundary.dto";
 import {
   toCreateContractDto,
+  toUpdateContractDto,
   toContractResponseDto,
 } from "../modules/contracts/dto/contracts-boundary.dto";
-import type {
-  BulkCreateContractsResponse,
-  BulkItemResult,
-} from "../modules/contracts/dto/bulk-operations.dto";
+import { bulkContractItemSchema } from "../modules/contracts/dto/bulk-operations.dto";
+import type { BulkItemResult } from "../modules/contracts/dto/bulk-operations.dto";
 import { ContractBoundsError } from "../contracts/bounds";
 import { NotFoundError } from "../errors/appError";
-import { fail, ok } from "../utils/apiResponse";
+import { ok } from "../utils/apiResponse";
 
 type ContractRequest<TBody = unknown> = Request<
   Record<string, string>,
   unknown,
   TBody
 >;
-
-/**
- * Result of attempting to process a single bulk item.
- * @internal
- */
-interface ProcessedItemResult {
-  status: "success" | "error";
-  code: number;
-  data?: ContractResponseDto;
-  error?: {
-    code: string;
-    message: string;
-  };
-}
 
 /**
  * Presentation layer for bulk contracts operations.
@@ -93,98 +78,14 @@ export class ContractsBulkController {
             ? bodyAny.items
             : [];
 
-      if (!rawItems || rawItems.length === 0 || rawItems.length > 25) {
+      if (!rawItems || rawItems.length === 0) {
         res.status(400).json({
           error: {
             code: "validation_error",
-            message:
-              rawItems.length > 25
-                ? "Batch size exceeds maximum of 25"
-                : "Operations array is required and must not be empty",
+            message: "Operations array is required and must not be empty",
           },
         });
         return;
-      }
-
-      // Structural validation check across all items in batch
-      const uuidRegex =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      for (const item of rawItems) {
-        const action = item.action ?? "create";
-        if (!["create", "update", "delete"].includes(action)) {
-          res.status(400).json({
-            error: {
-              code: "validation_error",
-              message: `Invalid action '${action}'`,
-            },
-          });
-          return;
-        }
-
-        if (action === "delete") {
-          const contractId = item.contractId ?? item.id;
-          if (!contractId || item.version === undefined) {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "contractId and version required",
-              },
-            });
-            return;
-          }
-        } else if (action === "update") {
-          const contractId = item.contractId ?? item.id;
-          if (!contractId || item.version === undefined) {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "contractId and version required",
-              },
-            });
-            return;
-          }
-        } else if (action === "create") {
-          if (item.milestones !== undefined) {
-            if (
-              !Array.isArray(item.milestones) ||
-              item.milestones.length === 0
-            ) {
-              res.status(400).json({
-                error: {
-                  code: "validation_error",
-                  message: "milestones array is required",
-                },
-              });
-              return;
-            }
-            for (const m of item.milestones) {
-              if (
-                !m.title ||
-                typeof m.title !== "string" ||
-                m.title.trim() === "" ||
-                typeof m.amount !== "number" ||
-                m.amount <= 0
-              ) {
-                res.status(400).json({
-                  error: {
-                    code: "validation_error",
-                    message: "invalid milestone values",
-                  },
-                });
-                return;
-              }
-            }
-          }
-          if (item.clientId === "invalid-uuid") {
-            res.status(400).json({
-              error: {
-                code: "validation_error",
-                message: "invalid clientId UUID",
-              },
-            });
-            return;
-          }
-        }
       }
 
       // Process each item independently, collecting results
@@ -228,12 +129,36 @@ export class ContractsBulkController {
     item: any,
     index: number,
   ): Promise<any> {
+    // Schema validation at the per-item boundary: rejects malformed or
+    // out-of-bounds inputs before they reach the service layer.
+    const parseResult = bulkContractItemSchema.safeParse(item);
+    if (!parseResult.success) {
+      return {
+        index,
+        status: "error",
+        code: 400,
+        error: {
+          code: "validation_error",
+          message: "Request validation failed",
+          details: parseResult.error.issues.map((issue) => ({
+            path: issue.path.map(String),
+            message: issue.message,
+            code: issue.code,
+          })),
+        },
+      };
+    }
+
+    // Use the validated/stripped item from here on.
+    const validatedItem = parseResult.data;
+
     try {
-      const action = item.action ?? "create";
+      const action = validatedItem.action ?? "create";
 
       if (action === "delete") {
-        const contractId = item.contractId ?? item.id;
-        const version = item.version;
+        const contractId =
+          (validatedItem as any).contractId ?? (validatedItem as any).id;
+        const version = (validatedItem as any).version;
         const contract = await this.service.updateContract(contractId, {
           version,
           milestones: [],
@@ -248,16 +173,12 @@ export class ContractsBulkController {
       }
 
       if (action === "update") {
-        const contractId = item.contractId ?? item.id;
-        const version = item.version;
-        const contract = await this.service.updateContract(contractId, {
-          version,
-          title: item.title,
-          description: item.description,
-          amount: item.amount ?? item.budget,
-          status: item.status,
-          milestones: item.milestones,
-        });
+        const contractId =
+          (validatedItem as any).contractId ?? (validatedItem as any).id;
+        const contract = await this.service.updateContract(
+          contractId,
+          toUpdateContractDto(validatedItem as UpdateContractRequestDto),
+        );
         return {
           index,
           status: "success",
@@ -270,7 +191,7 @@ export class ContractsBulkController {
       // Default: create
       const createDto = toCreateContractDto({
         freelancerId: "00000000-0000-0000-0000-000000000012",
-        ...item,
+        ...(validatedItem as any),
       });
       const contract = await this.service.createContract(createDto);
       return {
