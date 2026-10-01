@@ -184,6 +184,28 @@ describe('request audit invariants', () => {
     expect(auditStore.verifyIntegrity()).toMatchObject({ valid: true, totalEntries: 12 });
   });
 
+  it('snapshots re-entrant metadata before the store append critical section', () => {
+    const helper = attach().helper;
+    let nestedWriteCompleted = false;
+    const metadata = {
+      get nested(): string {
+        if (!nestedWriteCompleted) {
+          nestedWriteCompleted = true;
+          helper.log(input({ resourceId: 'nested-write' }));
+        }
+        return 'outer-value';
+      },
+    };
+
+    const outer = helper.log(input({ resourceId: 'outer-write', metadata }));
+    const entries = auditStore.getAll();
+
+    expect(entries.map((entry) => entry.resourceId)).toEqual(['nested-write', 'outer-write']);
+    expect(outer.metadata).toEqual({ nested: 'outer-value' });
+    expect(outer.previousHash).toBe(entries[0].hash);
+    expect(auditStore.verifyIntegrity()).toMatchObject({ valid: true, totalEntries: 2 });
+  });
+
   it('propagates persistence failure and permits an explicit retry without adding a phantom entry', () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const append = jest.spyOn(auditStore, 'append').mockImplementationOnce(() => { throw new Error('storage unavailable'); });

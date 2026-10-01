@@ -352,7 +352,7 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
     // runs without branching on the flag themselves.
     res.locals.audit = {
       log(input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>): AuditEntry {
-        return buildNoopEntry(input);
+        return buildNoopEntry(prepareInput(input));
       },
     } satisfies RequestAuditHelper;
     next();
@@ -376,7 +376,12 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   // the service's hash-chain / serialisation invariants.
   res.locals.audit = {
     log(input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>): AuditEntry {
-      return auditService.log({ ...input, ...requestContext });
+      // Snapshot and validate synchronously before entering the shared store's
+      // append critical section. Caller-owned getters/toJSON must not run while
+      // the hash chain is being mutated, where a nested log could be rejected
+      // as re-entrant or leave callers uncertain whether retrying is safe.
+      const prepared = prepareInput(input);
+      return auditService.log({ ...prepared, ...requestContext });
     },
   } satisfies RequestAuditHelper;
 
