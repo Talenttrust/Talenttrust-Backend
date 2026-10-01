@@ -60,3 +60,9 @@ export const ACCESS_CONTROL_MATRIX: Record<Role, Partial<Record<Resource, Action
 
 /** All valid roles in the system. */
 export const VALID_ROLES: readonly Role[] = ['admin', 'auditor', 'freelancer', 'client', 'guest'] as const;
+
+/** All valid resources in the system. */
+export const VALID_RESOURCES: readonly Resource[] = ['contracts', 'users', 'reputation', 'disputes', 'health', 'api-keys'] as const;
+
+/** All valid actions in the system. */
+export const VALID_ACTIONS: readonly Action[] = ['create', 'read', 'update', 'delete'] as const;

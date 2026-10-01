@@ -218,37 +218,58 @@ function decide(role: unknown, resource: unknown, action: unknown): Authorizatio
  * @returns `true` if the action is allowed, `false` otherwise.
  */
 export function isAllowed(role: Role, resource: Resource, action: Action): boolean {
-  return decide(role, resource, action).allowed;
-}
+  try {
+    // Guard against non-string / nullish inputs that can arrive from
+    // untrusted request payloads despite the TypeScript types.
+    if (typeof role !== 'string' || typeof resource !== 'string' || typeof action !== 'string') {
+      activeLogger.warn('authorization.denied.invalid_input_type', {
+        roleType: typeof role,
+        resourceType: typeof resource,
+        actionType: typeof action,
+      });
+      return false;
+    }
 
-/**
- * Evaluate an authorization request and return an explicit decision.
- *
- * Accepts unvalidated runtime input, never throws, and emits a structured
- * `warn` record (never containing sensitive data) when the denial is caused
- * by unexpected input rather than an ordinary permission rule. Use this at
- * trust boundaries and where diagnostics are required; use {@link isAllowed}
- * where only the boolean matters.
- *
- * @param role     - The caller's role (validated or raw).
- * @param resource - The target resource (validated or raw).
- * @param action   - The requested action (validated or raw).
- * @returns An {@link AuthorizationDecision} with a machine-readable reason.
- */
-export function evaluateAuthorization(
-  role: unknown,
-  resource: unknown,
-  action: unknown,
-): AuthorizationDecision {
-  const decision = decide(role, resource, action);
+    if (!VALID_ROLE_SET.has(role)) {
+      // Unknown role — deny by default. We do not log the raw role
+      // value to avoid leaking potentially sensitive identifiers.
+      activeLogger.warn('authorization.denied.unknown_role');
+      return false;
+    }
 
-  const event = ANOMALY_EVENT_BY_REASON[decision.reason];
-  if (!decision.allowed && event !== null) {
-    log.warn(event, {
-      reason: decision.reason,
-      role: describe(role),
-      resource: describe(resource),
-      action: describe(action),
+    if (!VALID_RESOURCE_SET.has(resource)) {
+      // Unknown resource — deny by default.
+      activeLogger.warn('authorization.denied.unknown_resource');
+      return false;
+    }
+
+    if (!VALID_ACTION_SET.has(action)) {
+      // Unknown action — deny by default.
+      activeLogger.warn('authorization.denied.unknown_action');
+      return false;
+    }
+
+    const permissions = FROZEN_MATRIX[role as Role];
+    if (!permissions) {
+      activeLogger.warn('authorization.denied.unknown_role');
+      return false;
+    }
+
+    const actions = permissions[resource as Resource];
+    if (!actions) {
+      activeLogger.warn('authorization.denied.unknown_resource');
+      return false;
+    }
+
+    // `Array.prototype.includes` is stable and deterministic for the
+    // immutable matrix arrays. Unknown actions simply yield `false`.
+    return actions.includes(action as Action);
+  } catch (error) {
+    // Fail closed: any unexpected error results in a deny. We log a
+    // sanitized message only — never the raw inputs — so failures are
+    // observable without exposing sensitive data.
+    activeLogger.error('authorization.error.fail_closed', {
+      message: error instanceof Error ? error.message : 'unknown error',
     });
   }
 
