@@ -45,7 +45,24 @@ class DatabaseService {
       throw new Error('Database not loaded');
     }
     await this.ensureDataDir();
-    await fs.writeFile(DB_PATH, JSON.stringify(this.db, null, 2));
+    // Fix 7: write-rename pattern for crash-safe atomic saves.
+    // On POSIX, fs.rename is atomic. On Windows it is near-atomic (replaces target),
+    // but may fail with EPERM when the target is locked. We fall back to a direct
+    // writeFile in that case to preserve availability without data loss.
+    const tmpPath = `${DB_PATH}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(this.db, null, 2), 'utf-8');
+    try {
+      await fs.rename(tmpPath, DB_PATH);
+    } catch (renameErr: any) {
+      // Windows EPERM / EXDEV: fall back to direct overwrite and clean up the tmp file
+      if (renameErr.code === 'EPERM' || renameErr.code === 'EXDEV') {
+        await fs.writeFile(DB_PATH, JSON.stringify(this.db, null, 2), 'utf-8');
+        try { await fs.unlink(tmpPath); } catch { /* ignore cleanup failure */ }
+      } else {
+        try { await fs.unlink(tmpPath); } catch { /* ignore cleanup failure */ }
+        throw renameErr;
+      }
+    }
   }
 
   // Contract Metadata operations
