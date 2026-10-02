@@ -31,12 +31,36 @@ pub const IDEM_KEY_TTL_LEDGERS: u32 = 17_280; // ~24 h at 5 s/ledger
 /// Callers that need to submit more than `MAX_BATCH_SIZE` bets must split
 /// the work into multiple invocations, each with a distinct idempotency key.
 ///
-/// The value 50 was chosen to stay well within Soroban's per-invocation
-/// CPU and memory limits while still accommodating realistic batch sizes.
-/// Increase with care and validate against the current Soroban host limits.
+/// Kept equal to [`crate::bets::MAX_BATCH_SIZE`] and the crate-root
+/// `MAX_BATCH_SIZE`; the three names must not drift apart or a batch the
+/// contract accepts could be rejected by a caller sizing off another one.
 ///
 /// [`Bet`]: crate::bets::Bet
-pub const MAX_BATCH_SIZE: u32 = 50;
+pub const MAX_BATCH_SIZE: u32 = 100;
+
+/// Lower bound on the *remaining* TTL of a consumed idempotency receipt
+/// before [`IDEM_KEY_TTL_LEDGERS`] is (re)applied to it.
+///
+/// `extend_ttl(threshold, extend_to)` is a no-op when the entry's live TTL
+/// is already at or above `threshold`, so the threshold must sit well below
+/// the target for the window to be genuinely renewed on each write.
+pub const IDEM_KEY_TTL_THRESHOLD_LEDGERS: u32 = 1_000; // ~1.4 h at 5 s/ledger
+
+/// TTL applied to the contract instance when a batch is accepted, in
+/// ledgers. The instance is not kept alive by the per-receipt TTLs, so an
+/// idle contract would otherwise be archived and reject calls whose
+/// receipts are still live.
+pub const INSTANCE_TTL_LEDGERS: u32 = 518_400;
+
+/// TTL applied to the contract's own instance/code entry when a batch is
+/// accepted, in ledgers. Set above [`IDEM_KEY_TTL_LEDGERS`] so a live
+/// receipt never outlives the contract that minted it in normal operation.
+pub const CONTRACT_TTL_LEDGERS: u32 = 34_560; // ~48 h at 5 s/ledger
+
+/// Lower bound on the *remaining* TTL of the contract entry before
+/// [`CONTRACT_TTL_LEDGERS`] is (re)applied. Must be far below the target so
+/// the bump fires only as the entry approaches expiry.
+pub const CONTRACT_TTL_THRESHOLD_LEDGERS: u32 = 1_000; // ~1.4 h at 5 s/ledger
 
 /// Storage keys used by the contract.
 ///

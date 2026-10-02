@@ -1,18 +1,12 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 
-use crate::{errors::Error, storage::consume_idempotency_key};
-
-/// Maximum number of bets accepted in a single [`place_bets`] call.
-///
-/// This bound exists so that one invocation always fits inside the Soroban
-/// CPU/instruction budget: the contract iterates the whole vector, and an
-/// unbounded vector would let a caller construct a batch that can never be
-/// applied.  Callers with more than `MAX_BATCH_SIZE` bets must split them
-/// into several submissions, each carrying its own idempotency key.
-///
-/// Raising this constant is a backwards-compatible change; lowering it is
-/// not, because it would start rejecting payloads that used to be accepted.
-pub const MAX_BATCH_SIZE: u32 = 100;
+use crate::{
+    errors::Error,
+    storage::{
+        consume_idempotency_key, CONTRACT_TTL_LEDGERS, CONTRACT_TTL_THRESHOLD_LEDGERS,
+        IDEM_KEY_TTL_LEDGERS, INSTANCE_TTL_LEDGERS, MAX_BATCH_SIZE,
+    },
+};
 
 /// A single bet submitted inside a batch.
 ///
@@ -34,49 +28,24 @@ pub struct Bet {
     pub amount: i128,
 }
 
-/// Validate a single [`Bet`] entry against the storage-layer boundaries.
-///
-/// # Invariants
-///
-/// * `market_id` must be non-zero (zero is reserved as an invalid sentinel).
-/// * `amount` must satisfy `MIN_BET_AMOUNT <= amount <= MAX_BET_AMOUNT`.
-///
-/// The function is pure and deterministic: identical inputs always yield
-/// identical results, and it performs no storage reads or writes.
-fn validate_bet(bet: &Bet) -> Result<(), Error> {
-    if bet.market_id == 0 {
-        return Err(Error::InvalidMarketId);
-    }
-    if bet.amount < MIN_BET_AMOUNT {
-        return Err(Error::BetAmountTooSmall);
-    }
-    if bet.amount > MAX_BET_AMOUNT {
-        return Err(Error::BetAmountTooLarge);
-    }
-    Ok(())
-}
+/// Alias for [`MAX_BATCH_SIZE`], kept for callers (and the crate-root
+/// re-export) that reference the newer name. The two have the same value.
+pub const MAX_BETS_PER_BATCH: u32 = MAX_BATCH_SIZE;
 
-/// Validate the whole batch before any state mutation occurs.
+/// Durable record written when a batch is accepted.
 ///
-/// # Invariants
-///
-/// * The batch is non-empty.
-/// * The batch size does not exceed [`MAX_BATCH_SIZE`].
-/// * Every entry passes [`validate_bet`].
-///
-/// Validation is performed in a single pass up-front so that a rejected
-/// batch never partially mutates storage (all-or-nothing semantics).
-fn validate_batch(bets: &Vec<Bet>) -> Result<(), Error> {
-    if bets.is_empty() {
-        return Err(Error::EmptyBatch);
-    }
-    if bets.len() > MAX_BATCH_SIZE {
-        return Err(Error::BatchTooLarge);
-    }
-    for bet in bets.iter() {
-        validate_bet(&bet)?;
-    }
-    Ok(())
+/// Kept as the public receipt shape so a caller can reconcile an accepted
+/// batch against the `place_bets` event without trusting an off-chain
+/// index. The idempotency token itself is deliberately not part of it.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchReceipt {
+    /// Number of bets applied.
+    pub bet_count: u32,
+    /// Sum of every [`Bet::amount`] in the batch, in stroops.
+    pub total_amount: i128,
+    /// Ledger sequence the batch was applied on.
+    pub applied_at_ledger: u32,
 }
 
 /// Process a batch of bets atomically with an idempotency guarantee.
@@ -217,9 +186,7 @@ fn apply_batch(env: &Env, caller: &Address, bets: &Vec<Bet>) -> Result<(), Error
     // TODO: replace with real market-state mutations once the market
     //       storage module is added.  For now we emit a diagnostic event
     //       so the batch is observable on-chain.
-    env.events().publish(
-        (Symbol::new(env, "place_bets"), caller.clone()),
-        bets.len(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "place_bets"), caller.clone()), bets.len());
     Ok(())
 }

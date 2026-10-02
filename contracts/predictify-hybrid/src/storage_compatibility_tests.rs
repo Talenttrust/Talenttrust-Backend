@@ -218,7 +218,9 @@ fn unauthenticated_calls_cannot_consume_tokens() {
 fn legacy_error_discriminants_remain_stable() {
     assert_eq!(Error::IdempotentBatchAlreadyApplied as u32, 1);
     assert_eq!(Error::EmptyBatch as u32, 2);
-    assert_eq!(Error::InvalidIdempotencyState as u32, 4);
+    // 3–5 are the released recovery vocabulary (InvalidAmount/BatchTooLarge/
+    // AmountOverflow); this legacy-state error is an appended alias at 13.
+    assert_eq!(Error::InvalidIdempotencyState as u32, 13);
 }
 
 #[test]
@@ -250,7 +252,7 @@ fn old_client_and_payload_still_succeed_and_decode_old_errors() {
     });
     assert_eq!(
         client.try_place_bets(&caller, &legacy_bets, &token),
-        Err(Err(soroban_sdk::InvokeError::Contract(4)))
+        Err(Err(soroban_sdk::InvokeError::Contract(13)))
     );
 }
 
