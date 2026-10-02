@@ -1,3 +1,23 @@
 [workspace]
 members = ["predictify-hybrid"]
 resolver = "2"
+
+# Profiles declared in a member manifest of a workspace are silently ignored, so
+# these must live at the workspace root. They previously sat in
+# `predictify-hybrid/Cargo.toml`, which meant the release build of the contract
+# did not actually get `panic = "abort"`, `overflow-checks`, `lto` or
+# `strip = "symbols"` — the deployed WASM differed from the one the manifest
+# describes.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 16
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

@@ -226,17 +226,113 @@ All deployments create records with:
 
 ### Health Checks
 
-Post-deployment health checks verify:
-- Service availability by calling the /health/ready endpoint
-- API responsiveness with accurate response time measurements
-- Configuration correctness and SSRF protection for the target URL
+Post-deployment health checks verify service readiness by making a real HTTP
+request to the `/health/ready` endpoint of the deployed service.
 
-The `performHealthCheck` function in `src/deployment/validator.ts` implements a real HTTP probe that:
-1. Validates the base URL against SSRF attacks using `isSafeUrl` from `src/utils/ssrf.ts`
-2. Makes a GET request to the `/health/ready` endpoint with a 5-second timeout
-3. Reports healthy status only if the endpoint returns 200 OK
-4. Handles errors like connection refused, timeouts, and non-200 status codes
-5. Accepts an optional injectable HTTP client for testing purposes
+#### `performHealthCheck` — Real HTTP Probe
+
+`performHealthCheck(baseUrl, httpClient?)` in `src/deployment/validator.ts`
+implements a production-grade readiness probe with the following guarantees:
+
+**What it does**
+
+1. **SSRF guard** — `baseUrl` is validated by `isSafeUrl` from
+   `src/utils/ssrf.ts` before any network call is made.
+   Private addresses (RFC-1918, loopback 127.x, link-local 169.254.x,
+   IPv6 ULA/loopback, cloud metadata) are blocked in all environments.
+   In production (`NODE_ENV=production`) the block is unconditional and
+   cannot be overridden by `SSRF_ALLOW_PRIVATE_HOSTS`.
+
+2. **Target endpoint** — the probe calls `GET <baseUrl>/health/ready`,
+   served by `src/health.ts` and registered at `/health/ready` in Express.
+   The endpoint runs dependency probes (SQLite, Stellar RPC, Redis) and
+   returns `200` when all pass, or `503` when any fail.
+
+3. **Accurate response time** — `Date.now()` is captured immediately before
+   the `client.get()` call and the difference is taken immediately after the
+   awaited response, so `responseTime` in the result reflects true network
+   round-trip latency.
+
+4. **Bounded timeout** — the default (non-injected) HTTP client is created
+   with `timeout: 5000` (5 seconds).  The probe returns `unhealthy` if the
+   connection is refused (`ECONNREFUSED`) or aborted (`ECONNABORTED`).
+
+5. **Injectable HTTP client** — pass a custom `AxiosInstance` as the second
+   argument to avoid real network calls in tests.
+
+6. **Error handling** — errors from both the default `createHttpClient`
+   interceptor (`HttpResponseError`) and raw Axios errors from injected
+   clients are handled; both paths set `statusCode` and `error` in `details`.
+
+**Result shape**
+
+```ts
+interface HealthCheckResult {
+  service: string;                   // always "talenttrust-backend"
+  status: 'healthy' | 'unhealthy';   // healthy only on HTTP 200
+  timestamp: Date;
+  details?: {
+    baseUrl: string;
+    responseTime: number;            // ms, measured around the real request
+    statusCode?: number;             // present on HTTP responses
+    error?: string;                  // present on unhealthy results
+  };
+}
+```
+
+**Outcome matrix**
+
+| Scenario | `status` | `details.error` |
+|---|---|---|
+| HTTP 200 from `/health/ready` | `healthy` | — |
+| HTTP 503 (dependency down) | `unhealthy` | `HTTP 503` |
+| Connection refused | `unhealthy` | `Connection refused` |
+| Timeout (>5 s) | `unhealthy` | `Request timeout` |
+| Private/internal URL | `unhealthy` | `URL not safe for SSRF` |
+| Any other error | `unhealthy` | error message |
+
+**Usage example**
+
+```typescript
+import { performHealthCheck } from './src/deployment/validator';
+
+// Default (real network, 5 s timeout)
+const result = await performHealthCheck('https://api.example.com');
+if (result.status !== 'healthy') {
+  console.error('Service not ready:', result.details);
+  process.exit(1);
+}
+
+// Injected client (tests / custom timeout)
+import axios from 'axios';
+const client = axios.create({ timeout: 10_000 });
+const result = await performHealthCheck('https://api.example.com', client);
+```
+
+**Security notes**
+
+- The SSRF guard is applied before any I/O. An attacker-controlled `baseUrl`
+  cannot route the probe to cloud metadata (`169.254.169.254`), internal
+  services (`10.x`, `192.168.x`), or loopback (`127.x`).
+- Error messages returned in `details.error` are safe machine-readable tokens
+  (`HTTP 503`, `Connection refused`, `Request timeout`) — no stack traces,
+  internal hostnames, or topology are leaked.
+- In production the guard is always applied regardless of environment
+  variables.
+
+**`/health/ready` endpoint** (`GET /health/ready`)
+
+Served by `src/health.ts`. Runs three dependency probes concurrently:
+
+| Probe | Dependency | Timeout |
+|---|---|---|
+| `db` | SQLite `SELECT 1` | 3 000 ms |
+| `stellar-rpc` | Soroban RPC reachability | 3 000 ms |
+| `queue` | Redis `PING` | 3 000 ms |
+
+Returns `200 { status: "ready" }` when all probes pass, `503 { status: "not-ready" }`
+otherwise.  Also returns `503` when the service is draining during a blue-green
+handoff.
 
 ## Troubleshooting
 

@@ -1,4 +1,4 @@
-import { runHealthCheck } from "./checker";
+import { runHealthCheck, buildProbes } from "./checker";
 import { Probe } from "./types";
 
 const okProbe =
@@ -68,5 +68,24 @@ describe("runHealthCheck", () => {
       );
     const result = await runHealthCheck([slow, okProbe("fast")]);
     expect(result.probes).toHaveLength(2);
+  });
+});
+
+describe("buildProbes", () => {
+  it("returns an array of six probes including queue and circuit-breaker", () => {
+    const probes = buildProbes();
+    expect(probes).toHaveLength(6);
+  });
+
+  it("returns a queue probe that uses provided config", async () => {
+    const probes = buildProbes({ queueFailedThreshold: 5, queueBacklogThreshold: 100 });
+    expect(probes).toHaveLength(6);
+    const queueProbeFn = probes[4];
+    expect(typeof queueProbeFn).toBe("function");
+  });
+
+  it("buildProbes without config still includes all standard probes", () => {
+    const probes = buildProbes();
+    expect(probes).toHaveLength(6);
   });
 });

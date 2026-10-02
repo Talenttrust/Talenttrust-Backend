@@ -7,6 +7,7 @@
 
 import { ReputationUpdatePayload, JobResult } from '../types';
 import { createLogger } from '../../logger';
+import { InvalidJobPayloadError } from '../queue-errors';
 
 /**
  * Process reputation update job
@@ -27,19 +28,19 @@ export async function processReputationUpdate(
   // Validate user ID
   if (!payload.userId || payload.userId.length < 5) {
     log.warn('Reputation update rejected: invalid userId');
-    throw new Error('Invalid user ID');
+    throw new InvalidJobPayloadError('Invalid user ID');
   }
 
   // Validate rating range
   if (payload.rating < 1 || payload.rating > 5) {
     log.warn('Reputation update rejected: rating out of range', { rating: payload.rating });
-    throw new Error('Rating must be between 1 and 5');
+    throw new InvalidJobPayloadError('Rating must be between 1 and 5');
   }
 
   // Validate contract ID
   if (!payload.contractId) {
     log.warn('Reputation update rejected: missing contractId');
-    throw new Error('Contract ID is required');
+    throw new InvalidJobPayloadError('Contract ID is required');
   }
 
   log.info('Processing reputation update', { rating: payload.rating });

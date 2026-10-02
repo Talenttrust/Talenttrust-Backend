@@ -5,12 +5,11 @@
  *
  * ## How it works
  *
- * The middleware registers a `res.on('finish')` listener before calling
- * `next()`. This guarantees that the audit entry is written **after** the
- * full middleware chain (including authentication) has run, so the final
- * HTTP status code and the resolved `req.user` identity are both available.
+ * The middleware registers response listeners before calling `next()`. Normal
+ * responses are recorded on `finish`, after authentication and the handler
+ * have run. Prematurely closed responses are recorded once on `close`.
  *
- * Mount this middleware **before** `authenticateMiddleware` / `requireAuth`
+ * Mount this middleware after body parsing and **before** `authenticateMiddleware` / `requireAuth`
  * on any router or route group that requires authentication.
  *
  * ## Action mapping
@@ -25,8 +24,8 @@
  *
  * ## Redaction
  *
- * All request headers and body fields are passed through the deterministic
- * redaction rules defined in `./redact` before being written to the store.
+ * Request headers, body and query are copied within explicit bounds and
+ * redacted using `./redact`. Invalid sections are replaced with `[OMITTED]`.
  * The `Authorization` header value is **never** persisted.
  *
  * ## Traceability
@@ -35,10 +34,30 @@
  * `res.locals.requestId`) is used as the `correlationId` on every entry,
  * enabling end-to-end request tracing across logs.
  *
+ * ## Validation boundaries (enforced in the finish listener)
+ *
+ * | Field         | Rule                                                           |
+ * |---------------|----------------------------------------------------------------|
+ * | actor         | Truncated to {@link MAX_ACTOR_LENGTH} chars; falls back to     |
+ * |               | `'anonymous'` when absent or non-string.                       |
+ * | resource      | Truncated to {@link MAX_RESOURCE_LENGTH} chars; falls back to  |
+ * |               | `'endpoint'` when the URL yields nothing useful.               |
+ * | resourceId    | Truncated to {@link MAX_RESOURCE_ID_LENGTH} chars; falls back  |
+ * |               | to `''` when the URL contains no id segment.                   |
+ * | ipAddress     | Sanitised via {@link sanitizeIpAddress} (clamped to 45 chars). |
+ * | correlationId | Sanitised via {@link sanitizeCorrelationId} (control chars     |
+ * |               | stripped, charset-validated, discarded on violation).          |
+ *
+ * Truncation (not rejection) is deliberate for automatically-derived fields:
+ * the entry is still useful for tracing and incident response even when a
+ * path segment is unexpectedly long, while a missing entry would be worse
+ * than a slightly truncated one.
+ *
  * @security
  * - Audit failures are silently swallowed (with a console.error) so that a
  *   logging fault never breaks the primary request path.
- * - No raw bearer tokens, passwords, or PII reach the audit store.
+ * - Known sensitive headers and payload keys are redacted. Free-text values
+ *   still require application-specific PII policy.
  *
  * @example
  * ```ts
@@ -54,10 +73,69 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import type { AuditAction, AuditSeverity } from './types';
 import type { AuthenticatedRequest } from '../auth/authenticate';
-import { buildAuditMetadata } from './redact';
+import { isIP } from 'net';
+import { auditIdentifier, auditPath, auditMethod, auditPayload } from './protectedEndpointInput';
 import { auditService, AuditService } from './service';
+import { validateEnv } from '../config/env.schema';
+import { sanitizeCorrelationId, sanitizeIpAddress } from './middleware';
+
+// ─── Field-length bounds ──────────────────────────────────────────────────────
+
+/**
+ * Maximum length of the `actor` field stored in an automatically-generated
+ * audit entry.  User IDs are bounded by the authentication system, but this
+ * guard prevents an arbitrarily long value from reaching the store when the
+ * service evolves or a non-standard auth path is added.
+ */
+export const MAX_ACTOR_LENGTH = 128;
+
+/**
+ * Maximum length of the `resource` field derived from the URL path.
+ * A URL segment is at most 2048 chars in practice; 128 is generous for
+ * any real resource type name while preventing oversized store writes.
+ */
+export const MAX_RESOURCE_LENGTH = 128;
+
+/**
+ * Maximum length of the `resourceId` field derived from the URL path.
+ * UUIDs are 36 chars; slugs are typically under 64.  256 allows for all
+ * realistic IDs while bounding the field against path-injection attempts.
+ */
+export const MAX_RESOURCE_ID_LENGTH = 256;
+
+// A response can pass through the same protected router more than once. Keep
+// the guard on that response, rather than in process-wide state, so each HTTP
+// request has at most one audit write attempt.
+const auditListenerRegistered = Symbol('protectedEndpointAuditListenerRegistered');
+
+type AuditedResponse = Response & { [auditListenerRegistered]?: boolean };
+
+function resolveActor(req: Request): string {
+  const user = (req as Request & { user?: { userId?: unknown; id?: unknown } }).user;
+  // The simple bearer middleware uses userId; the production JWT middleware
+  // uses id. Preserve both contracts without trusting a malformed value.
+  if (typeof user?.userId === 'string' && user.userId) return user.userId;
+  if (typeof user?.id === 'string' && user.id) return user.id;
+  return 'anonymous';
+}
+
+// Each response/service pair owns one terminal write, even across factories.
+const registrations = new WeakMap<Response, WeakSet<AuditService>>();
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Truncate a string to at most `max` characters.
+ * Returns `fallback` when the value is absent, non-string, or empty.
+ *
+ * Truncation is preferred over rejection here because this middleware
+ * emits fire-and-forget entries: an entry with a truncated field is
+ * more useful for incident response than a missing entry.
+ */
+function truncate(value: unknown, max: number, fallback: string): string {
+  if (typeof value !== 'string' || value.length === 0) return fallback;
+  return value.length <= max ? value : value.slice(0, max);
+}
 
 /**
  * Map HTTP method + final status code to an AuditAction.
@@ -92,7 +170,7 @@ function deriveSeverity(action: AuditAction, statusCode: number): AuditSeverity 
  */
 function deriveResource(path: string): string {
   const match = /^\/api\/v\d+\/([^/?#]+)/i.exec(path);
-  return match?.[1] ?? 'endpoint';
+  return auditIdentifier(match?.[1]) ?? 'endpoint';
 }
 
 /**
@@ -105,7 +183,7 @@ function deriveResource(path: string): string {
  */
 function deriveResourceId(path: string): string {
   const match = /^\/api\/v\d+\/[^/?#]+\/([^/?#]+)/i.exec(path);
-  return match?.[1] ?? '';
+  return auditIdentifier(match?.[1]) ?? '';
 }
 
 // ─── Middleware factory ───────────────────────────────────────────────────────
@@ -118,6 +196,8 @@ function deriveResourceId(path: string): string {
  * @param service - AuditService instance to write entries to (defaults to
  *                  the application singleton).
  */
+const AUDIT_FINISH_FLAG = Symbol('protectedEndpointAudit.finishRegistered');
+
 export function createProtectedEndpointAuditMiddleware(
   service: AuditService = auditService,
 ): RequestHandler {
@@ -126,44 +206,102 @@ export function createProtectedEndpointAuditMiddleware(
     res: Response,
     next: NextFunction,
   ): void {
-    res.on('finish', () => {
-      try {
-        // req.user is populated by authenticateMiddleware after this runs
-        const actor =
-          (req as AuthenticatedRequest).user?.userId ?? 'anonymous';
+    const env = validateEnv();
 
-        const action = deriveAction(req.method, res.statusCode);
-        const severity = deriveSeverity(action, res.statusCode);
-        const resource = deriveResource(req.path);
-        const resourceId = deriveResourceId(req.path);
-        const requestId = res.locals['requestId'] as string | undefined;
-        const ipAddress =
-          (req.ip ?? req.socket?.remoteAddress) as string | undefined;
+    if (!env.AUDIT_ENABLED) {
+      // Feature flag off — skip the finish listener entirely; no audit entries
+      // are written for protected-endpoint traffic.
+      next();
+      return;
+    }
 
-        const metadata = buildAuditMetadata(
-          req.method,
-          req.path,
-          req.headers as Record<string, string | string[] | undefined>,
-          req.body,
-          req.query as Record<string, unknown>,
-          res.statusCode,
-          requestId,
-        );
+    let services = registrations.get(res);
+    if (services?.has(service)) {
+      next();
+      return;
+    }
+    if (!services) {
+      services = new WeakSet();
+      registrations.set(res, services);
+    }
+    services.add(service);
 
-        service.log({
-          action,
-          severity,
-          actor,
-          resource,
-          resourceId,
-          metadata,
-          ipAddress,
-          correlationId: requestId,
-        });
-      } catch (err) {
-        // Audit failures must never disrupt the request lifecycle.
-        console.error('[protectedEndpointAuditMiddleware] Failed to write audit entry:', err);
+    // Snapshot ingress context before mounted routers or handlers rewrite it.
+    let method = 'UNKNOWN';
+    let path = '[INVALID]';
+    let headers: ReturnType<typeof auditPayload> = { value: '[OMITTED]', rejected: true };
+    let body = headers;
+    let query = headers;
+    try {
+      method = auditMethod(req.method);
+      path = auditPath(req.originalUrl ?? req.path);
+      headers = auditPayload(req.headers, true);
+      body = auditPayload(req.body);
+      const rawQuery = req.query;
+      query = rawQuery !== null && typeof rawQuery === 'object' && !Array.isArray(rawQuery)
+        ? auditPayload(rawQuery) : { value: '[OMITTED]', rejected: true };
+      if (!query.rejected && Object.keys(query.value as object).length === 0) {
+        query = { value: null, rejected: false };
       }
+    } catch {
+      // Even an exotic request getter must not interrupt authentication.
+    }
+
+    res.once('finish', () => {
+      try {
+        // Authentication and the final status are resolved after next().
+        const rawActor = (req as AuthenticatedRequest).user?.userId;
+        const validActor = auditIdentifier(rawActor);
+        const actor = validActor ?? 'anonymous';
+        const statusCode = Number.isInteger(res.statusCode) && res.statusCode >= 100 &&
+          res.statusCode <= 599 ? res.statusCode : null;
+        const action = deriveAction(method, statusCode ?? 500);
+        const rawRequestId = res.locals['requestId'];
+        const requestId = auditIdentifier(rawRequestId);
+        const correlationId = requestId && /^[A-Za-z0-9._:-]+$/.test(requestId) ? requestId : undefined;
+        const rawIp = req.ip ?? req.socket?.remoteAddress;
+        const ipAddress = typeof rawIp === 'string' && rawIp.length <= 45 && isIP(rawIp) ? rawIp : undefined;
+        const segments = /^\/api\/v\d+\/([^/?#]+)(?:\/([^/?#]+))?/i.exec(path);
+        const rejected = [
+          ...(method === 'UNKNOWN' ? ['method'] : []),
+          ...(path === '[INVALID]' ? ['path'] : []),
+          ...(statusCode === null ? ['statusCode'] : []),
+          ...(headers.rejected ? ['headers'] : []),
+          ...(body.rejected ? ['body'] : []),
+          ...(query.rejected ? ['query'] : []),
+          ...(rawActor !== undefined && !validActor ? ['actor'] : []),
+          ...(rawRequestId !== undefined && !correlationId ? ['requestId'] : []),
+          ...(rawIp !== undefined && !ipAddress ? ['ipAddress'] : []),
+          ...(segments?.[1] && !auditIdentifier(segments[1]) ? ['resource'] : []),
+          ...(segments?.[2] && !auditIdentifier(segments[2]) ? ['resourceId'] : []),
+        ];
+        const metadata = Object.freeze({
+          method, path, statusCode, requestId: correlationId ?? null,
+          headers: headers.value, body: body.value, query: query.value,
+          ...(rejected.length ? { auditValidation: Object.freeze(rejected) } : {}),
+        });
+        service.log({
+          action, severity: rejected.length ? 'WARNING' : deriveSeverity(action, statusCode ?? 500), actor,
+          resource: deriveResource(path), resourceId: deriveResourceId(path),
+          metadata, ipAddress, correlationId,
+        });
+      } catch {
+        // Never include exception messages, stack traces, or request data.
+        console.error('[protectedEndpointAuditMiddleware] Failed to write audit entry',
+          { code: 'protected_audit_write_failed' });
+      }
+    };
+
+    res.once('finish', () => writeAuditEntry(false));
+    res.once('close', () => {
+      if (!res.writableFinished) writeAuditEntry(true);
+    });
+
+    // Ensure the flag is cleared if the response is closed without finishing
+    // (e.g. client abort) so that a subsequent request on a reused Response
+    // object (unlikely in Express, but defensive) is not silently skipped.
+    res.on('close', () => {
+      resWithFlag[AUDIT_FINISH_FLAG] = false;
     });
 
     next();

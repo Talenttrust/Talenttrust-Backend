@@ -6,6 +6,9 @@ describe('loadConfig SSRF Protection', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; these tests assert
+    // the fail-closed default, so clear the bypass flag.
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
   });
 
   afterAll(() => {

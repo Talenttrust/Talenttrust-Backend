@@ -1,5 +1,10 @@
 export { Role, Resource, Action, ACCESS_CONTROL_MATRIX, VALID_ROLES } from './roles';
-export { isAllowed } from './authorize';
+export {
+  isAllowed,
+  evaluateAuthorization,
+  AuthorizationDecision,
+  AuthorizationReason,
+} from './authorize';
 export {
   TokenPayload,
   AuthenticatedRequest,
@@ -8,3 +13,5 @@ export {
   authenticateMiddleware,
 } from './authenticate';
 export { requirePermission } from './middleware';
+export { AuthCache } from './authCache';
+export { getAuthCache, resetAuthCache } from './apiKeys';

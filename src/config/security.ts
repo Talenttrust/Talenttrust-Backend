@@ -55,16 +55,15 @@ function parseAllowedOrigins(): string[] {
     if (origins.length > 0) {
         validateCorsAllowlist(origins);
     } else if (!isProduction) {
-        // Fail fast in non-production when CORS_ALLOWED_ORIGINS was explicitly set to empty:
-        // an empty allowlist blocks all browser cross-origin requests, which is almost certainly
-        // a misconfiguration in dev/staging. Production legitimately starts with deny-by-default.
-        if (hasAllowedOrigins) {
-            throw new Error(
-                '[CORS] CORS_ALLOWED_ORIGINS is set but empty in a non-production environment. ' +
-                'Provide at least one allowed origin or remove the variable to use the defaults.',
-            );
-        }
-        console.warn('[CORS] Allowlist is empty — all cross-origin requests from browsers will be rejected');
+        // Warn (do not throw) in non-production when the resolved allowlist is empty —
+        // whether CORS_ALLOWED_ORIGINS was explicitly set to an empty/whitespace value or
+        // omitted entirely. An empty allowlist blocks all browser cross-origin requests,
+        // which is almost certainly a misconfiguration in dev/staging, but it should not
+        // hard-crash the process. Production legitimately starts with deny-by-default.
+        console.warn(
+            '[CORS] Allowlist is empty — all cross-origin requests from browsers will be rejected. ' +
+            'Provide at least one allowed origin via CORS_ALLOWED_ORIGINS or remove the variable to use the defaults.',
+        );
     }
     
     return origins;

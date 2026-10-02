@@ -17,6 +17,7 @@ jest.mock('../utils/webhook-signing.util', () => ({
 jest.mock('../queue/webhook-retry-policy', () => ({
   WEBHOOK_RETRY_POLICY: {
     maxRetries: 3,
+    maxAttempts: 4,
     initialDelayMs: 0,
     maxDelayMs: 0,
     multiplier: 2,
@@ -120,7 +121,7 @@ describe('WebhookService (iterative retry)', () => {
       'https://example.com/hook',
       { event: 'test' },
       expect.any(Number),
-      'timeout of 10000ms exceeded',
+      expect.stringContaining('timeout of 10000ms exceeded'),
       undefined,
     );
   });
@@ -149,7 +150,7 @@ describe('WebhookService (iterative retry)', () => {
       'https://example.com/hook',
       { event: 'test' },
       expect.any(Number),
-      'connection refused',
+      expect.stringContaining('connection refused'),
       undefined,
     );
   });

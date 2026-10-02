@@ -45,7 +45,10 @@ function getConfigFromEnv(): RequestLimitsConfig {
       maxBodySize: env.MAX_REQUEST_BODY_SIZE ?? DEFAULT_CONFIG.maxBodySize,
       enforceJsonContentType: env.ENFORCE_JSON_CONTENT_TYPE ?? DEFAULT_CONFIG.enforceJsonContentType,
       allowedContentTypes: env.ALLOWED_CONTENT_TYPES ?? DEFAULT_CONFIG.allowedContentTypes,
-      excludePaths: env.REQUEST_LIMITS_EXCLUDE_PATHS ?? DEFAULT_CONFIG.excludePaths,
+      excludePaths: Array.from(new Set([
+        ...DEFAULT_CONFIG.excludePaths,
+        ...(env.REQUEST_LIMITS_EXCLUDE_PATHS ?? []),
+      ])),
       routeBodyLimits: env.ROUTE_BODY_LIMITS ?? DEFAULT_CONFIG.routeBodyLimits,
     };
   } catch (error) {

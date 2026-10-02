@@ -70,6 +70,10 @@ describe('Queue Configuration', () => {
       expect(queueConfig.defaultJobOptions.backoff.delay).toBe(2000);
       expect(queueConfig.defaultJobOptions.removeOnComplete).toBe(100);
       expect(queueConfig.defaultJobOptions.removeOnFail).toBe(1000);
+      expect(queueConfig.fairScheduling.maxWaitMs).toBe(300000);
+      expect(queueConfig.fairScheduling.rebalanceIntervalMs).toBe(5000);
+      expect(queueConfig.fairScheduling.weights.critical).toBe(4);
+      expect(queueConfig.fairScheduling.weights.low).toBe(1);
     });
 
     it('should parse environment variables on module load', () => {
@@ -109,6 +113,8 @@ describe('Queue Configuration', () => {
         QUEUE_BACKOFF_DELAY: 1000,
         QUEUE_REMOVE_ON_COMPLETE: true,
         QUEUE_REMOVE_ON_FAIL: 50,
+        QUEUE_FAIR_MAX_WAIT_MS: 300000,
+        QUEUE_FAIR_REBALANCE_INTERVAL_MS: 5000,
       });
     });
 
@@ -174,6 +180,28 @@ describe('Queue Configuration', () => {
           QUEUE_REMOVE_ON_COMPLETE: 'invalid_val',
         });
       }).toThrow(/QUEUE_REMOVE_ON_COMPLETE/);
+    });
+
+    it('should parse fair scheduling bounds from environment', () => {
+      const result = validateQueueConfig({
+        QUEUE_FAIR_MAX_WAIT_MS: '60000',
+        QUEUE_FAIR_REBALANCE_INTERVAL_MS: '1000',
+      });
+
+      expect(result.QUEUE_FAIR_MAX_WAIT_MS).toBe(60000);
+      expect(result.QUEUE_FAIR_REBALANCE_INTERVAL_MS).toBe(1000);
+    });
+
+    it('should throw on non-positive maximum wait', () => {
+      expect(() => {
+        validateQueueConfig({ QUEUE_FAIR_MAX_WAIT_MS: '0' });
+      }).toThrow(/QUEUE_FAIR_MAX_WAIT_MS/);
+    });
+
+    it('should throw on non-positive rebalance interval', () => {
+      expect(() => {
+        validateQueueConfig({ QUEUE_FAIR_REBALANCE_INTERVAL_MS: '-1' });
+      }).toThrow(/QUEUE_FAIR_REBALANCE_INTERVAL_MS/);
     });
 
     it('should not leak redis password in error message on validation failure', () => {

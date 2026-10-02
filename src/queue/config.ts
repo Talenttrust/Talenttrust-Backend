@@ -7,6 +7,13 @@
 
 import { ConnectionOptions } from 'bullmq';
 import { z } from 'zod';
+import { JobType } from './types';
+import { DEFAULT_FAIR_WEIGHTS, DEFAULT_MAX_WAIT_MS, FairSchedulerConfig } from './fair-scheduler';
+
+export const DEFAULT_JOB_TIMEOUT_MS = 30000;
+
+/** Default interval between fair-scheduler rebalance passes per queue. */
+export const DEFAULT_FAIR_REBALANCE_INTERVAL_MS = 5000;
 
 /**
  * Zod schema for validating queue tuning environment variables.
@@ -58,6 +65,25 @@ export const queueConfigSchema = z.object({
       return isNaN(parsed) ? val : parsed;
     })
     .pipe(z.union([z.number().int().nonnegative(), z.boolean()])),
+
+  /**
+   * Maximum wait bound for the weighted fair scheduler: a job waiting at least
+   * this long is promoted to the front of the queue unconditionally, so no
+   * priority stream can starve others indefinitely.
+   */
+  QUEUE_FAIR_MAX_WAIT_MS: z.string()
+    .default(String(DEFAULT_MAX_WAIT_MS))
+    .transform((val) => val === '' ? DEFAULT_MAX_WAIT_MS : parseInt(val, 10))
+    .pipe(z.number().int().positive("QUEUE_FAIR_MAX_WAIT_MS must be a positive integer").max(86400000, "QUEUE_FAIR_MAX_WAIT_MS cannot exceed 86400000")),
+
+  /**
+   * Interval at which the queue manager recomputes fair priorities for waiting
+   * jobs (weighted fairness plus max-wait promotion). Bounded to avoid hot loops.
+   */
+  QUEUE_FAIR_REBALANCE_INTERVAL_MS: z.string()
+    .default(String(DEFAULT_FAIR_REBALANCE_INTERVAL_MS))
+    .transform((val) => val === '' ? DEFAULT_FAIR_REBALANCE_INTERVAL_MS : parseInt(val, 10))
+    .pipe(z.number().int().positive("QUEUE_FAIR_REBALANCE_INTERVAL_MS must be a positive integer").max(3600000, "QUEUE_FAIR_REBALANCE_INTERVAL_MS cannot exceed 3600000")),
 });
 
 export type QueueEnvConfig = z.infer<typeof queueConfigSchema>;
@@ -65,6 +91,10 @@ export type QueueEnvConfig = z.infer<typeof queueConfigSchema>;
 export interface QueueConfig {
   redis: ConnectionOptions;
   concurrency: number;
+  jobTimeout: {
+    defaultMs: number;
+    perJobTypeMs: Partial<Record<JobType, number>>;
+  };
   defaultJobOptions: {
     attempts: number;
     backoff: {
@@ -74,6 +104,12 @@ export interface QueueConfig {
     removeOnComplete: number | boolean;
     removeOnFail: number | boolean;
   };
+  /**
+   * Weighted fair scheduling bounds. `weights` are compile-time constants
+   * (service share proportional to weight); `maxWaitMs` and the rebalance
+   * interval are operator-tunable via environment variables.
+   */
+  fairScheduling: FairSchedulerConfig & { rebalanceIntervalMs: number };
 }
 
 /**
@@ -127,6 +163,9 @@ export function getRedisConfig(): ConnectionOptions {
   };
 }
 
+/** Default per-job attempt timeout in milliseconds (30 seconds). */
+const DEFAULT_JOB_TIMEOUT_MS_INTERNAL = 30_000;
+
 function parsePositiveTimeout(value: string | undefined, fallback: number): number {
   if (value === undefined) {
     return fallback;
@@ -163,12 +202,16 @@ export function getJobTimeoutMs(jobType: JobType): number {
  */
 const defaultJobTimeoutMs = parsePositiveTimeout(
   process.env.QUEUE_JOB_TIMEOUT_MS,
-  DEFAULT_JOB_TIMEOUT_MS,
+  DEFAULT_JOB_TIMEOUT_MS_INTERNAL,
 );
 
 export const queueConfig: QueueConfig = {
   redis: getRedisConfig(),
   concurrency: parsed.QUEUE_CONCURRENCY,
+  jobTimeout: {
+    defaultMs: defaultJobTimeoutMs,
+    perJobTypeMs: loadJobTimeoutOverrides(defaultJobTimeoutMs),
+  },
   defaultJobOptions: {
     attempts: parsed.QUEUE_DEFAULT_ATTEMPTS,
     backoff: {
@@ -177,6 +220,11 @@ export const queueConfig: QueueConfig = {
     },
     removeOnComplete: parsed.QUEUE_REMOVE_ON_COMPLETE,
     removeOnFail: parsed.QUEUE_REMOVE_ON_FAIL,
+  },
+  fairScheduling: {
+    weights: DEFAULT_FAIR_WEIGHTS,
+    maxWaitMs: parsed.QUEUE_FAIR_MAX_WAIT_MS,
+    rebalanceIntervalMs: parsed.QUEUE_FAIR_REBALANCE_INTERVAL_MS,
   },
 };
 

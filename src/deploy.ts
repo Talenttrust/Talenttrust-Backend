@@ -44,12 +44,9 @@ export interface DeploymentState {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const readFileAsync = promisify(fs.readFile);
-const writeFileAsync = promisify(fs.writeFile);
-
 async function readState(): Promise<DeploymentState> {
   try {
-    const data = await readFileAsync(STATE_FILE, "utf8");
+    const data = await fs.promises.readFile(STATE_FILE, "utf8");
     return JSON.parse(data) as DeploymentState;
   } catch {
     return { activeColor: "blue", lastSwitch: Date.now() };
@@ -57,7 +54,7 @@ async function readState(): Promise<DeploymentState> {
 }
 
 async function writeState(state: DeploymentState): Promise<void> {
-  await writeFileAsync(STATE_FILE, JSON.stringify(state, null, 2));
+  await fs.promises.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
 }
 
 /**

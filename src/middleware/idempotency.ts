@@ -11,6 +11,8 @@ const IDEMPOTENCY_PAYLOAD_CONFLICT = 'idempotency_payload_conflict';
 interface IdempotencyMiddlewareOptions {
   store?: IdempotencyStore;
   inFlight?: Map<string, string>;
+  /** Opt-in per-route policy; failed writes can remain retryable. */
+  cacheResponse?: (res: Response) => boolean;
 }
 
 function requestIdFrom(res: Response): string {
@@ -122,12 +124,14 @@ export function createIdempotencyMiddleware(options: IdempotencyMiddlewareOption
     res.send = function sendWithIdempotencyCache(body: unknown): Response {
       const result = typeof body === 'string' ? JSON.parse(body) : body;
 
-      store.set({
-        key: idempotencyKey,
-        payloadHash,
-        result,
-        createdAt: new Date(),
-      });
+      if (options.cacheResponse?.(res) ?? true) {
+        store.set({
+          key: idempotencyKey,
+          payloadHash,
+          result,
+          createdAt: new Date(),
+        });
+      }
       inFlight.delete(idempotencyKey);
 
       return originalSend(body);

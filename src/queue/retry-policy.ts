@@ -94,6 +94,34 @@ export const DEFAULT_RETRY_POLICIES: Record<JobType, RetryPolicy> = {
     removeOnComplete: 100,
     removeOnFail: 100,
   },
+
+  // Read-only bounded comparison job. Retries are meaningful only when the
+  // chain head fetch fails (per-contract RPC failures are isolated inside the
+  // scan and do not fail the job). Exponential backoff with jitter avoids a
+  // thundering herd when an RPC outage affects every run.
+  [JobType.MILESTONE_DIVERGENCE_SCAN]: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+      multiplier: 2,
+      jitter: 0.2,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  },
+
+  [JobType.RAW_EVENT_RETENTION]: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+      multiplier: 2,
+      jitter: 0.2,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  },
 };
 
 /**
@@ -277,6 +305,14 @@ export function loadRetryPolicyOverrides(): RetryPolicyOverrides {
       });
       const { multiplier: _dropped, ...rest } = backoff;
       overrides[jobType].backoff = rest;
+    }
+
+    // Discard entries that ended up empty because every candidate value was
+    // invalid (NaN, non-positive, or out of the accepted range). A truthy but
+    // unparseable env var (e.g. `MULTIPLIER=not-a-number` or `MULTIPLIER=-2`)
+    // must not leave behind a phantom `{}` override for the job type.
+    if (overrides[jobType] && Object.keys(overrides[jobType]).length === 0) {
+      delete overrides[jobType];
     }
   });
 

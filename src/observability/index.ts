@@ -5,7 +5,13 @@ export {
   type HealthServiceLike,
   type RuntimeSignalProviders,
 } from './health-service';
-export { MetricsService, type MetricsServiceLike, type WebhookOutcome } from './metrics-service';
+export {
+  MetricsService,
+  type MetricsServiceLike,
+  type WebhookOutcome,
+  type MilestoneOperation,
+  type MilestoneOperationStatus,
+} from './metrics-service';
 export {
   readObservabilityConfig,
   type ObservabilityConfig,
@@ -16,4 +22,3 @@ export type {
   HealthReport,
   ServiceStatus,
 } from './types';
-

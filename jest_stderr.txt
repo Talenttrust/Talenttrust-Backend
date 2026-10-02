@@ -1,0 +1,21 @@
+FAIL src/webhookDelivery.test.ts (103.605 s)
+  ΓùÅ WebhookDeliveryService ΓÇ║ exponential backoff behavior ΓÇ║ caps delay at maxDelayMs
+
+    expect(received).toBeLessThanOrEqual(expected)
+
+    Expected: <= 600
+    Received:    605
+
+    [0m [90m 490 |[39m       [36mfor[39m ([36mlet[39m i [33m=[39m [35m1[39m[33m;[39m i [33m<[39m timings[33m.[39mlength[33m;[39m i[33m++[39m) {
+     [90m 491 |[39m         [36mconst[39m delay [33m=[39m timings[i] [33m-[39m timings[i [33m-[39m [35m1[39m][33m;[39m
+    [31m[1m>[22m[39m[90m 492 |[39m         expect(delay)[33m.[39mtoBeLessThanOrEqual(fastRetryConfig[33m.[39mmaxDelayMs [33m+[39m [35m100[39m)[33m;[39m [90m// +100 for jitter[39m
+     [90m     |[39m                       [31m[1m^[22m[39m
+     [90m 493 |[39m       }
+     [90m 494 |[39m     })[33m;[39m
+     [90m 495 |[39m   })[33m;[39m[0m
+
+      at Object.<anonymous> (src/webhookDelivery.test.ts:492:23)
+
+PASS src/audit/router.integration.test.ts (44.356 s)
+PASS src/audit/audit.test.ts (19.141 s)
+^C

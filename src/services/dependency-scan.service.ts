@@ -32,23 +32,18 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 /* istanbul ignore next */
 async function defaultNpmAuditRunner(): Promise<string> {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  try {
-    const result = await execFileAsync(npmCmd, ['audit', '--json', '--omit=dev'], {
-      cwd: process.cwd(),
+  return new Promise((resolve, reject) => {
+    execFile(npmCmd, ['audit', '--json', '--omit=dev'], { cwd: process.cwd() }, (err: any, stdout, stderr) => {
+      // npm audit exits non-zero when vulnerabilities exist; stdout is still valid JSON
+      if (stdout) {
+        resolve(stdout);
+      } else if (err && typeof err === 'object' && 'stdout' in err && typeof err.stdout === 'string') {
+        resolve(err.stdout);
+      } else {
+        reject(err || new Error('Failed to run npm audit'));
+      }
     });
-    return result.stdout;
-  } catch (err: unknown) {
-    // npm audit exits non-zero when vulnerabilities exist; stdout is still valid JSON
-    if (
-      err &&
-      typeof err === 'object' &&
-      'stdout' in err &&
-      typeof (err as { stdout: unknown }).stdout === 'string'
-    ) {
-      return (err as { stdout: string }).stdout;
-    }
-    throw new Error('Failed to run npm audit');
-  }
+  });
 }
 
 export class DependencyScanService {

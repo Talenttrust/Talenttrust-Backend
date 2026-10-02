@@ -17,6 +17,7 @@
 
 import { timingSafeEqual } from "crypto";
 import { NextFunction, Request, Response } from "express";
+import { extractBearerToken } from "../lib/authHelpers";
 
 /**
  * Express middleware that protects a route with a static bearer token.
@@ -39,13 +40,11 @@ export function metricsAuthMiddleware(
     return;
   }
 
-  const authHeader = req.headers["authorization"];
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  const provided = extractBearerToken(req);
+  if (!provided) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-
-  const provided = authHeader.slice(7); // strip "Bearer "
 
   // Constant-time comparison to prevent timing attacks.
   const configuredBuf = Buffer.from(configuredToken);

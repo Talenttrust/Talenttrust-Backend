@@ -11,6 +11,10 @@ export interface SmartContractEvent {
   idempotencyKey?: string;
   payload: any;
   timestamp: string;
+  /** On-chain network the event was observed on (retention class key). */
+  network?: string;
+  /** Ledger sequence the event was observed at (on-chain events). */
+  ledger?: number;
 }
 
 import { getDb } from '../db/database';
@@ -50,10 +54,21 @@ export class EventIndexerService {
     const deterministicKey = `${event.contractId}:${event.eventType}:${event.idempotencyKey ?? ''}`;
     const eventId = deterministicKey;
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO smart_contract_events (eventId, contractId, eventType, idempotencyKey, payload, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO smart_contract_events
+        (eventId, contractId, eventType, idempotencyKey, payload, timestamp, network, ledger, ingested_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insert.run(eventId, event.contractId, event.eventType, event.idempotencyKey ?? null, JSON.stringify(event.payload), event.timestamp);
+    insert.run(
+      eventId,
+      event.contractId,
+      event.eventType,
+      event.idempotencyKey ?? null,
+      JSON.stringify(event.payload),
+      event.timestamp,
+      event.network ?? null,
+      event.ledger ?? null,
+      new Date().toISOString(),
+    );
     return { status: 'indexed', eventId };
   }
 

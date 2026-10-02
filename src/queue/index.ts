@@ -16,7 +16,50 @@ export {
 	AddJobOptions,
 	AddJobResult,
 } from './types';
+export {
+	PriorityLevel,
+	DEFAULT_TENANT_ID,
+	DEFAULT_FAIR_WEIGHTS,
+	DEFAULT_MAX_WAIT_MS,
+	normalizePriority,
+	orderPendingJobs,
+	selectNext,
+	isOverdue,
+} from './fair-scheduler';
+export type {
+	FairSchedulerConfig,
+	PendingJob,
+	SchedulingDecision,
+	SchedulingDecisionKind,
+	FairOrdering,
+} from './fair-scheduler';
+export {
+	QUEUE_FAIR_METRIC_NAMES,
+	initializeQueueFairMetrics,
+	resetQueueFairMetrics,
+	recordPriorityAssigned,
+	recordSchedulingDecision,
+	recordAgedBoost,
+	setOverdueWaiting,
+} from './queue-metrics';
 export { queueConfig, getRedisConfig } from './config';
+export {
+	TerminalJobError,
+	InvalidJobPayloadError,
+	StaleJobReferenceError,
+	classifyFailure,
+	terminalKindOf,
+} from './queue-errors';
+export {
+	JobQuarantineEntry,
+	JobQuarantineQuery,
+	QuarantineReplayResult,
+	JobQuarantineConfig,
+	getJobQuarantineStorage,
+	clearJobQuarantineInstance,
+	initializeJobQuarantineMetrics,
+	resetJobQuarantineMetrics,
+} from './job-quarantine';
 export {
 	WebhookDLQEntry,
 	WebhookDLQQuery,

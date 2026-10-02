@@ -173,6 +173,36 @@ Common status/code mappings:
 
 Use the returned `requestId` when contacting support; it ties the response to redacted server-side logs without exposing sensitive internals.
 
+### Request Validation Middleware
+
+All request validation is consolidated in `src/middleware/validate.middleware.ts`.
+
+| Middleware | Purpose | Import Path |
+|---|---|---|
+| `validateSchema(schema)` | Validates `body`, `query`, and `params` together | `./validate.middleware` |
+| `validateRequest(schema)` | Validates `req.body` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateParams(schema)` | Validates `req.params` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+| `validateQuery(schema)` | Validates `req.query` only | `./validate.middleware` (canonical) / `./validation` (deprecated shim) |
+
+The deprecated paths `./validation` and `./requestValidation` are thin re-exports and will be removed in a future version. Update new imports to use `./validate.middleware` directly.
+
+**Validation error shape (400):**
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Request validation failed",
+    "requestId": "unknown",
+    "details": [
+      { "path": ["fieldName"], "message": "Expected string, received number", "code": "invalid_type" }
+    ]
+  }
+}
+```
+
+The `details` array uses the `ValidationIssue` shape from `src/errors/appError.ts` (`path: string[]`, `message: string`, `code: string`).
+
 ## Configuration API
 ### Get Application Configuration
 **GET** `/api/config`
@@ -222,6 +252,18 @@ Promotes the green instance to active status.
 **POST** `/api/v1/admin/deploy/rollback`
 
 Reverts traffic to the blue instance. Idempotent if already blue (returns `200 OK`).
+
+## Webhooks API
+
+The Webhooks API provides endpoints for managing webhook subscriptions, recording delivery metrics, and replaying failed deliveries. See [webhooks.md](webhooks.md) for comprehensive documentation covering all webhook subscription management, signature verification, and admin operations.
+
+### Quick Links
+
+- **Subscription Management** — Create, list, retrieve, update, and delete webhook subscriptions
+- **Metrics Recording** — Record webhook delivery outcomes and DLQ depth
+- **Admin Operations** — Replay dead-letter queue entries with controlled concurrency
+
+For full endpoint reference, error codes, request/response shapes, and signature verification examples, see [webhooks.md](webhooks.md).
 
 ## Contracts API
 
@@ -615,6 +657,8 @@ Soft deletes a metadata record. The record is marked as deleted but retained in 
 
 ## Reputation API
 Manage freelancer reviews and ratings. Registered dynamically in the OpenAPI registry. All reputation routes require a valid JWT.
+
+**Rate limit:** Reputation routes use a dedicated per-client bucket keyed by `X-API-Key` when present, otherwise client IP. Configure with `RL_REPUTATION_MAX` and `RL_REPUTATION_WINDOW_MS`; exceeded requests return `429` with `Retry-After`.
 
 ### Get Reputation Profile
 **GET** `/api/v1/reputation/:id`

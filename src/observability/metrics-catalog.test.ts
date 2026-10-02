@@ -68,6 +68,8 @@ describe('Documentation round-trip verification', () => {
     expect(labels).toHaveProperty('method');
     expect(labels).toHaveProperty('route');
     expect(labels).toHaveProperty('status_code');
+    expect(labels).toHaveProperty('error_cause');
+    expect(labels.error_cause).toBe('none');
   });
 });
 
@@ -149,6 +151,10 @@ describe('evaluateObjectives - SLO compliance', () => {
       const histogram = (service as any).httpRequestDurationSeconds;
       histogram.observe(
         { method: 'GET', route: '/test', status_code: '200' },
+      // Mock high latency by manually observing duration
+      const histogram = (service as any).httpRequestDurationSeconds;
+      histogram.observe(
+        { method: 'GET', route: '/test', status_code: '200', error_cause: 'none' },
         0.3, // 300ms - exceeds healthCheck p95 target of 50ms
       );
 

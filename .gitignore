@@ -9,7 +9,22 @@ coverage/
 .idea
 test_output.txt
 talenttrust.db
+talenttrust.db-shm
+talenttrust.db-wal
 *.tgz
 npm-debug.log*
 yarn-error.log*
 .pnpm-store/
+
+# Runtime SQLite artifacts
+data/*.db
+data/*.db-wal
+data/*.db-shm
+.deployment-state.json
+*.db-shm
+*.db-wal
+.opencode
+
+# Rust / Soroban contract build artifacts
+contracts/target/
+contracts/*/test_snapshots/

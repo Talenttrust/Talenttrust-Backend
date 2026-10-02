@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, afterEach, afterAll } from '@jest/globals';
 import { loadConfig } from '../appConfiguration';
 import {
   getEnv,
@@ -233,6 +234,10 @@ describe('loadConfig (appConfiguration)', () => {
     process.env = savedEnv;
   });
 
+  beforeEach(() => {
+    clearConfigEnvVars();
+  });
+
   it('applies default port and upstream when env is minimal', () => {
     clearConfigEnvVars();
     delete process.env.PORT;
@@ -286,6 +291,10 @@ describe('loadConfig (appConfiguration)', () => {
 
 describe('loadConfig — circuit breaker config', () => {
   const savedEnv = { ...process.env };
+
+  beforeEach(() => {
+    clearConfigEnvVars();
+  });
 
   afterEach(() => {
     delete process.env.CB_FAILURE_THRESHOLD;

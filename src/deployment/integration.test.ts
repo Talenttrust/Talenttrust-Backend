@@ -59,6 +59,9 @@ describe('Deployment Integration Tests', () => {
     it('should complete full production deployment workflow', async () => {
       // Setup environment
       process.env.NODE_ENV = 'production';
+      // Production rejects SSRF_ALLOW_PRIVATE_HOSTS outright (test setup enables it).
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.PORT = '3000';
       process.env.API_BASE_URL = 'https://api.example.com';
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
@@ -172,6 +175,8 @@ describe('Deployment Integration Tests', () => {
   describe('Configuration Validation Scenarios', () => {
     it('should reject production config with testnet', async () => {
       process.env.NODE_ENV = 'production';
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.API_BASE_URL = 'https://api.example.com';
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
 
@@ -186,6 +191,8 @@ describe('Deployment Integration Tests', () => {
 
     it('should reject production config with localhost CORS', async () => {
       process.env.NODE_ENV = 'production';
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.API_BASE_URL = 'https://api.example.com';
       process.env.CORS_ALLOWED_ORIGINS = 'http://localhost:3000';
 
@@ -198,6 +205,8 @@ describe('Deployment Integration Tests', () => {
 
     it('should warn about debug mode in production', async () => {
       process.env.NODE_ENV = 'production';
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.API_BASE_URL = 'https://api.example.com';
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       process.env.DEBUG = 'true';
@@ -246,6 +255,8 @@ describe('Deployment Integration Tests', () => {
 
       // Step 5: Validate production
       process.env.NODE_ENV = 'production';
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
       const prodConfig = loadEnvironmentConfig();
       const prodValidation = await validateDeploymentReadiness(prodConfig);
@@ -257,6 +268,8 @@ describe('Deployment Integration Tests', () => {
     it('should handle failed deployment and rollback', async () => {
       // Simulate failed production deployment
       process.env.NODE_ENV = 'production';
+      delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
+      process.env.JWT_SECRET = process.env.JWT_SECRET || 'abcdefghijklmnopqrstuvwxyz123456';
       process.env.API_BASE_URL = 'invalid-url';
       process.env.CORS_ALLOWED_ORIGINS = 'https://app.example.com';
 

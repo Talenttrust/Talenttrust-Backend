@@ -177,23 +177,34 @@ export function createRateLimiter(config: RateLimiterConfig = {}) {
     }
 
     // ── 2. Sliding-window counter ────────────────────────────────────────
+    // Buckets are aligned to `windowMs`-wide epoch slots. On entering a new
+    // slot, the prior slot's count is carried forward (only when adjacent)
+    // and weighted by how much of it still overlaps the trailing `windowMs`
+    // look-back from `now`. This bounds bursts across a window boundary
+    // without storing every request timestamp.
+    const bucketStart = now - (now % windowMs);
     const entry = store.get(rawKey) ?? {
       count: 0,
-      windowStart: now,
+      prevCount: 0,
+      windowStart: bucketStart,
       blocked: false,
       blockedUntil: 0,
     };
 
-    // Roll the window if it has elapsed
-    if (now - entry.windowStart > windowMs) {
+    if (entry.windowStart !== bucketStart) {
+      entry.prevCount = bucketStart - entry.windowStart === windowMs ? entry.count : 0;
       entry.count = 0;
-      entry.windowStart = now;
+      entry.windowStart = bucketStart;
     }
 
     entry.count += 1;
     store.set(rawKey, entry);
 
-    const remaining = Math.max(0, maxRequests - entry.count);
+    const elapsed = now - entry.windowStart;
+    const weight = Math.max(0, (windowMs - elapsed) / windowMs);
+    const slidingCount = entry.count + (entry.prevCount ?? 0) * weight;
+
+    const remaining = Math.max(0, maxRequests - Math.ceil(slidingCount));
     const resetSec = Math.ceil((entry.windowStart + windowMs - now) / 1000);
 
     if (sendHeaders) {
@@ -203,7 +214,7 @@ export function createRateLimiter(config: RateLimiterConfig = {}) {
     }
 
     // ── 3. Limit exceeded → abuse guard evaluation ───────────────────────
-    if (entry.count > maxRequests) {
+    if (slidingCount > maxRequests) {
       const hashedKey = RateLimitStore.hashKey(rawKey);
       const abuse = abuseMap.get(hashedKey) ?? {
         violations: 0,

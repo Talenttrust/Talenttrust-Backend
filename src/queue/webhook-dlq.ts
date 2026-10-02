@@ -337,6 +337,11 @@ let instance: WebhookDLQStorage | null = null;
 export { WebhookDLQStorage };
 
 export function getWebhookDLQStorage(dbPath?: string): WebhookDLQStorage {
+  // Under test, hand out an ephemeral in-memory store per call so unit tests
+  // are isolated from one another and never read/write the on-disk DLQ file.
+  if (process.env.NODE_ENV === 'test') {
+    return new WebhookDLQStorage(dbPath ?? ':memory:');
+  }
   if (!instance) {
     instance = new WebhookDLQStorage(dbPath);
   }

@@ -19,6 +19,9 @@ describe('Environment Configuration', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    // The global test setup enables SSRF_ALLOW_PRIVATE_HOSTS; the SSRF-guard
+    // assertions here verify the fail-closed default, so clear the bypass flag.
+    delete process.env.SSRF_ALLOW_PRIVATE_HOSTS;
   });
 
   afterAll(() => {
@@ -66,6 +69,8 @@ describe('Environment Configuration', () => {
 
     it('should load production configuration', () => {
       process.env.NODE_ENV = 'production';
+      // Production requires a JWT_SECRET (see the JWT_SECRET validation suite).
+      process.env.JWT_SECRET = 'a'.repeat(32);
       const config = loadEnvironmentConfig();
 
       expect(config.environment).toBe('production');

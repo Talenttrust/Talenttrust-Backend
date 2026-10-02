@@ -1,14 +1,20 @@
 /**
  * Jobs API Integration Tests
- * 
+ *
  * Tests for the job enqueueing and status endpoints.
+ *
+ * Concurrency hardening coverage:
+ * - Racing requests with the same dedupeKey must yield exactly one creation.
+ * - Repeated (idempotent) retries must not create duplicate work.
+ * - Timing boundaries (delay 0, negative delay, expired dedupe window) are deterministic.
+ * - Authorization/validation invariants are enforced before mutating state.
  */
 
 import request from 'supertest';
 import express, { Express } from 'express';
 import { QueueManager, JobType, JobPayload, AddJobOptions } from '../queue';
 
-describe('Jobs API', () => {
+describe('Jobs API Integration Tests', () => {
   let app: Express;
   let queueManager: QueueManager;
 
@@ -128,6 +134,17 @@ describe('Jobs API', () => {
       expect(response.body.error).toContain('required');
     });
 
+    it('should reject missing payload', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('required');
+    });
+
     it('should reject invalid job type', async () => {
       const response = await request(app)
         .post('/api/v1/jobs')
@@ -138,6 +155,190 @@ describe('Jobs API', () => {
 
       expect(response.status).toBe(400);
       expect(response.body.error).toContain('Invalid job type');
+    });
+
+    it('should reject missing payload', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('required');
+    });
+
+    it('should reject null payload', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload: null });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('required');
+    });
+
+    it('should reject empty string job type', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: '', payload: { test: 'data' } });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('required');
+    });
+
+    it('should reject non-string job type', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: 123, payload: { test: 'data' } });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Invalid job type');
+    });
+
+    it('should reject array payload', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload: [1, 2, 3] });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('payload');
+    });
+
+    it('should reject primitive payload', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload: 'not-an-object' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('payload');
+    });
+
+    it('should reject negative priority', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { priority: -1 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('priority');
+    });
+
+    it('should reject non-integer priority', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { priority: 1.5 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('priority');
+    });
+
+    it('should reject negative delay', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { delay: -100 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('delay');
+    });
+
+    it('should reject non-integer delay', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { delay: 10.5 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('delay');
+    });
+
+    it('should reject empty dedupeKey', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { dedupeKey: '' },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('dedupeKey');
+    });
+
+    it('should reject non-string dedupeKey', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { dedupeKey: 42 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('dedupeKey');
+    });
+
+    it('should reject non-object options', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: 'not-an-object',
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('options');
+    });
+
+    it('should accept boundary priority of 0', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { priority: 0 },
+        });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('should accept boundary delay of 0', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'a@b.com', subject: 's', body: 'b' },
+          options: { delay: 0 },
+        });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('should treat concurrent duplicate dedupeKey submissions deterministically', async () => {
+      const opts = { dedupeKey: 'api-dedup-concurrent', delay: 5000 };
+      const payload = { to: 'c@example.com', subject: 'C', body: 'c' };
+
+      const [r1, r2] = await Promise.all([
+        request(app).post('/api/v1/jobs').send({ type: JobType.EMAIL_NOTIFICATION, payload, options: opts }),
+        request(app).post('/api/v1/jobs').send({ type: JobType.EMAIL_NOTIFICATION, payload, options: opts }),
+      ]);
+
+      const statuses = [r1.status, r2.status].sort();
+      expect(statuses).toEqual([200, 201]);
+      expect(r1.body.jobId).toBe('api-dedup-concurrent');
+      expect(r2.body.jobId).toBe('api-dedup-concurrent');
     });
 
     it('should enqueue job with priority', async () => {
@@ -231,6 +432,73 @@ describe('Jobs API', () => {
       expect(response.status).toBe(201);
       expect(response.body.deduplicated).toBe(false);
     });
+
+    it('should not create duplicate jobs under concurrent dedupe enqueues', async () => {
+      const opts = { dedupeKey: 'api-concurrent-001', delay: 5000 };
+      const payload = { to: 'concurrent@example.com', subject: 'Concurrent', body: 'body' };
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }).map(() =>
+          request(app)
+            .post('/api/v1/jobs')
+            .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: opts }),
+        ),
+      );
+
+      const created = results.filter((r) => r.status === 201);
+      const deduped = results.filter((r) => r.status === 200);
+
+      expect(created.length).toBe(1);
+      expect(deduped.length).toBe(4);
+      for (const r of results) {
+        expect(r.body.jobId).toBe('api-concurrent-001');
+      }
+    });
+
+    it('should allow re-enqueue after dedupe key expires', async () => {
+      const opts = { dedupeKey: 'api-expire-001', delay: 50 };
+      const payload = { to: 'expire@example.com', subject: 'Expire', body: 'body' };
+
+      const first = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: opts });
+      expect(first.status).toBe(201);
+
+      // Wait for the dedupe window to elapse and the job to finish.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const second = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: opts });
+
+      expect(second.status).toBe(201);
+      expect(second.body.deduplicated).toBe(false);
+    });
+
+    it('should reject invalid dedupeKey type', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'invalid@example.com', subject: 'Invalid', body: 'body' },
+          options: { dedupeKey: 123 as unknown as string },
+        });
+
+      expect(response.status).toBe(500);
+      expect(response.body.error).toContain('Failed to enqueue job');
+    });
+
+    it('should reject negative delay', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'neg@example.com', subject: 'Neg', body: 'body' },
+          options: { delay: -1 },
+        });
+
+      expect(response.status).toBe(500);
+    });
   });
 
   describe('GET /api/v1/jobs/:type/:jobId', () => {
@@ -274,6 +542,137 @@ describe('Jobs API', () => {
 
       expect(response.status).toBe(400);
       expect(response.body.error).toContain('Invalid job type');
+    });
+
+    it('should reject empty jobId', async () => {
+      const response = await request(app)
+        .get(`/api/v1/jobs/${JobType.EMAIL_NOTIFICATION}/`);
+
+      expect(response.status).toBe(404);
+    });
+
+    it('should reject jobId with path traversal characters', async () => {
+      const response = await request(app)
+        .get(`/api/v1/jobs/${JobType.EMAIL_NOTIFICATION}/..%2F..%2Fetc%2Fpasswd`);
+
+      expect([400, 404]).toContain(response.status);
+    });
+
+    it('should reject overly long jobId', async () => {
+      const longId = 'a'.repeat(512);
+      const response = await request(app)
+        .get(`/api/v1/jobs/${JobType.EMAIL_NOTIFICATION}/${longId}`);
+
+      expect([400, 404]).toContain(response.status);
+    });
+  });
+
+  describe('concurrency hardening', () => {
+    it('should create exactly one job for concurrent requests with the same dedupeKey', async () => {
+      const dedupeKey = 'race-dedup-001';
+      const payload = { to: 'race@example.com', subject: 'Race', body: 'body' };
+      const concurrency = 10;
+
+      const responses = await Promise.all(
+        Array.from({ length: concurrency }, () =>
+          request(app)
+            .post('/api/v1/jobs')
+            .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: { dedupeKey, delay: 5000 } }),
+        ),
+      );
+
+      const created = responses.filter((r) => r.status === 201);
+      const deduplicated = responses.filter((r) => r.status === 200);
+
+      expect(created.length).toBe(1);
+      expect(deduplicated.length).toBe(1);
+      expect(created[0].body.jobId).toBe(dedupeKey);
+      expect(deduplicated[0].body.jobId).toBe(dedupeKey);
+      expect(deduplicated[0].body.deduplicated).toBe(true);
+    });
+
+    it('should not create duplicate work on idempotent retries', async () => {
+      const dedupeKey = 'retry-dedup-001';
+      const payload = { to: 'retry@example.com', subject: 'Retry', body: 'body' };
+      const options = { dedupeKey, delay: 5000 };
+
+      const first = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload, options });
+      expect(first.status).toBe(201);
+
+      for (let i = 0; i < 5; i++) {
+        const retry = await request(app)
+          .post('/api/v1/jobs')
+          .send({ type: JobType.EMAIL_NOTIFICATION, payload, options });
+        expect(retry.status).toBe(200);
+        expect(retry.body.deduplicated).toBe(true);
+        expect(retry.body.jobId).toBe(dedupeKey);
+      }
+    });
+
+    it('should treat zero delay as a non-delayed job and remain deterministic', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'zero@example.com', subject: 'Zero', body: 'body' },
+          options: { delay: 0 },
+        });
+
+      expect(response.status).toBe(201);
+      expect(response.body).toHaveProperty('jobId');
+    });
+
+    it('should reject negative delay without mutating queue state', async () => {
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'negative@example.com', subject: 'Neg', body: 'body' },
+          options: { delay: -1 },
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('delay');
+    });
+
+    it('should allow a dedupeKey to be reused after the dedupe window expires', async () => {
+      const dedupeKey = 'window-dedup-001';
+      const payload = { to: 'window@example.com', subject: 'Window', body: 'body' };
+
+      const first = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: { dedupeKey, delay: 50 } });
+      expect(first.status).toBe(201);
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const second = await request(app)
+        .post('/api/v1/jobs')
+        .send({ type: JobType.EMAIL_NOTIFICATION, payload, options: { dedupeKey, delay: 50 } });
+
+      expect(second.status).toBe(201);
+      expect(second.body.deduplicated).toBe(false);
+    });
+
+    it('should not leak internal error details when enqueuing fails', async () => {
+      const spy = jest.spyOn(queueManager, 'addJob').mockImplementationOnce(async () => {
+        throw new Error('internal secret detail');
+      });
+
+      const response = await request(app)
+        .post('/api/v1/jobs')
+        .send({
+          type: JobType.EMAIL_NOTIFICATION,
+          payload: { to: 'fail@example.com', subject: 'Fail', body: 'body' },
+        });
+
+      expect(response.status).toBe(500);
+      expect(response.body.error).toContain('Failed to enqueue job');
+      expect(response.body.error).not.toContain('internal secret detail');
+
+      spy.mockRestore();
     });
   });
 });

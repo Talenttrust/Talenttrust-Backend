@@ -48,6 +48,7 @@ Defined in: `src/config/env.schema.ts`, `src/config/environment.ts`
 | `PORT`             | No       | `3001`                    | HTTP port the Express server listens on. Must be 1–65535.                                                                                                       |
 | `NODE_ENV`         | No       | `development`             | Runtime environment. Accepted values: `development`, `staging`, `production`, `test`. Controls security policies, log verbosity, and Stellar network selection. |
 | `API_BASE_URL`     | No       | `http://localhost:{PORT}` | Public base URL of this API. Must be a valid HTTPS URL in staging/production. SSRF-protected — cannot point to internal addresses.                              |
+| `SSRF_ALLOW_PRIVATE_HOSTS` | No | `false`                 | Explicit, default-off SSRF bypass for private/loopback hosts. Honoured only when `NODE_ENV` is `development`, `test`, or `staging`. **Rejected outright in production** (config validation fails). Unset/misspelled `NODE_ENV` cannot enable the bypass. |
 | `DEBUG`            | No       | `false`                   | Set to `true` to enable verbose debug logging. Must be `false` in production.                                                                                   |
 | `MAX_REQUEST_SIZE` | No       | `10mb`                    | Maximum request body size accepted by the Express body parser (e.g. `10mb`, `1mb`).                                                                             |
 

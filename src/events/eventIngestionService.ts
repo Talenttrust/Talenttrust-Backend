@@ -1,5 +1,7 @@
 import { EventAuditService } from '../repository/eventAuditRepository';
 import { ContractEvent } from './types';
+import { EnvelopeValidationOptions, isRecord, validateEventEnvelopePreamble } from '../shared/eventEnvelopeValidation';
+import { getContext } from '../context';
 
 export interface EventIngestionConfig {
   enableStrictValidation: boolean;
@@ -20,28 +22,27 @@ export interface EventValidationResult {
 
 export interface EventIngestionResult {
   deduplicationKey?: string;
-  status: 'accepted' | 'duplicate' | 'rejected';
+  status: 'accepted' | 'duplicate' | 'rejected' | 'held';
   reason?: string;
   processedAt: Date;
   code?: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function toTimestampNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim().length > 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   }
-
   return null;
 }
+
+const INGESTION_PREAMBLE_OPTIONS = {
+  rootErrorMessage: 'Event must be a JSON object.',
+  messageSuffix: '.',
+  timestampRule: 'numeric',
+  abortEarly: false,
+} satisfies EnvelopeValidationOptions;
 
 export class EventIngestionService {
   constructor(
@@ -63,6 +64,11 @@ export class EventIngestionService {
       };
     }
 
+    if (correlationId === undefined) {
+      const ctx = getContext()?.correlationId;
+      correlationId = typeof ctx === 'string' ? ctx : undefined;
+    }
+
     try {
       const response = await this.auditService.processEvent(event, contractType, correlationId);
 
@@ -74,7 +80,7 @@ export class EventIngestionService {
         return {
           deduplicationKey: response.deduplicationKey,
           status: 'rejected',
-          reason: 'Payload integrity check failed: event payload does not match previously processed event.',
+          reason: 'Payload integrity check failed',
           processedAt: response.processedAt,
           code: response.code,
         };
@@ -112,55 +118,30 @@ export class EventIngestionService {
 
   public validateEvent(event: unknown, contractType: string): EventValidationResult {
     const errors: EventValidationError[] = [];
-
-    if (!isRecord(event)) {
-      return {
-        isValid: false,
-        errors: [{ field: 'event', message: 'Event must be a JSON object.' }],
-      };
+    const preambleErrors = validateEventEnvelopePreamble(event, INGESTION_PREAMBLE_OPTIONS);
+    for (const err of preambleErrors) {
+      errors.push({ field: err.field, message: err.message });
     }
 
-    const { contractId, eventId, sequence, timestamp, payload } = event;
+    if (isRecord(event)) {
+      const timestampNumber = toTimestampNumber(event.timestamp);
+      if (
+        timestampNumber !== null &&
+        !preambleErrors.some((e) => e.field === 'timestamp') &&
+        Date.now() - timestampNumber > this.config.maxEventAgeMs
+      ) {
+        errors.push({ field: 'timestamp', message: 'Event too old.' });
+      }
 
-    if (typeof contractId !== 'string' || contractId.trim().length === 0) {
-      errors.push({ field: 'contractId', message: 'contractId is required.' });
+      if (this.config.enableStrictValidation) {
+        errors.push(...this.validateContractSpecificPayload(contractType, event.payload));
+      }
     }
 
-    if (typeof eventId !== 'string' || eventId.trim().length === 0) {
-      errors.push({ field: 'eventId', message: 'eventId is required.' });
-    }
-
-    if (typeof sequence !== 'number' || !Number.isInteger(sequence) || sequence < 0) {
-      errors.push({ field: 'sequence', message: 'sequence must be a non-negative integer.' });
-    }
-
-    const timestampNumber = toTimestampNumber(timestamp);
-    if (timestampNumber === null) {
-      errors.push({ field: 'timestamp', message: 'timestamp must be a valid epoch number or numeric string.' });
-    } else if (Date.now() - timestampNumber > this.config.maxEventAgeMs) {
-      errors.push({ field: 'timestamp', message: 'Event too old.' });
-    }
-
-    if (!isRecord(payload)) {
-      errors.push({ field: 'payload', message: 'payload must be an object.' });
-    }
-
-    if (this.config.enableStrictValidation) {
-      errors.push(...this.validateContractSpecificPayload(contractType, payload));
-    }
-
-    return {
-      isValid: errors.length === 0,
-      errors,
-    };
+    return { isValid: errors.length === 0, errors };
   }
 
-  public async getStatistics(): Promise<{
-    total: number;
-    accepted: number;
-    rejected: number;
-    duplicates: number;
-  }> {
+  public async getStatistics(): Promise<{ total: number; accepted: number; rejected: number; duplicates: number }> {
     return this.auditService.getStatistics();
   }
 
@@ -168,14 +149,8 @@ export class EventIngestionService {
     return this.auditService.getEventHistory(contractId);
   }
 
-  private validateContractSpecificPayload(
-    contractType: string,
-    payload: unknown,
-  ): EventValidationError[] {
-    if (!isRecord(payload)) {
-      return [];
-    }
-
+  private validateContractSpecificPayload(contractType: string, payload: unknown): EventValidationError[] {
+    if (!isRecord(payload)) return [];
     if (contractType === 'talent_contract') {
       const errors: EventValidationError[] = [];
       if (typeof payload.talentId !== 'string' || payload.talentId.trim().length === 0) {
@@ -186,7 +161,6 @@ export class EventIngestionService {
       }
       return errors;
     }
-
     return [];
   }
 }

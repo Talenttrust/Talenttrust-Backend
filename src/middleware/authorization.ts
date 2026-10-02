@@ -45,6 +45,8 @@ import jwt from "jsonwebtoken";
 import { isAuthorized, isValidRole } from "../lib/authorization";
 import type { Action, User, Resource, Role, AuthenticatedRequest } from "../lib/types";
 import { JWT_VERIFY_OPTIONS } from "../auth/jwtConfig";
+import { extractBearerToken, sendUnauthorized, sendForbidden } from "../lib/authHelpers";
+import { sharedTokenCache } from "../auth/tokenCache";
 
 // ─── JWT configuration ────────────────────────────────────────────────────────
 
@@ -52,41 +54,6 @@ import { JWT_VERIFY_OPTIONS } from "../auth/jwtConfig";
 // making requests without module-load-order issues.
 const getJwtSecret = () => process.env.JWT_SECRET ?? "";
 
-/**
- * Shape of the decoded JWT payload expected by this platform.
- * `sub` carries the user id (standard JWT claim).
- */
-interface JwtPayload {
-  sub:   string;
-  email: string;
-  role:  unknown; // validated against ALL_ROLES before use
-  iat?:  number;
-  exp?:  number;
-}
-
-// ─── Error response helpers ───────────────────────────────────────────────────
-
-function unauthorized(res: Response, message = "Unauthorized"): void {
-  const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(401).json({
-    error: {
-      code: 'unauthorized',
-      message,
-      requestId,
-    },
-  });
-}
-
-function forbidden(res: Response, message = "Forbidden"): void {
-  const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(403).json({
-    error: {
-      code: 'forbidden',
-      message,
-      requestId,
-    },
-  });
-}
 
 // ─── requireAuth ─────────────────────────────────────────────────────────────
 
@@ -101,6 +68,11 @@ function forbidden(res: Response, message = "Forbidden"): void {
  *  - Required claims: `sub` (user id), `email`, and `role`.
  *  - `role` is validated against the platform allowlist (admin, auditor, client, freelancer).
  *  - `alg: none` and other algorithms are rejected before signature verification.
+ *  - Results are memoized via `sharedTokenCache` so that concurrent requests
+ *    bearing the same token trigger at most one `jwt.verify()` call per TTL
+ *    window. In-flight coalescing ensures that N simultaneous requests for the
+ *    same token complete as soon as the first verification resolves — no
+ *    duplicate CPU work is performed.
  *
  * Failure cases (all → HTTP 401):
  *  - Missing or malformed `Authorization` header
@@ -117,49 +89,47 @@ export function requireAuth(
   res: Response,
   next: NextFunction
 ): void {
-  const authHeader = req.headers.authorization;
+  const token = extractBearerToken(req);
 
-  if (!authHeader?.startsWith("Bearer ")) {
-    unauthorized(res, "Missing or malformed Authorization header.");
+  if (!token) {
+    sendUnauthorized(res, "Missing or malformed Authorization header.");
     return;
   }
 
-  const token = authHeader.slice(7); // strip "Bearer "
+  // Use the shared token cache for memoized, coalesced JWT verification.
+  // The cache deduplicates concurrent requests for the same token so that
+  // only one jwt.verify() call is in flight at any time per distinct token.
+  sharedTokenCache
+    .verify(token, getJwtSecret(), JWT_VERIFY_OPTIONS)
+    .then((decoded) => {
+      // Guard required claims — a well-formed token always carries these.
+      if (!decoded.sub || !decoded.email) {
+        sendUnauthorized(res, "Token is missing required claims.");
+        return;
+      }
 
-  try {
-    // jwt.verify throws for any invalid token (bad signature, expired,
-    // wrong algorithm, etc.). Passing JWT_VERIFY_OPTIONS pins the
-    // accepted signature algorithms to JWT_ALLOWED_ALGORITHMS so that
-    // alg: none and HS/RS confusion attempts cannot succeed.
-    const decoded = jwt.verify(token, getJwtSecret(), JWT_VERIFY_OPTIONS) as JwtPayload;
+      // Re-validate the role claim against the platform allowlist.
+      if (!isValidRole(decoded.role)) {
+        sendUnauthorized(res, "Token carries an unrecognised role.");
+        return;
+      }
 
-    // Guard required claims — a well-formed token always carries these.
-    if (!decoded.sub || !decoded.email) {
-      unauthorized(res, "Token is missing required claims.");
-      return;
-    }
+      req.user = {
+        id:    decoded.sub,
+        email: decoded.email,
+        role:  decoded.role,
+      } satisfies User;
 
-    // Re-validate the role claim against the platform allowlist.
-    if (!isValidRole(decoded.role)) {
-      unauthorized(res, "Token carries an unrecognised role.");
-      return;
-    }
-
-    req.user = {
-      id:    decoded.sub,
-      email: decoded.email,
-      role:  decoded.role,
-    } satisfies User;
-
-    next();
-  } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) {
-      unauthorized(res, "Token has expired.");
-      return;
-    }
-    // Covers JsonWebTokenError (bad signature, malformed) and NotBeforeError.
-    unauthorized(res, "Invalid token.");
-  }
+      next();
+    })
+    .catch((err: unknown) => {
+      if (err instanceof jwt.TokenExpiredError) {
+        sendUnauthorized(res, "Token has expired.");
+        return;
+      }
+      // Covers JsonWebTokenError (bad signature, malformed) and NotBeforeError.
+      sendUnauthorized(res, "Invalid token.");
+    });
 }
 
 // ─── requireRole ─────────────────────────────────────────────────────────────
@@ -183,12 +153,12 @@ export function requireRole(...allowedRoles: Role[]) {
     next: NextFunction
   ): void {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
     if (!allowedRoles.includes(req.user.role)) {
-      forbidden(res, "You do not have permission to access this resource.");
+      sendForbidden(res, "You do not have permission to access this resource.");
       return;
     }
 
@@ -239,7 +209,7 @@ export function requirePermission(
     next: NextFunction
   ): Promise<void> {
     if (!req.user) {
-      unauthorized(res, "Authentication required.");
+      sendUnauthorized(res, "Authentication required.");
       return;
     }
 
@@ -280,7 +250,7 @@ export function requirePermission(
           action,
           resourceOwnerId,
         }));
-        forbidden(res, "You do not have permission to perform this action.");
+        sendForbidden(res, "You do not have permission to perform this action.");
         return;
       }
 

@@ -9,6 +9,7 @@ export interface SuccessEnvelope<T> {
   data: T;
   meta?: Record<string, unknown>;
   requestId: string;
+  correlationId?: string;
 }
 
 /**
@@ -20,6 +21,7 @@ export interface ErrorEnvelope {
     code: string;
     message: string;
     requestId: string;
+    correlationId?: string;
   };
 }
 
@@ -30,6 +32,16 @@ function getRequestId(res: Response): string {
   return typeof res.locals.requestId === 'string'
     ? res.locals.requestId
     : 'unknown';
+}
+
+/**
+ * Extracts correlationId from res.locals when present.
+ * Returns undefined when not set so the key is omitted from the envelope.
+ */
+function getCorrelationId(res: Response): string | undefined {
+  return typeof res.locals.correlationId === 'string'
+    ? res.locals.correlationId
+    : undefined;
 }
 
 /**
@@ -45,10 +57,12 @@ export function ok<T>(
   meta?: Record<string, unknown>,
   status = 200,
 ): void {
+  const correlationId = getCorrelationId(res);
   const envelope: SuccessEnvelope<T> = {
     status: 'success',
     data,
     requestId: getRequestId(res),
+    ...(correlationId !== undefined && { correlationId }),
   };
 
   if (meta !== undefined) {
@@ -71,12 +85,14 @@ export function fail(
   message: string,
   status = 400,
 ): void {
+  const correlationId = getCorrelationId(res);
   const envelope: ErrorEnvelope = {
     status: 'error',
     error: {
       code,
       message,
       requestId: getRequestId(res),
+      ...(correlationId !== undefined && { correlationId }),
     },
   };
 

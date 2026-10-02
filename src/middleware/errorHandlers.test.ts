@@ -512,3 +512,84 @@ describe('notFoundHandler', () => {
     expect(res.json).not.toHaveBeenCalled();
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 11. errorCause propagation into res.locals (for observability labels)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('errorHandler – res.locals.errorCause propagation', () => {
+  it('sets errorCause to not_found for 404 AppErrors', () => {
+    const res = makeMockRes();
+    errorHandler(
+      new AppError(404, 'not_found', 'Not found'),
+      makeMockReq(),
+      res,
+      makeMockNext(),
+    );
+    expect(res.locals.errorCause).toBe('not_found');
+  });
+
+  it('sets errorCause to unauthorized for 401 AppErrors', () => {
+    const res = makeMockRes();
+    errorHandler(
+      new AppError(401, 'unauthorized', 'Unauthorized'),
+      makeMockReq(),
+      res,
+      makeMockNext(),
+    );
+    expect(res.locals.errorCause).toBe('unauthorized');
+  });
+
+  it('sets errorCause to validation_error for ZodErrors', () => {
+    const res = makeMockRes();
+    const schema = z.object({ x: z.number() });
+    const result = schema.safeParse({ x: 'bad' });
+    const zerr = (result as any).error;
+    errorHandler(zerr, makeMockReq(), res, makeMockNext());
+    expect(res.locals.errorCause).toBe('validation_error');
+  });
+
+  it('sets errorCause to invalid_json for body-parser SyntaxErrors', () => {
+    const res = makeMockRes();
+    const berr = Object.assign(new SyntaxError('bad json'), { status: 400 });
+    errorHandler(berr, makeMockReq(), res, makeMockNext());
+    expect(res.locals.errorCause).toBe('invalid_json');
+  });
+
+  it('sets errorCause to internal_error for unknown generic Errors', () => {
+    const res = makeMockRes();
+    errorHandler(new Error('db down'), makeMockReq(), res, makeMockNext());
+    expect(res.locals.errorCause).toBe('internal_error');
+  });
+
+  it('sets errorCause to internal_error for thrown strings / null / objects', () => {
+    const resA = makeMockRes();
+    errorHandler('string err', makeMockReq(), resA, makeMockNext());
+    expect(resA.locals.errorCause).toBe('internal_error');
+
+    const resB = makeMockRes();
+    errorHandler(null, makeMockReq(), resB, makeMockNext());
+    expect(resB.locals.errorCause).toBe('internal_error');
+
+    const resC = makeMockRes();
+    errorHandler({ weird: true }, makeMockReq(), resC, makeMockNext());
+    expect(resC.locals.errorCause).toBe('internal_error');
+  });
+
+  it('sets errorCause to forbidden for CORS policy errors', () => {
+    const res = makeMockRes();
+    errorHandler(
+      new Error('Not allowed by CORS policy'),
+      makeMockReq(),
+      res,
+      makeMockNext(),
+    );
+    expect(res.locals.errorCause).toBe('forbidden');
+  });
+
+  it('does not set errorCause when headersSent guard returns early', () => {
+    const res = makeMockRes({}, true);
+    errorHandler(new Error('late'), makeMockReq(), res, makeMockNext());
+    expect(res.locals.errorCause).toBeUndefined();
+  });
+});

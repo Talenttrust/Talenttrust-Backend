@@ -1,5 +1,12 @@
 import { URL } from 'url';
-import { parseBoolEnv, optionalEnv } from '../config/env';
+import { parseBoolEnv, getEnv } from '../config/env';
+
+/**
+ * Environments that may opt into private-host access via SSRF_ALLOW_PRIVATE_HOSTS.
+ * Any other NODE_ENV value (including unset / misspelled) is treated as unsafe —
+ * the bypass flag is ignored and private hosts are blocked.
+ */
+const SSRF_BYPASS_ALLOWED_ENVS = new Set(['development', 'test', 'staging']);
 
 /**
  * SSRF Protection Utility
@@ -9,8 +16,10 @@ import { parseBoolEnv, optionalEnv } from '../config/env';
  *
  * @security
  * - Default: FAIL CLOSED (unparseable/unknown → unsafe)
- * - In production: private hosts are ALWAYS blocked (ignores SSRF_ALLOW_PRIVATE_HOSTS)
- * - In non-production: set SSRF_ALLOW_PRIVATE_HOSTS=true to allow private hosts
+ * - In production: private hosts are ALWAYS blocked; SSRF_ALLOW_PRIVATE_HOSTS is
+ *   rejected outright at config load (see env.schema superRefine)
+ * - Bypass is allowed only when NODE_ENV is explicitly development|test|staging
+ *   AND SSRF_ALLOW_PRIVATE_HOSTS=true (default-off)
  */
 
 const PRIVATE_HOSTNAMES = [
@@ -25,17 +34,53 @@ const PRIVATE_HOSTNAMES = [
  * - IPv4-mapped IPv6 (::ffff:127.0.0.1)
  * @returns The parsed IPv4 as four numbers [a, b, c, d], or null if not parsable
  */
-function parseIpv4Like(host: string): [number, number, number, number] | null {
-  let normalized = host.toLowerCase().trim();
-
-  // Remove brackets from IPv6 literals
-  if (normalized.startsWith('[') && normalized.endsWith(']')) {
-    normalized = normalized.slice(1, -1);
+/**
+ * Strips IPv6 literal decoration so a bare address remains:
+ * - a leading `[` and/or trailing `]` (even when unmatched, e.g. `[fd00::`)
+ * - a scope/zone identifier (`%eth0`)
+ */
+function stripIpv6Wrapper(host: string): string {
+  let h = host.toLowerCase().trim();
+  if (h.startsWith('[')) {
+    h = h.slice(1);
   }
+  if (h.endsWith(']')) {
+    h = h.slice(0, -1);
+  }
+  const zoneIdx = h.indexOf('%');
+  if (zoneIdx !== -1) {
+    h = h.slice(0, zoneIdx);
+  }
+  return h;
+}
+
+/**
+ * Decodes the compressed-hex form of an IPv4-mapped IPv6 suffix, e.g. the
+ * `7f00:1` in `::ffff:7f00:1` (which is 127.0.0.1). Returns null when the input
+ * is not exactly two hex groups.
+ */
+function parseHexMappedIpv4(mapped: string): [number, number, number, number] | null {
+  const groups = mapped.split(':').filter((g) => g.length > 0);
+  if (groups.length !== 2) return null;
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  const hi = parseInt(groups[0], 16);
+  const lo = parseInt(groups[1], 16);
+  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
+}
+
+function parseIpv4Like(host: string): [number, number, number, number] | null {
+  let normalized = stripIpv6Wrapper(host);
 
   // Strip IPv4-mapped IPv6 prefix
   if (normalized.startsWith('::ffff:')) {
-    normalized = normalized.slice('::ffff:'.length);
+    const mapped = normalized.slice('::ffff:'.length);
+    // Dotted-quad form (::ffff:127.0.0.1) falls through to the dotted parser
+    // below; compressed hex form (::ffff:7f00:1) is decoded here.
+    if (!mapped.includes('.')) {
+      const octets = parseHexMappedIpv4(mapped);
+      if (octets) return octets;
+    }
+    normalized = mapped;
   } else if (normalized.startsWith('0000:0000:0000:0000:0000:ffff:')) {
     normalized = normalized.slice('0000:0000:0000:0000:0000:ffff:'.length);
   }
@@ -76,10 +121,7 @@ function parseIpv4Like(host: string): [number, number, number, number] | null {
  * Checks if an IPv6 host is private
  */
 function isPrivateIpv6(host: string): boolean {
-  const normalized = host.toLowerCase().trim();
-  const noBrackets = normalized.startsWith('[') && normalized.endsWith(']')
-    ? normalized.slice(1, -1)
-    : normalized;
+  const noBrackets = stripIpv6Wrapper(host);
 
   // IPv6 loopback (::1)
   if (noBrackets === '::1' || noBrackets === '0000:0000:0000:0000:0000:0000:0000:0001') {
@@ -148,43 +190,48 @@ export function isPrivateHost(host: string): boolean {
 }
 
 /**
+ * Returns true when the current environment is explicitly allowed to opt into
+ * private-host access via SSRF_ALLOW_PRIVATE_HOSTS.
+ *
+ * @security Unset, misspelled, production, or any other NODE_ENV value returns
+ * false so the bypass cannot leak in by accident.
+ */
+function isSsrfBypassEnvAllowed(env: NodeJS.ProcessEnv): boolean {
+  const nodeEnv = getEnv('NODE_ENV', env);
+  if (nodeEnv === undefined) {
+    return false;
+  }
+  return SSRF_BYPASS_ALLOWED_ENVS.has(nodeEnv);
+}
+
+/**
  * Validates a URL string for SSRF safety.
  *
  * @security
- * - In production: always blocks private hosts, regardless of SSRF_ALLOW_PRIVATE_HOSTS
- * - In non-production: blocks private hosts unless SSRF_ALLOW_PRIVATE_HOSTS=true
- * - Fail closed: invalid URLs/unparseable hosts are considered unsafe
+ * - Fail closed: invalid URLs / unparseable hosts / unknown NODE_ENV → unsafe
+ * - Production (and any non-allowlisted NODE_ENV): always blocks private hosts;
+ *   SSRF_ALLOW_PRIVATE_HOSTS has no effect at runtime and is rejected at config
+ *   load when NODE_ENV==='production'
+ * - Bypass: only when NODE_ENV ∈ {development, test, staging} AND
+ *   SSRF_ALLOW_PRIVATE_HOSTS=true (default false)
  *
  * @param urlString - The URL to validate
+ * @param env - Optional policy source; defaults to process.env for existing callers
  * @returns true if the URL is safe, false if it points to a private/internal resource
  */
-export function isSafeUrl(urlString: string): boolean {
-  const nodeEnv = optionalEnv('NODE_ENV', 'development');
-  const isProduction = nodeEnv === 'production';
-  const allowPrivateHosts = parseBoolEnv('SSRF_ALLOW_PRIVATE_HOSTS', false);
+export function isSafeUrl(urlString: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  /**
+   * Explicit, default-off allow flag. Honoured only in development|test|staging.
+   * In production the flag is rejected at config load; here it is also ignored
+   * so no runtime path returns true for a private host.
+   */
+  const allowPrivateHosts = parseBoolEnv('SSRF_ALLOW_PRIVATE_HOSTS', false, env);
 
-  // In production: never allow private hosts, no exceptions
-  if (isProduction) {
-    try {
-      const url = new URL(urlString);
-      const host = url.hostname;
-
-      if (!host) {
-        return false;
-      }
-
-      return !isPrivateHost(host);
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  // Non-production: check if explicit bypass flag is set
-  if (allowPrivateHosts) {
+  if (allowPrivateHosts && isSsrfBypassEnvAllowed(env)) {
     return true;
   }
 
-  // Default: block private hosts (fail closed)
+  // Default / production / unknown env: block private hosts (fail closed)
   try {
     const url = new URL(urlString);
     const host = url.hostname;

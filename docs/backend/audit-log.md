@@ -210,6 +210,17 @@ The middleware registers a `res.on('finish')` hook so it writes the entry
 status code and the `req.user` identity (set by `authenticateMiddleware`) are
 both available when the entry is written.
 
+The same middleware also reads the `{ id }` identity set by the production JWT
+`requireAuth` middleware. It records the complete API path when mounted inside a
+router. Multiple mounts on one response produce one audit write attempt. An
+interrupted response is recorded once with a diagnostic `499` audit status,
+`WARNING` severity, and `metadata.aborted: true`; the HTTP response itself is
+unchanged. If request data is malformed or cyclic, the entry keeps safe method,
+path and status fields with `metadataOmitted: true` and omits the raw data. Audit
+store errors are logged without their potentially sensitive error payloads and
+do not change the primary HTTP result. A failed write is never retried blindly:
+the store may already have persisted the entry.
+
 ### Mounting
 
 ```typescript
@@ -237,6 +248,30 @@ router.get('/contracts', handler);
 The `requestId` placed in `res.locals.requestId` by `requestIdMiddleware` is
 used as the `correlationId` on every entry, enabling end-to-end request tracing
 across logs and the audit trail.
+
+---
+
+## Schema & Validation Invariants (`src/audit/schemas.ts`)
+
+The HTTP-facing zod schemas in `src/audit/schemas.ts` are the guard in front of
+the append-only, hash-chained audit log: anything they accept is **permanent**.
+Their invariants are enforced *by construction* (shared sources, not duplicated
+constants) and pinned by `src/audit/schemas.test.ts`.
+
+| Invariant | Enforcement |
+| --- | --- |
+| **Enum parity with the domain** | `action` / `severity` are built from `AUDIT_ACTIONS` / `AUDIT_SEVERITIES` in `src/audit/types.ts` — the same lists used by the `AuditAction` / `AuditSeverity` types and the strict write-path validator, so a local copy cannot drift. (This previously rejected `REPUTATION_CORRECTED`, which the domain supports.) |
+| **Shared field rules** | Identifiers, `ipAddress`, `correlationId` and `metadata` are composed from the exported field schemas in `src/audit/inputValidation.ts`, so the declarative API schema and the strict write-path schema cannot disagree. |
+| **Bounded identifiers** | `actor` / `resource` / `resourceId` are 1–128 chars, non-blank and control-character free. |
+| **Valid origin** | `ipAddress` must parse as IPv4/IPv6 and is bounded to 45 chars. |
+| **Safe correlation ID** | `correlationId` is bounded to 128 chars and restricted to `[A-Za-z0-9._:-]` (no CR/LF log forging). |
+| **Structurally safe metadata** | Enforces the full `validateMetadata` rule set: JSON object only, depth ≤ 5, ≤ 50 keys per object, ≤ 200 array items, ≤ 4096 chars per string, finite numbers, no circular references, ≤ 16 KiB serialised, and no `__proto__` / `constructor` / `prototype` keys. |
+| **Stable defaults** | `metadata` defaults to `{}`. Response schemas assert SHA-256 hash format, ISO timestamps and non-negative integer counters. |
+| **Legacy query quirk preserved** | `?cursor=` (empty string) is treated as absent while `?limit=` is rejected — a deliberate, test-pinned behaviour kept for backward compatibility. |
+
+Unknown top-level body fields are **stripped** (not rejected), preserving the
+previous API behaviour. The strict, unknown-field-rejecting variant remains
+`CreateAuditEntrySchema` in `src/audit/inputValidation.ts`.
 
 ---
 
@@ -349,6 +384,35 @@ Numbers, booleans, and `null`/`undefined` pass through unmodified.
 
 ---
 
+## Failure Recovery (SQLite backend)
+
+Failures in `src/audit/sqliteRepository.ts` are recovered **deterministically**:
+the same failure always triggers the same bounded sequence of actions, with no
+random jitter and no unbounded retry loop. The invariants below are documented
+in the module header and enforced by the test suite.
+
+| Invariant | How it is enforced |
+| --- | --- |
+| A failed write never leaves a partial row or a broken hash chain | The previous-hash read and the `INSERT` run in one `better-sqlite3` transaction; any throw rolls the whole transaction back |
+| Transient lock contention is retried, bounded | `SQLITE_BUSY` / `SQLITE_LOCKED` are retried up to `MAX_WRITE_ATTEMPTS` (3) with a fixed backoff; the transaction re-reads the chain tail on every attempt, so a retry can never fork the chain |
+| A missing schema self-repairs in-process | `no such table` / `no such column` / `no such index` triggers exactly one idempotent `initSchema()` repair and one retry on the **same** repository instance |
+| Non-retryable errors surface immediately | Constraint violations, disk-full, malformed input and every other deterministic error are thrown on the first attempt — a retry loop never masks a real bug |
+| Recovery is observable but not sensitive | Each recovery attempt is logged (structured JSON) with the operation name, attempt number and error code only; entry payloads and metadata are never logged |
+| Integrity checks never throw | `verifyIntegrity()` converts an unparseable row (e.g. malformed `metadata_json`) into a deterministic `{ valid: false, firstCorruptedIndex, firstCorruptedId }` report instead of crashing the monitoring job |
+
+**Operational notes**
+
+- The connection is hardened on construction with `busy_timeout = 5000`,
+  `journal_mode = WAL` and `synchronous = NORMAL` so lock contention waits
+  instead of failing fast. Pragma failures are non-fatal and logged at warn.
+- Callers that prefer fail-fast behaviour over automatic schema repair can pass
+  `new SqliteAuditRepository(db, { autoRepairSchema: false })`. The existing
+  single-argument construction is unchanged.
+- If schema repair itself fails (e.g. a read-only volume), the **original**
+  root-cause error is rethrown so the caller is not misled by a repair error.
+
+---
+
 ## Testing
 
 ```bash
@@ -364,8 +428,9 @@ single layer of the architecture:
 | --- | --- | --- |
 | `src/audit/audit.test.ts` | `AuditStore`, `auditMiddleware`, `auditRouter`, `protectedEndpointAuditMiddleware`, `redact` module | Broad integration + security threat-scenario coverage. |
 | `src/audit/service.test.ts` | `AuditService` contract | Routing of `action`/`actor`/`ipAddress`/`correlationId` to the repository, the redaction responsibility (callers must pre-process via `redactBody()`), write-failure surfacing, and convenience-wrapper severity rules. Uses a pure in-memory mock repository — no SQLite dependency. |
-| `src/audit/sqliteRepository.test.ts` | `SqliteAuditRepository` behaviour | Append → read round-trip with deeply nested metadata, every supported filter (`action`, `severity`, `actor`, `resource`, `resourceId`, `from`/`to`) and combinations thereof, pagination edge cases (`offset > count`, `limit = 0`), incremental `stream()`, transactional write-failure surfacing with no partial rows left behind, two-`:memory:`-DB isolation, and chain-integrity verification over a 100-entry chain. All tests run on a fresh in-memory SQLite connection (`':memory:'`) for determinism and DB isolation. |
+| `src/audit/sqliteRepository.test.ts` | `SqliteAuditRepository` behaviour | Append → read round-trip with deeply nested metadata, every supported filter (`action`, `severity`, `actor`, `resource`, `resourceId`, `from`/`to`) and combinations thereof, pagination edge cases (`offset > count`, `limit = 0`), incremental `stream()`, transactional write-failure surfacing with no partial rows left behind, two-`:memory:`-DB isolation, and chain-integrity verification over a 100-entry chain. Also pins the deterministic recovery policy: schema self-repair on the same instance, opt-out fail-fast, repair-failure passthrough, non-retry of deterministic errors, bounded retry of transient serialization conflicts (chain stays linear), retry-budget exhaustion, error classification, and non-throwing integrity verification of a corrupt row. All tests run on a fresh in-memory SQLite connection (`':memory:'`) for determinism and DB isolation. |
 | `src/audit/exportService.test.ts` | `AuditExportService`, `neutraliseCsvInjection` | NDJSON round-trip fidelity, RFC 4180 CSV quoting (commas, embedded quotes, newlines), CSV-injection neutralisation for leading `=`/`+`/`-`/`@` formula prefixes, empty-dataset and large-dataset (1 500-row) streaming, `AuditExportResult` contract fields, `cleanup()` removes temp directory, `streamNdjsonExport`/`streamCsvExport` pipe helpers. All tests use a fresh in-memory `AuditStore` — no live database dependency. |
+| `src/audit/schemas.test.ts` | Declarative schema invariants | Enum parity with the domain (drift regression, incl. `REPUTATION_CORRECTED`), identifier/IP/correlation boundary rules, the full metadata-integrity matrix (prototype-pollution keys, depth, key/array/string/byte bounds, non-finite numbers, circular references), response-contract tightening (hash format, ISO timestamps, integer counters), and the legacy empty-string query quirk. |
 
 Coverage targets: ≥ 95% for all audit modules.
 

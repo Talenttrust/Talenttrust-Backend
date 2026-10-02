@@ -14,6 +14,7 @@ import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { Logger, createRequestLogger } from '../logger';
 import { sanitizeCorrelationId } from '../utils/correlationId';
+import { redactHeaders } from '../utils/redact';
 
 // Extend Express Request interface to include our logger
 declare global {

@@ -86,7 +86,7 @@ export function normalizeSignatureHeader(signature: unknown): string | null {
     return null;
   }
 
-  const hexBody = trimmed.startsWith('sha256=') ? trimmed.slice('sha256='.length) : trimmed;
+  const hexBody = /^sha256=/i.test(trimmed) ? trimmed.slice('sha256='.length) : trimmed;
   if (hexBody.length === 0 || hexBody.length > 256) {
     return null;
   }

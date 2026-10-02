@@ -1,0 +1,166 @@
+
+> talenttrust-backend@0.1.0 lint
+> eslint src
+
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\audit\router.ts
+  110:14  warning  '_error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\audit\store.ts
+  180:16  warning  '_error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\audit\types.ts
+  148:12  warning  '_error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\contracts\cursor.repository.ts
+  16:45  warning  'CursorResumeResult' is defined but never used. Allowed unused vars must match /^_/u   @typescript-eslint/no-unused-vars
+  16:65  warning  'CursorResumeRequest' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\contracts\indexer.test.ts
+  1:32  warning  'IndexerBatchResult' is defined but never used. Allowed unused vars must match /^_/u      @typescript-eslint/no-unused-vars
+  6:10  warning  'PersistedContractEvent' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\contracts\indexer.ts
+  3:51  warning  'CursorUpdateResult' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  4:10  warning  'ContractEvent' is defined but never used. Allowed unused vars must match /^_/u       @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\controllers\contracts.controller.di.test.ts
+  3:10  warning  'ContractsController' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\controllers\contracts.integration.test.ts
+  818:0  error  Parsing error: '}' expected
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\db\betterSqlite3.ts
+  232:9  warning  'dbPathToState' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\deploy.ts
+    3:10  warning  'promisify' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  175:16  warning  'err' is defined but never used                                              @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\deployment\historyStore.ts
+  2:10  warning  'randomUUID' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\deployment\promoter.ts
+  312:12  warning  '_' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\events\idempotencyStore.ts
+  20:13  warning  'BetterSqlite3' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\health\auth.test.ts
+   25:10  warning  'User' is defined but never used. Allowed unused vars must match /^_/u              @typescript-eslint/no-unused-vars
+  283:9   warning  'actions' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\health\router.test.ts
+  14:7  warning  'degradedProbe' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  38:9  warning  'originalWrite' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\health\validation.test.ts
+  28:10  warning  'validateRequest' is defined but never used. Allowed unused vars must match /^_/u              @typescript-eslint/no-unused-vars
+  28:27  warning  'validateQuery' is defined but never used. Allowed unused vars must match /^_/u                @typescript-eslint/no-unused-vars
+  29:35  warning  'HealthWriteBodySchemaImport' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\logger.test.ts
+  14:61  warning  'LogLevel' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\logger.ts
+  97:7  warning  'redactionPaths' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\middleware\__tests__\requestLimits.test.ts
+  9:10  warning  'AppError' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\middleware\adminAuthGuard.ts
+  24:10  warning  'verifyApiKey' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  25:10  warning  'redactSecret' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\middleware\validate.middleware.ts
+  3:10  warning  'AppError' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\middleware\validation.ts
+  3:10  warning  'AppError' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\modules\webhooks\dto\webhook-subscription.dto.ts
+  2:10  warning  'CURSOR_DEFAULT_LIMIT' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\queue\webhook-dlq.ts
+  19:13  warning  'BetterSqlite3' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\rateLimit.ts
+  8:31  warning  'TokenBucketEntry' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\repositories\webhook-subscription.repository.ts
+  1:8  warning  'Database' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\repository\eventAuditRepository.test.ts
+  13:10  warning  'EventProcessingAudit' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\retention\index.ts
+  422:20  warning  'error' is defined but never used  @typescript-eslint/no-unused-vars
+  439:22  warning  'error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\retention\purge.test.ts
+  14:3   warning  'PurgeResult' is defined but never used. Allowed unused vars must match /^_/u          @typescript-eslint/no-unused-vars
+  15:3   warning  'PurgeCandidateCount' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  17:51  warning  'ArchivalStorageType' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\retention\purge.ts
+  10:26  warning  'InMemoryStorageProvider' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\retention\storage.ts
+  11:8  warning  'Database' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\routes\deploy.routes.ts
+  14:15  warning  'Request' is defined but never used. Allowed unused vars must match /^_/u           @typescript-eslint/no-unused-vars
+  14:34  warning  'NextFunction' is defined but never used. Allowed unused vars must match /^_/u      @typescript-eslint/no-unused-vars
+  16:46  warning  'setHealthChecker' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\routes\events.routes.ts
+  54:14  warning  'error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\routes\health.ts
+  95:0  error  Parsing error: '}' expected
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\routes\metrics.routes.ts
+  44:10  warning  'validationErrorResponse' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\routes\webhook-subscription.routes.ts
+  89:13  warning  'list' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\auth.service.test.ts
+   12:13  warning  'crypto' is defined but never used. Allowed unused vars must match /^_/u                @typescript-eslint/no-unused-vars
+  552:11  warning  'user1Tokens' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  553:11  warning  'user2Tokens' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\contracts.service.ts
+  9:67  warning  'VersionConflictError' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\dependency-scan.service.ts
+   4:7    warning  'execFileAsync' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  36:100  warning  'stderr' is defined but never used. Allowed unused args must match /^_/u                  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\reputation.service.test.ts
+  12:10  warning  'ReputationRepository' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  65:10  warning  'reputationRowCount' is defined but never used. Allowed unused vars must match /^_/u             @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\reputation.service.ts
+  247:14  warning  'error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\services\webhook.service.test.ts
+  2:10  warning  'MetricsServiceLike' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\utils\ssrf.ts
+  210:14  warning  '_error' is defined but never used  @typescript-eslint/no-unused-vars
+  230:12  warning  '_error' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\utils\swrCache.ts
+  286:20  warning  '_cbErr' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\utils\webhook-signing.util.ts
+  2:10  warning  'safeMessageForCode' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\Shepherd\projects\Talenttrust-Backend\src\webhookDelivery.test.ts
+   462:13  warning  'delay1' is assigned a value but never used. Allowed unused vars must match /^_/u         @typescript-eslint/no-unused-vars
+  1079:13  warning  'failingClient' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+
+G£û 66 problems (2 errors, 64 warnings)
+
+

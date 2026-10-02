@@ -159,12 +159,12 @@ describe('InMemoryIdempotencyStore', () => {
     it('removes all records regardless of expiry', () => {
       const store = makeStore();
       store.set(makeRecord({ key: 'key-1', expiresAt: new Date('2099-01-01T00:00:00.000Z') }));
-      store.set(makeRecord({ key: 'key-2', expiresAt: new Date('2099-01-01T00:00:00.000Z') }));
+      store.set(makeRecord({ key: 'key-3', expiresAt: new Date('2099-01-01T00:00:00.000Z') }));
 
       store.clear();
 
       expect(store.get('key-1')).toBeUndefined();
-      expect(store.get('key-2')).toBeUndefined();
+      expect(store.get('key-3')).toBeUndefined();
       expect((store as unknown as { records: Map<string, IdempotencyRecord> }).records.size).toBe(0);
     });
   });
@@ -183,6 +183,107 @@ describe('InMemoryIdempotencyStore', () => {
       const record = store.get('legacy-key');
       expect(record?.key).toBe('legacy-key');
       expect(record?.expiresAt).toBeDefined();
+    });
+  });
+
+  /**
+   * State-invariant coverage for the audit store integrity guarantees.
+   *
+   * These tests protect the invariants that must hold under concurrent and
+   * partial-failure conditions:
+   *   - A stored record is either absent or fully valid; no partial writes.
+   *   - Expiry is deterministic and idempotent across repeated calls
+   *     (the same key and clock always produce the same visibility).
+   *   - Concurrent purge calls cannot double-count or lose records.
+   *   - Re-submission of an expired key is fresh and never returns stale data.
+   *   - Failures in one key do not corrupt other keys.
+   */
+  describe('state invariants', () => {
+    it('stores a fully valid record or nothing (atomic visibility)', () => {
+      const clock = () => new Date('2024-01-01T00:00:00.000Z');
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'atomic', expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+
+      const record = store.get('atomic');
+      expect(record).toBeDefined();
+      expect(record?.key).toBe('atomic');
+      expect(record?.payloadHash).toBe('abc123');
+      expect(record?.result).toEqual({ ok: true });
+    });
+
+    it('expiry check is idempotent across repeated lookups', () => {
+      const clock = () => new Date('2024-01-01T02:00:00.000Z');
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'idempotent', expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+
+      expect(store.get('idempotent')).toBeUndefined();
+      expect(store.get('idempotent')).toBeUndefined();
+      expect(store.get('idempotent')).toBeUndefined();
+    });
+
+    it('concurrent purge calls do not double-count or lose records', () => {
+      const now = new Date('2024-01-01T02:00:00.000Z');
+      const clock = () => now;
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'purge-1', expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+      store.set(makeRecord({ key: 'purge-2', expiresAt: new Date('2024-01-01T01:30:00.000Z') }));
+      store.set(makeRecord({ key: 'purge-3', expiresAt: new Date('2024-01-01T03:00:00.000Z') }));
+
+      const first = store.purgeExpired(now);
+      const second = store.purgeExpired(now);
+
+      expect(first).toBe(2);
+      expect(second).toBe(0);
+      expect(store.get('purge-3')).toBeDefined();
+    });
+
+    it('re-submission of an expired key never returns stale data', () => {
+      const expired = new Date('2024-01-01T02:00:00.000Z');
+      const clock = () => expired;
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+      expect(store.get('test-key')).toBeUndefined();
+
+      store.set(makeRecord({ result: { ok: 'new' }, expiresAt: new Date('2024-01-01T03:00:00.000Z') }));
+      expect(store.get('test-key')?.result).toEqual({ ok: 'new' });
+    });
+
+    it('failure on one key does not corrupt other keys', () => {
+      const now = new Date('2024-01-01T02:00:00.000Z');
+      const clock = () => now;
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'healthy', expiresAt: new Date('2024-01-01T03:00:00.000Z') }));
+      store.set(makeRecord({ key: 'expired', expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+
+      expect(store.get('expired')).toBeUndefined();
+      expect(store.get('healthy')).toBeBefined();
+      expect(store.get('healthy')?.result).toEqual({ ok: true });
+    });
+
+    it('purgeExpired with an explicit clock is deterministic', () => {
+      const clock = () => new Date('2024-01-01T00:00:00.000Z');
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'deterministic', expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+
+      const atBoundary = new Date('2024-01-01T01:00:00.000Z');
+      expect(store.purgeExpired(atBoundary)).toBe(1);
+      expect(store.purgeExpired(atBoundary)).toBe(0);
+    });
+
+    it('set overwrites an existing key with the latest valid record', () => {
+      const clock = () => new Date('2024-01-01T00:00:00.000Z');
+      const store = makeStore({ clock });
+
+      store.set(makeRecord({ key: 'overwrite', result: { ok: 'old' }, expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+      store.set(makeRecord({ key: 'overwrite', result: { ok: 'new' }, expiresAt: new Date('2024-01-01T01:00:00.000Z') }));
+
+      expect(store.get('overwrite')?.result).toEqual({ ok: 'new' });
     });
   });
 });

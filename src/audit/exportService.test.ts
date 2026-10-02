@@ -12,6 +12,8 @@
  *   openReadStream, cleanup
  * - Cleanup removes the temporary directory
  * - neutraliseCsvInjection helper unit tests
+ * - Concurrent execution safety: racing exports, duplicate work, idempotent
+ *   cleanup, and bounded resource usage under parallel invocation
  *
  * @see docs/backend/audit-log.md — Export section
  */
@@ -23,6 +25,201 @@ import { AuditStore } from './store';
 import { AuditService } from './service';
 import { AuditExportService, neutraliseCsvInjection } from './exportService';
 import type { CreateAuditEntryInput } from './types';
+
+// ─── Validation boundary helpers ─────────────────────────────────────────────
+
+/**
+ * Validation boundaries for export inputs.
+ *
+ * These constants define the accepted domain for every caller-supplied
+ * value that reaches AuditExportService.  They are intentionally exported
+ * so that callers and tests can assert against the same source of truth
+ * rather than duplicating magic numbers.
+ */
+export const EXPORT_VALIDATION = {
+  /** Maximum number of records a single export may contain. */
+  MAX_RECORDS: 100_000,
+  /** Maximum length of a filter string (action, actor, resource, etc.). */
+  MAX_FILTER_LENGTH: 256,
+  /** Maximum length of a correlationId filter. */
+  MAX_CORRELATION_ID_LENGTH: 128,
+  /** Maximum batch size for streaming reads. */
+  MAX_BATCH_SIZE: 5_000,
+  /** Minimum batch size for streaming reads. */
+  MIN_BATCH_SIZE: 1,
+  /** Allowed export formats. */
+  FORMATS: ['ndjson', 'csv'] as const,
+} as const;
+
+export type ExportFormat = (typeof EXPORT_VALIDATION.FORMATS)[number];
+
+/**
+ * Structured error thrown when an export request violates a validation
+ * boundary.  Carries a stable `code` so callers can branch on the failure
+ * without parsing human-readable messages.
+ */
+export class ExportValidationError extends Error {
+  public readonly code: string;
+  public readonly field: string;
+
+  constructor(code: string, field: string, message: string) {
+    super(message);
+    this.name = 'ExportValidationError';
+    this.code = code;
+    this.field = field;
+  }
+}
+
+/**
+ * Validates a caller-supplied filter object against the export boundaries.
+ *
+ * Rejects:
+ * - non-string / non-undefined filter values
+ * - empty or whitespace-only strings
+ * - strings exceeding MAX_FILTER_LENGTH
+ * - control characters (which would corrupt CSV/NDJSON output)
+ *
+ * Returns a normalised copy of the filter so downstream code never sees
+ * the raw caller object.
+ */
+export function validateExportFilters(
+  filters: Record<string, unknown> | undefined,
+): Record<string, string> {
+  if (filters === undefined) return {};
+  if (filters === null || typeof filters !== 'object' || Array.isArray(filters)) {
+    throw new ExportValidationError(
+      'INVALID_FILTERS',
+      'filters',
+      'filters must be a plain object',
+    );
+  }
+
+  const normalised: Record<string, string> = {};
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined) continue;
+    if (typeof value !== 'string') {
+      throw new ExportValidationError(
+        'INVALID_FILTER_TYPE',
+        key,
+        `filter "${key}" must be a string`,
+      );
+    }
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new ExportValidationError(
+        'EMPTY_FILTER',
+        key,
+        `filter "${key}" must not be empty`,
+      );
+    }
+    const maxLen =
+      key === 'correlationId'
+        ? EXPORT_VALIDATION.MAX_CORRELATION_ID_LENGTH
+        : EXPORT_VALIDATION.MAX_FILTER_LENGTH;
+    if (trimmed.length > maxLen) {
+      throw new ExportValidationError(
+        'FILTER_TOO_LONG',
+        key,
+        `filter "${key}" exceeds maximum length of ${maxLen}`,
+      );
+    }
+    // Reject control characters that would break CSV/NDJSON framing.
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(trimmed)) {
+      throw new ExportValidationError(
+        'FILTER_CONTROL_CHARS',
+        key,
+        `filter "${key}" contains control characters`,
+      );
+    }
+    normalised[key] = trimmed;
+  }
+  return normalised;
+}
+
+/**
+ * Validates a batch size against the export boundaries.
+ *
+ * Rejects non-integers, values below MIN_BATCH_SIZE, and values above
+ * MAX_BATCH_SIZE.  Returns the validated integer.
+ */
+export function validateBatchSize(batchSize: unknown): number {
+  if (typeof batchSize !== 'number' || !Number.isInteger(batchSize)) {
+    throw new ExportValidationError(
+      'INVALID_BATCH_SIZE',
+      'batchSize',
+      'batchSize must be an integer',
+    );
+  }
+  if (batchSize < EXPORT_VALIDATION.MIN_BATCH_SIZE) {
+    throw new ExportValidationError(
+      'BATCH_SIZE_TOO_SMALL',
+      'batchSize',
+      `batchSize must be at least ${EXPORT_VALIDATION.MIN_BATCH_SIZE}`,
+    );
+  }
+  if (batchSize > EXPORT_VALIDATION.MAX_BATCH_SIZE) {
+    throw new ExportValidationError(
+      'BATCH_SIZE_TOO_LARGE',
+      'batchSize',
+      `batchSize must not exceed ${EXPORT_VALIDATION.MAX_BATCH_SIZE}`,
+    );
+  }
+  return batchSize;
+}
+
+/**
+ * Validates an export format string against the allowed set.
+ */
+export function validateExportFormat(format: unknown): ExportFormat {
+  if (typeof format !== 'string') {
+    throw new ExportValidationError(
+      'INVALID_FORMAT',
+      'format',
+      'format must be a string',
+    );
+  }
+  if (!(EXPORT_VALIDATION.FORMATS as readonly string[]).includes(format)) {
+    throw new ExportValidationError(
+      'UNSUPPORTED_FORMAT',
+      'format',
+      `format must be one of: ${EXPORT_VALIDATION.FORMATS.join(', ')}`,
+    );
+  }
+  return format as ExportFormat;
+}
+
+/**
+ * Validates the record count against the export boundary.
+ *
+ * A count of 0 is valid (empty export).  Negative or non-integer counts
+ * are rejected.  Counts above MAX_RECORDS are rejected to prevent
+ * unbounded memory/disk usage.
+ */
+export function validateRecordCount(count: unknown): number {
+  if (typeof count !== 'number' || !Number.isInteger(count)) {
+    throw new ExportValidationError(
+      'INVALID_RECORD_COUNT',
+      'recordCount',
+      'recordCount must be an integer',
+    );
+  }
+  if (count < 0) {
+    throw new ExportValidationError(
+      'NEGATIVE_RECORD_COUNT',
+      'recordCount',
+      'recordCount must not be negative',
+    );
+  }
+  if (count > EXPORT_VALIDATION.MAX_RECORDS) {
+    throw new ExportValidationError(
+      'RECORD_COUNT_TOO_LARGE',
+      'recordCount',
+      `recordCount must not exceed ${EXPORT_VALIDATION.MAX_RECORDS}`,
+    );
+  }
+  return count;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -724,5 +921,229 @@ describe('AuditExportService — path-traversal guard', () => {
     expect(stat.isFile()).toBe(true);
 
     await result.cleanup();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Concurrent execution safety
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('AuditExportService — concurrent execution safety', () => {
+  it('racing NDJSON exports produce independent, non-interfering files', async () => {
+    const { exportService } = makeExportService();
+
+    const results = await Promise.all([
+      exportService.createNdjsonExport(),
+      exportService.createNdjsonExport(),
+      exportService.createNdjsonExport(),
+    ]);
+
+    // Each export must have a unique file path (no shared temp file collision)
+    const paths = results.map((r) => r.filePath);
+    expect(new Set(paths).size).toBe(paths.length);
+
+    // Each file must independently contain the full dataset
+    for (const result of results) {
+      expect(result.recordCount).toBe(FIXTURE_ENTRIES.length);
+      const content = await readExportFile(result.filePath);
+      const parsed = parseNdjson(content);
+      expect(parsed).toHaveLength(FIXTURE_ENTRIES.length);
+    }
+
+    await Promise.all(results.map((r) => r.cleanup()));
+  });
+
+  it('racing CSV exports produce independent, non-interfering files', async () => {
+    const { exportService } = makeExportService();
+
+    const results = await Promise.all([
+      exportService.createCsvExport(),
+      exportService.createCsvExport(),
+      exportService.createCsvExport(),
+    ]);
+
+    const paths = results.map((r) => r.filePath);
+    expect(new Set(paths).size).toBe(paths.length);
+
+    for (const result of results) {
+      expect(result.recordCount).toBe(FIXTURE_ENTRIES.length);
+      const content = await readExportFile(result.filePath);
+      const rows = parseCsv(content).filter((r) => r.some((c) => c.length > 0));
+      expect(rows).toHaveLength(FIXTURE_ENTRIES.length + 1);
+    }
+
+    await Promise.all(results.map((r) => r.cleanup()));
+  });
+
+  it('mixed NDJSON and CSV exports racing do not corrupt each other', async () => {
+    const { exportService } = makeExportService();
+
+    const [ndjson, csv] = await Promise.all([
+      exportService.createNdjsonExport(),
+      exportService.createCsvExport(),
+    ]);
+
+    expect(ndjson.filePath).not.toBe(csv.filePath);
+    expect(ndjson.fileName).toMatch(/\.ndjson$/);
+    expect(csv.fileName).toMatch(/\.csv$/);
+
+    const ndjsonContent = await readExportFile(ndjson.filePath);
+    const csvContent = await readExportFile(csv.filePath);
+
+    expect(parseNdjson(ndjsonContent)).toHaveLength(FIXTURE_ENTRIES.length);
+    expect(parseCsv(csvContent).filter((r) => r.some((c) => c.length > 0)))
+      .toHaveLength(FIXTURE_ENTRIES.length + 1);
+
+    await Promise.all([ndjson.cleanup(), csv.cleanup()]);
+  });
+
+  it('cleanup is idempotent — repeated calls do not throw', async () => {
+    const { exportService } = makeExportService();
+    const result = await exportService.createNdjsonExport();
+
+    await result.cleanup();
+    await expect(result.cleanup()).resolves.toBeUndefined();
+    await expect(result.cleanup()).resolves.toBeUndefined();
+  });
+
+  it('concurrent cleanup of the same result is safe', async () => {
+    const { exportService } = makeExportService();
+    const result = await exportService.createNdjsonExport();
+
+    await Promise.all([
+      result.cleanup(),
+      result.cleanup(),
+      result.cleanup(),
+    ]);
+
+    await expect(fsp.access(result.filePath)).rejects.toThrow();
+  });
+
+  it('duplicate export work with identical filters yields consistent results', async () => {
+    const { exportService } = makeExportService();
+    const filter = { action: 'CONTRACT_CREATED' };
+
+    const [a, b] = await Promise.all([
+      exportService.createNdjsonExport(filter),
+      exportService.createNdjsonExport(filter),
+    ]);
+
+    expect(a.recordCount).toBe(b.recordCount);
+    const contentA = await readExportFile(a.filePath);
+    const contentB = await readExportFile(b.filePath);
+    expect(contentA).toBe(contentB);
+
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  });
+
+  it('streaming exports racing with file exports do not interfere', async () => {
+    const { exportService } = makeExportService();
+    const { Writable } = await import('stream');
+
+    const chunks: Buffer[] = [];
+    const dest = new Writable({
+      write(chunk: string | Buffer, _enc: string, cb: () => void) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        cb();
+      },
+    });
+
+    const [fileResult, streamResult] = await Promise.all([
+      exportService.createNdjsonExport(),
+      exportService.streamNdjsonExport({}, dest),
+    ]);
+
+    expect(fileResult.recordCount).toBe(FIXTURE_ENTRIES.length);
+    expect(streamResult.recordCount).toBe(FIXTURE_ENTRIES.length);
+
+    const streamed = Buffer.concat(chunks).toString('utf8');
+    const fromFile = await readExportFile(fileResult.filePath);
+    expect(streamed).toBe(fromFile);
+
+    await Promise.all([fileResult.cleanup(), streamResult.cleanup()]);
+  });
+
+  it('high-concurrency burst (10 parallel exports) completes without error', async () => {
+    const { exportService } = makeExportService();
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => exportService.createNdjsonExport()),
+    );
+
+    const paths = results.map((r) => r.filePath);
+    expect(new Set(paths).size).toBe(10);
+
+    for (const result of results) {
+      expect(result.recordCount).toBe(FIXTURE_ENTRIES.length);
+    }
+
+    await Promise.all(results.map((r) => r.cleanup()));
+  });
+
+  it('cleanup during concurrent export does not affect the in-flight export', async () => {
+    const { exportService } = makeExportService();
+
+    const first = await exportService.createNdjsonExport();
+    const inFlight = exportService.createNdjsonExport();
+
+    // Clean up the first result while the second is still being produced
+    await first.cleanup();
+
+    const second = await inFlight;
+    expect(second.recordCount).toBe(FIXTURE_ENTRIES.length);
+    const content = await readExportFile(second.filePath);
+    expect(parseNdjson(content)).toHaveLength(FIXTURE_ENTRIES.length);
+
+    await second.cleanup();
+  });
+
+  it('idempotent retries of the same export produce equivalent content', async () => {
+    const { exportService } = makeExportService();
+
+    const first = await exportService.createCsvExport();
+    const firstContent = await readExportFile(first.filePath);
+    await first.cleanup();
+
+    const second = await exportService.createCsvExport();
+    const secondContent = await readExportFile(second.filePath);
+    await second.cleanup();
+
+    expect(secondContent).toBe(firstContent);
+  });
+
+  it('concurrent exports with different filters each honour their own filter', async () => {
+    const { exportService } = makeExportService();
+
+    const [contracts, payments] = await Promise.all([
+      exportService.createNdjsonExport({ action: 'CONTRACT_CREATED' }),
+      exportService.createNdjsonExport({ action: 'PAYMENT_INITIATED' }),
+    ]);
+
+    const contractRecords = parseNdjson(await readExportFile(contracts.filePath));
+    const paymentRecords = parseNdjson(await readExportFile(payments.filePath));
+
+    expect(contractRecords.every((r) => r['action'] === 'CONTRACT_CREATED')).toBe(true);
+    expect(paymentRecords.every((r) => r['action'] === 'PAYMENT_INITIATED')).toBe(true);
+
+    await Promise.all([contracts.cleanup(), payments.cleanup()]);
+  });
+
+  it('partial failure of one export does not corrupt a concurrent successful export', async () => {
+    const { exportService } = makeExportService();
+
+    const good = exportService.createNdjsonExport();
+    const bad = exportService.createNdjsonExport({ action: 'NON_EXISTENT_ACTION' });
+
+    const [goodResult, badResult] = await Promise.all([good, bad]);
+
+    // The good export must be intact regardless of the empty result of the other
+    expect(goodResult.recordCount).toBe(FIXTURE_ENTRIES.length);
+    const content = await readExportFile(goodResult.filePath);
+    expect(parseNdjson(content)).toHaveLength(FIXTURE_ENTRIES.length);
+
+    // The filtered export legitimately yields zero records
+    expect(badResult.recordCount).toBe(0);
+
+    await Promise.all([goodResult.cleanup(), badResult.cleanup()]);
   });
 });

@@ -1,3 +1,6 @@
+process.env.COMPLIANCE_AUDIT_SECRET = 'a'.repeat(32);
+process.env.NODE_ENV = 'test';
+
 // Mock the notification service module before any imports resolve so that
 // the module-level `notificationService` singleton (which calls validateEnv()
 // and opens a SQLite connection) is never constructed during tests.
@@ -8,10 +11,21 @@ jest.mock('../services/notification.service', () => ({
   },
 }));
 
-import { EscrowHooks, EscrowDispatchResult } from './escrow.hooks';
 import { KeyEscrowEvent } from '../types/notification.types';
-import { notificationService } from '../services/notification.service';
-import { logger } from '../logger';
+import type { EscrowChannelResult, EscrowDispatchResult } from './escrow.hooks';
+
+let EscrowHooks: (typeof import('./escrow.hooks'))['EscrowHooks'];
+let notificationService: any;
+let logger: any;
+
+beforeAll(async () => {
+  const hooksMod = await import('./escrow.hooks');
+  EscrowHooks = hooksMod.EscrowHooks;
+  const serviceMod = await import('../services/notification.service');
+  notificationService = serviceMod.notificationService;
+  const loggerMod = await import('../logger');
+  logger = loggerMod.logger;
+});
 
 /**
  * Baseline payload used across tests.  All PII-sensitive fields are
@@ -118,7 +132,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     });
 
     it('returns email:failed and web:succeeded', async () => {
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.FUNDS_DEPOSITED,
         BASE_PAYLOAD,
       );
@@ -126,8 +140,8 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.allSucceeded).toBe(false);
       expect(result.anySucceeded).toBe(true);
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({
         channel: 'email',
@@ -178,7 +192,7 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     });
 
     it('returns email:succeeded and web:failed', async () => {
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.MILESTONE_APPROVED,
         BASE_PAYLOAD,
       );
@@ -186,8 +200,8 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.allSucceeded).toBe(false);
       expect(result.anySucceeded).toBe(true);
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({ channel: 'email', success: true });
       expect(webResult).toEqual({
@@ -216,11 +230,11 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('does not throw — resolves with both failures', async () => {
       await expect(
         EscrowHooks.onEscrowEvent(KeyEscrowEvent.DISPUTE_RAISED, BASE_PAYLOAD),
-      ).resolves.not.toThrow();
+      ).resolves.toBeDefined();
     });
 
     it('returns allSucceeded:false, anySucceeded:false', async () => {
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.DISPUTE_RAISED,
         BASE_PAYLOAD,
       );
@@ -230,13 +244,13 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     });
 
     it('returns failure entries for both channels', async () => {
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.DISPUTE_RAISED,
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
 
       expect(emailResult).toEqual({
         channel: 'email',
@@ -264,12 +278,12 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('treats email success:false as a failed channel', async () => {
       sendEmailSpy.mockResolvedValue({ success: false, message: 'Recipient rejected' });
 
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.ESCROW_RESOLVED,
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
       expect(emailResult).toEqual({
         channel: 'email',
         success: false,
@@ -282,12 +296,12 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('treats web success:false as a failed channel', async () => {
       sendWebSpy.mockResolvedValue({ success: false, message: 'User not found' });
 
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.ESCROW_CANCELLED,
         BASE_PAYLOAD,
       );
 
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
       expect(webResult).toEqual({
         channel: 'web',
         success: false,
@@ -311,12 +325,12 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('handles a string rejection gracefully', async () => {
       sendEmailSpy.mockRejectedValue('plain string error');
 
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.FUNDS_DEPOSITED,
         BASE_PAYLOAD,
       );
 
-      const emailResult = result.channels.find(c => c.channel === 'email');
+      const emailResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'email');
       expect(emailResult?.success).toBe(false);
       expect(emailResult?.message).toBe('plain string error');
     });
@@ -324,12 +338,12 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
     it('handles a numeric rejection gracefully', async () => {
       sendWebSpy.mockRejectedValue(503);
 
-      const result = await EscrowHooks.onEscrowEvent(
+      const result: EscrowDispatchResult = await EscrowHooks.onEscrowEvent(
         KeyEscrowEvent.FUNDS_DEPOSITED,
         BASE_PAYLOAD,
       );
 
-      const webResult = result.channels.find(c => c.channel === 'web');
+      const webResult = result.channels.find((c: EscrowChannelResult) => c.channel === 'web');
       expect(webResult?.success).toBe(false);
       expect(webResult?.message).toBe('503');
     });
@@ -380,6 +394,97 @@ describe('EscrowHooks.onEscrowEvent — channel isolation', () => {
       expect(result.channels).toHaveLength(2);
       expect(sendEmailSpy).toHaveBeenCalledTimes(1);
       expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ─── State Transitions (Lifecycle Hooks) ────────────────────────────────────
+
+  describe('onStateTransition — contract lifecycle transitions', () => {
+    it('dispatches FUNDS_DEPOSITED for draft -> active transition (funded)', async () => {
+      const result = await EscrowHooks.onStateTransition('draft', 'active', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.FUNDS_DEPOSITED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+          amount: BASE_PAYLOAD.amount,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+      expect(sendWebSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userId,
+        KeyEscrowEvent.FUNDS_DEPOSITED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+          amount: BASE_PAYLOAD.amount,
+        }),
+      );
+    });
+
+    it('dispatches ESCROW_RESOLVED for active -> completed transition (released)', async () => {
+      const result = await EscrowHooks.onStateTransition('active', 'completed', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.ESCROW_RESOLVED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches DISPUTE_RAISED for active -> disputed transition (disputed)', async () => {
+      const result = await EscrowHooks.onStateTransition('active', 'disputed', BASE_PAYLOAD);
+      expect(result).not.toBeNull();
+      expect(result!.allSucceeded).toBe(true);
+      expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+      expect(sendEmailSpy).toHaveBeenCalledWith(
+        BASE_PAYLOAD.userEmail,
+        KeyEscrowEvent.DISPUTE_RAISED,
+        expect.objectContaining({
+          contractId: BASE_PAYLOAD.contractId,
+          userId: BASE_PAYLOAD.userId,
+          userEmail: BASE_PAYLOAD.userEmail,
+        }),
+      );
+      expect(sendWebSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits no notifications for unchanged states', async () => {
+      const statuses = ['draft', 'active', 'completed', 'disputed', 'cancelled'];
+      for (const status of statuses) {
+        const result = await EscrowHooks.onStateTransition(status, status, BASE_PAYLOAD);
+        expect(result).toBeNull();
+      }
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+      expect(sendWebSpy).not.toHaveBeenCalled();
+    });
+
+    it('emits no notifications for unknown or ignored transitions', async () => {
+      const ignoredTransitions = [
+        { old: 'draft', new: 'completed' },
+        { old: 'completed', new: 'active' },
+        { old: 'unknown_state', new: 'active' },
+        { old: 'active', new: 'unknown_state' },
+      ];
+      for (const transition of ignoredTransitions) {
+        const result = await EscrowHooks.onStateTransition(transition.old, transition.new, BASE_PAYLOAD);
+        expect(result).toBeNull();
+      }
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+      expect(sendWebSpy).not.toHaveBeenCalled();
     });
   });
 });

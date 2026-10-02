@@ -1,15 +1,25 @@
 /**
  * Deployment Validation Module
- * 
+ *
  * Provides pre-deployment validation checks to ensure system readiness
  * and prevent deployment of unhealthy or misconfigured services.
- * 
+ *
+ * Security model:
+ * - All outbound health probe URLs are screened through the SSRF guard
+ *   (`isSafeUrl`) before any network call is made. Private/internal addresses
+ *   (RFC-1918, link-local, loopback, cloud metadata) are blocked in all
+ *   environments; in production the block is unconditional regardless of
+ *   SSRF_ALLOW_PRIVATE_HOSTS.
+ * - The HTTP client is injectable so unit tests can avoid real network access.
+ * - Internal error detail is kept out of the returned `HealthCheckResult` to
+ *   prevent topology leakage to callers.
+ *
  * @module deployment/validator
  */
 
 import { EnvironmentConfig } from '../config/environment';
 import { isSafeUrl } from '../utils/ssrf';
-import { createHttpClient } from '../httpClient';
+import { createHttpClient, HttpResponseError } from '../httpClient';
 import { AxiosInstance, AxiosError } from 'axios';
 
 export interface ValidationResult {
@@ -95,19 +105,57 @@ function isValidUrl(url: string): boolean {
 }
 
 /**
- * Performs health check on the service
- * @param {string} baseUrl - Base URL of the service
- * @param {AxiosInstance} [httpClient] - Optional injectable HTTP client for testing
- * @returns {Promise<HealthCheckResult>} Health check result
+ * Performs a real HTTP health probe against the target service's readiness
+ * endpoint (`GET <baseUrl>/health/ready`).
+ *
+ * The probe:
+ * 1. **SSRF guard** — rejects private/internal `baseUrl` values via
+ *    {@link isSafeUrl} before any network call is made.
+ * 2. **Accurate timing** — `responseTime` is measured from immediately before
+ *    the HTTP call to immediately after, so it reflects true round-trip
+ *    latency rather than a synthetic value.
+ * 3. **Bounded timeout** — defaults to 5 000 ms; the caller may supply an
+ *    alternative HTTP client to override this.
+ * 4. **Unhealthy on non-200** — any HTTP status other than 200, a connection
+ *    error, or a timeout causes the probe to return `status: 'unhealthy'`.
+ * 5. **Injectable client** — pass `httpClient` to use a mock or pre-configured
+ *    Axios instance; when omitted a default instance is created automatically.
+ *    This is the primary mechanism for unit-testing the probe without making
+ *    real network calls.
+ *
+ * @param {string} baseUrl - Base URL of the service to probe (e.g. `http://localhost:3001`).
+ *   Must pass the SSRF guard; private/internal URLs are rejected and returned
+ *   as `status: 'unhealthy'` with `error: 'URL not safe for SSRF'`.
+ * @param {AxiosInstance} [httpClient] - Optional injectable HTTP client.
+ *   When provided it is used as-is (no extra timeout is applied by the probe);
+ *   configure the timeout on the client itself.  When omitted, a new client
+ *   with a 5 000 ms timeout is created for each invocation.
+ * @returns {Promise<HealthCheckResult>} Health check result containing the
+ *   service name, `'healthy'` / `'unhealthy'` status, timestamp, and a
+ *   `details` bag with `responseTime`, `baseUrl`, and (on success) `statusCode`.
+ *
+ * @example
+ * // Typical post-deployment readiness check
+ * const result = await performHealthCheck('https://api.example.com');
+ * if (result.status !== 'healthy') {
+ *   throw new Error(`Deployment not ready: ${JSON.stringify(result.details)}`);
+ * }
+ *
+ * @example
+ * // Inject a mock client in tests
+ * const mockClient = { get: jest.fn().mockResolvedValue({ status: 200 }) };
+ * const result = await performHealthCheck('https://api.example.com', mockClient as AxiosInstance);
  */
 export async function performHealthCheck(
   baseUrl: string,
   httpClient?: AxiosInstance
 ): Promise<HealthCheckResult> {
   const startTime = Date.now();
-  
+
   try {
-    // Validate URL with SSRF guard
+    // ── SSRF guard ───────────────────────────────────────────────────────────
+    // Reject private/internal URLs before any network activity to prevent
+    // the probe from being redirected at cloud metadata or internal hosts.
     if (!isSafeUrl(baseUrl)) {
       return {
         service: 'talenttrust-backend',
@@ -120,11 +168,11 @@ export async function performHealthCheck(
       };
     }
 
-    // Build health check URL
+    // ── Build target URL ─────────────────────────────────────────────────────
     const healthUrl = new URL('/health/ready', baseUrl);
     const client = httpClient ?? createHttpClient('health-check', { timeout: 5000 });
 
-    // Perform health check
+    // ── Perform probe — timing wraps only the real network call ─────────────
     const response = await client.get(healthUrl.toString());
     const responseTime = Date.now() - startTime;
 
@@ -141,19 +189,28 @@ export async function performHealthCheck(
     };
   } catch (error) {
     const responseTime = Date.now() - startTime;
-    const axiosError = error as AxiosError;
     let errorMessage = 'Unknown error';
     let statusCode: number | undefined;
 
-    if (axiosError.response) {
-      statusCode = axiosError.response.status;
+    // HttpResponseError is thrown by createHttpClient's response interceptor
+    // for all non-2xx responses when using the default (non-injected) client.
+    if (error instanceof HttpResponseError) {
+      statusCode = error.status;
       errorMessage = `HTTP ${statusCode}`;
-    } else if (axiosError.code === 'ECONNREFUSED') {
-      errorMessage = 'Connection refused';
-    } else if (axiosError.code === 'ECONNABORTED') {
-      errorMessage = 'Request timeout';
-    } else if (error instanceof Error) {
-      errorMessage = error.message;
+    } else {
+      // Raw AxiosError — emitted when an injected client is used without an
+      // interceptor (typical in unit tests).
+      const axiosError = error as AxiosError;
+      if (axiosError.response) {
+        statusCode = axiosError.response.status;
+        errorMessage = `HTTP ${statusCode}`;
+      } else if (axiosError.code === 'ECONNREFUSED') {
+        errorMessage = 'Connection refused';
+      } else if (axiosError.code === 'ECONNABORTED') {
+        errorMessage = 'Request timeout';
+      } else if (error instanceof Error) {
+        errorMessage = error.message;
+      }
     }
 
     return {

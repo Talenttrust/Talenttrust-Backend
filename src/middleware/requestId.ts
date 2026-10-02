@@ -61,9 +61,15 @@ export function requestIdMiddleware(
   const requestId = incomingRequestId ?? randomUUID();
 
   // Resolve correlation ID
-  const correlationId = validateExternalId(
+  let correlationId = validateExternalId(
     req.headers[CORRELATION_ID_HEADER],
   );
+
+  // Generate a correlation ID if missing on webhooks requests
+  const isWebhookRequest = req.originalUrl.includes('webhook') || req.originalUrl.includes('/events');
+  if (!correlationId && isWebhookRequest) {
+    correlationId = randomUUID();
+  }
 
   // Attach to response locals for downstream use
   res.locals['requestId'] = requestId;

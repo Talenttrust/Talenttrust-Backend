@@ -1,8 +1,37 @@
 # Escrow Contract Lifecycle and Bounds Enforcement
 
-This document outlines the architecture, state transitions, security bounds, and blockchain orchestration involved in the TalentTrust decentralized freelancer escrow protocol. Contracts flow through the Controller (`src/controllers/contracts.controller.ts`), Service (`src/services/contracts.service.ts`), and Repository (`src/repositories/contractRepository.ts`) layers.
+This document outlines the architecture, state transitions, security bounds, and blockchain orchestration involved in the TalentTrust decentralized freelancer escrow protocol. Contracts flow through the Controller (`src/controllers/contracts.controller.ts`), Service (`src/services/contracts.service.ts`), and Repository layers.
 
-## 1. Policy Bounds
+## 1. Repository Layer (Unified)
+
+Contract persistence is now unified behind a single `IContractRepository` interface defined in `src/repositories/contractRepository.ts`. This replaces the previous split across `src/repositories/contractRepository.ts` and `src/repositories/contracts.repository.ts`.
+
+### Interface
+
+```ts
+export interface IContractRepository {
+  create(data: CreateContractInput): Promise<Contract>;
+  findById(id: string): Promise<Contract | undefined>;
+  findAll(): Promise<Contract[]>;
+  findByClientId(clientId: string): Promise<Contract[]>;
+  findPage(input: CursorPaginationInput): Promise<CursorPage<Contract>>;
+  updateWithVersion(
+    id: string,
+    fields: Partial<Omit<Contract, "id" | "createdAt" | "version">>,
+    expectedVersion: number,
+  ): Promise<Contract>;
+  delete(id: string): Promise<boolean>;
+}
+```
+
+### Implementations
+
+- **`ContractRepository`** — SQLite-backed implementation using prepared statements and cursor pagination.
+- **`InMemoryContractRepository`** — In-memory implementation for deterministic tests and local development.
+
+All methods are async to allow swapping backends without changing callers. The `ContractsService` depends only on the `IContractRepository` interface, never on a concrete class.
+
+## 2. Policy Bounds
 
 To prevent griefing and cap worst-case resource usage, strict limits are enforced at the API layer. The Soroban escrow contract stores milestones in a bounded vector; keeping limits strictly enforced off-chain prevents overflow and high gas utilization during downstream contract calls.
 
@@ -17,7 +46,7 @@ GET /api/v1/contracts/bounds
 ```
 *Note: These limits are hard-coded policy decisions within `src/contracts/bounds.ts` and require a code review to change. There is no runtime toggle to avoid misconfiguration risks.*
 
-## 2. Contract Lifecycle & States
+## 3. Contract Lifecycle & States
 Contracts in TalentTrust act as the off-chain representation of an upcoming or active on-chain escrow.
 
 ### Status Flow
@@ -26,19 +55,19 @@ Contracts in TalentTrust act as the off-chain representation of an upcoming or a
 3. **Active/In Progress (`active`)**: Work has commenced.
 4. **Completed / Disputed**: End-of-lifecycle states depending on mutual agreement or arbitration.
 
-## 3. Optimistic Concurrency Control (OCC)
+## 4. Optimistic Concurrency Control (OCC)
 To prevent race conditions during updates (e.g., simultaneous status changes or edits), the repository implements Optimistic Concurrency Control using a `version` integer.
 
 ### How it Works:
 - Every contract row tracks its current `version` (starting at `0`).
 - When updating a contract, the client or service must provide the `expectedVersion` it last read.
-- The `updateWithVersion` method in `ContractRepository` atomically checks the version during the `UPDATE` query:
+- The `updateWithVersion` method in `IContractRepository` atomically checks the version during the `UPDATE` query:
 ```SQL
 UPDATE contracts SET ..., version = version + 1 WHERE id = ? AND version = ?
 ```
 - If `result.changes === 0`, it means either the contract was deleted or the version has drifted. The API throws a `VersionConflictError`, forcing the client to fetch the latest state and retry.
 
-## 4. Escrow Hand-off (Soroban Integration)
+## 5. Escrow Hand-off (Soroban Integration)
 When a contract is successfully validated and stored, the backend orchestrates a hand-off to the blockchain via `SorobanService.prepareEscrow`.
 
 **Fault Tolerance:**
@@ -52,7 +81,7 @@ sequenceDiagram
     participant Controller as ContractsController
     participant Service as ContractsService
     participant Bounds as Bounds Validator
-    participant DB as ContractRepository
+    participant DB as IContractRepository
     participant Soroban as SorobanService
 
     Client->>Controller: POST /api/v1/contracts (CreateContractDto)
@@ -65,7 +94,7 @@ sequenceDiagram
         Controller-->>Client: 422 Unprocessable Entity
     else Bounds Check Passes
         Bounds-->>Service: { valid: true }
-        Service->>DB: create(data, status: 'draft', version: 0)
+        Service->>DB: create(data, status: 'draft', version: 0) via IContractRepository
         DB-->>Service: newContract
         
         Service->>Soroban: prepareEscrow(contract.id, budget)

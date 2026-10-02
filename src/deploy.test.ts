@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import {
-  switchToGreen,
+  switchToGreen, 
   rollback,
   getStatus,
   setHealthChecker,

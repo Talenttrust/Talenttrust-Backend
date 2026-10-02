@@ -20,6 +20,18 @@ export interface Transaction {
   lastCheckedAt?: Date;
   retryCount: number;
   startedAt?: Date;
+  /**
+   * Token of the poller instance that currently holds the poll lease for this
+   * transaction. Absent when no instance owns the transaction.
+   *
+   * Lease fencing guarantees that only the current owner may mutate the
+   * transaction: a poller that loses its lease (e.g. because it expired while
+   * an RPC call was in flight and another instance took over) must abandon its
+   * poll instead of writing stale state.
+   */
+  leaseOwner?: string;
+  /** When the current lease expires. Absent when no lease is held. */
+  leaseExpiresAt?: Date;
 }
 
 /**
@@ -37,6 +49,38 @@ export interface TransactionsDbInterface {
   clear(): void;
   /** Returns an iterator over all stored transactions. */
   values(): IterableIterator<Transaction>;
+
+  /**
+   * Atomically acquires (or renews) the poll lease for a transaction on behalf
+   * of `owner`.
+   *
+   * A lease is granted when:
+   *  - no lease is recorded (including legacy rows that predate leases), or
+   *  - the recorded lease has expired, judged with a clock-skew tolerance
+   *    (`expiresAt + skewMs < now`), or
+   *  - the recorded lease is already held by `owner` (renewal).
+   *
+   * A transaction row is created as `PENDING` when the hash is not yet known.
+   * When a live lease is held by a different owner the acquisition fails and
+   * the caller must not poll or write the transaction.
+   *
+   * @param hash      - Transaction hash.
+   * @param owner     - Unique token of the polling instance requesting the lease.
+   * @param expiresAt - Absolute time the lease expires.
+   * @param now       - Current time (injectable clock) used for expiry checks.
+   * @param skewMs    - Clock-skew tolerance applied when judging expiry.
+   * @returns true when `owner` now holds the lease, false when a live lease is
+   *          held by another instance.
+   */
+  acquireLease(hash: string, owner: string, expiresAt: Date, now: number, skewMs: number): boolean;
+  /** Returns true when the stored lease for the transaction is held by `owner`. */
+  isLeaseOwner(hash: string, owner: string): boolean;
+  /**
+   * Fenced write: persists `tx` only when the stored lease is still held by
+   * `owner`. Returns true when the write was applied, false when the lease was
+   * lost (the caller must abandon the poll and retry later).
+   */
+  setIfLeaseOwner(hash: string, tx: Transaction, owner: string): boolean;
 }
 
 /**
@@ -60,6 +104,8 @@ function rowToTransaction(row: any): Transaction {
     lastCheckedAt: row.last_checked_at ? new Date(row.last_checked_at) : undefined,
     retryCount: row.retry_count,
     startedAt: row.started_at ? new Date(row.started_at) : undefined,
+    leaseOwner: row.lease_owner ?? undefined,
+    leaseExpiresAt: row.lease_expires_at ? new Date(row.lease_expires_at) : undefined,
   };
 }
 
@@ -90,6 +136,49 @@ export class InMemoryTransactionStore implements TransactionsDbInterface {
 
   values(): IterableIterator<Transaction> {
     return this.store.values();
+  }
+
+  acquireLease(hash: string, owner: string, expiresAt: Date, now: number, skewMs: number): boolean {
+    const existing = this.store.get(hash);
+
+    if (!existing) {
+      this.store.set(hash, {
+        hash,
+        status: TransactionStatus.PENDING,
+        retryCount: 0,
+        startedAt: new Date(now),
+        leaseOwner: owner,
+        leaseExpiresAt: expiresAt,
+      });
+      return true;
+    }
+
+    const leaseActive =
+      existing.leaseOwner !== undefined &&
+      existing.leaseExpiresAt !== undefined &&
+      existing.leaseExpiresAt.getTime() + skewMs > now;
+
+    if (!leaseActive || existing.leaseOwner === owner) {
+      existing.leaseOwner = owner;
+      existing.leaseExpiresAt = expiresAt;
+      this.store.set(hash, existing);
+      return true;
+    }
+
+    return false;
+  }
+
+  isLeaseOwner(hash: string, owner: string): boolean {
+    return this.store.get(hash)?.leaseOwner === owner;
+  }
+
+  setIfLeaseOwner(hash: string, tx: Transaction, owner: string): boolean {
+    const existing = this.store.get(hash);
+    if (existing?.leaseOwner !== owner) {
+      return false;
+    }
+    this.store.set(hash, tx);
+    return true;
   }
 }
 
@@ -173,6 +262,89 @@ export class SqliteTransactionStore implements TransactionsDbInterface {
   }
 
   /**
+   * Acquires (or renews) the poll lease for a transaction.
+   *
+   * The read-decision-write sequence runs inside an exclusive transaction so
+   * that two processes sharing the same SQLite file cannot both acquire the
+   * lease for the same transaction. Rows are created as `PENDING` when the
+   * hash is not yet known.
+   */
+  acquireLease(hash: string, owner: string, expiresAt: Date, now: number, skewMs: number): boolean {
+    const db = getDb();
+    let acquired = false;
+
+    const decide = (): void => {
+      const existing = db
+        .prepare('SELECT lease_owner, lease_expires_at FROM transactions WHERE hash = ?')
+        .get(hash) as { lease_owner: string | null; lease_expires_at: string | null } | undefined;
+
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO transactions (hash, status, retry_count, started_at, lease_owner, lease_expires_at)
+          VALUES (?, 'PENDING', 0, ?, ?, ?)
+        `).run(hash, new Date(now).toISOString(), owner, expiresAt.toISOString());
+        acquired = true;
+        return;
+      }
+
+      const expiryMs = existing.lease_expires_at ? Date.parse(existing.lease_expires_at) : NaN;
+      const leaseActive =
+        existing.lease_owner !== null &&
+        !isNaN(expiryMs) &&
+        expiryMs + skewMs > now;
+
+      if (!leaseActive || existing.lease_owner === owner) {
+        db.prepare('UPDATE transactions SET lease_owner = ?, lease_expires_at = ? WHERE hash = ?')
+          .run(owner, expiresAt.toISOString(), hash);
+        acquired = true;
+      }
+    };
+
+    runExclusive(db, decide);
+    return acquired;
+  }
+
+  /**
+   * Returns true when the stored lease for the transaction is held by `owner`.
+   */
+  isLeaseOwner(hash: string, owner: string): boolean {
+    try {
+      const row = getDb()
+        .prepare('SELECT lease_owner FROM transactions WHERE hash = ?')
+        .get(hash) as { lease_owner: string | null } | undefined;
+      return row?.lease_owner === owner;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fenced write: updates the transaction row only while the stored lease is
+   * still held by `owner`. The single `UPDATE … WHERE lease_owner = ?`
+   * statement is atomic in SQLite, so a poller whose lease was taken over can
+   * never clobber the new owner's state.
+   */
+  setIfLeaseOwner(hash: string, tx: Transaction, owner: string): boolean {
+    const info = getDb().prepare(`
+      UPDATE transactions
+      SET status = ?, receipt = ?, last_checked_at = ?, retry_count = ?, started_at = ?,
+          lease_owner = ?, lease_expires_at = ?
+      WHERE hash = ? AND lease_owner = ?
+    `).run(
+      tx.status,
+      tx.receipt ? JSON.stringify(tx.receipt) : null,
+      tx.lastCheckedAt ? tx.lastCheckedAt.toISOString() : null,
+      tx.retryCount,
+      tx.startedAt ? tx.startedAt.toISOString() : null,
+      tx.leaseOwner ?? null,
+      tx.leaseExpiresAt ? tx.leaseExpiresAt.toISOString() : null,
+      hash,
+      owner,
+    );
+    return info.changes > 0;
+  }
+
+  /**
    * Returns an iterator over all stored transactions.
    *
    * ⚠️ Loads the entire table into memory. For large datasets,
@@ -181,6 +353,25 @@ export class SqliteTransactionStore implements TransactionsDbInterface {
   values(): IterableIterator<Transaction> {
     const rows = getDb().prepare('SELECT * FROM transactions').all() as any[];
     return rows.map(rowToTransaction).values();
+  }
+}
+
+/**
+ * Runs `work` inside an exclusive SQLite transaction so a read-decision-write
+ * sequence (lease acquisition) is atomic across processes sharing one database
+ * file.
+ *
+ * Real better-sqlite3 exposes `.immediate()` (`BEGIN IMMEDIATE`), which takes
+ * the write lock up front; the in-memory test double returns the function
+ * unchanged, where single-threaded execution already provides atomicity.
+ */
+function runExclusive(db: ReturnType<typeof getDb>, work: () => void): void {
+  const tx = db.transaction(work);
+  const immediate = (tx as { immediate?: () => void }).immediate;
+  if (typeof immediate === 'function') {
+    immediate();
+  } else {
+    tx();
   }
 }
 

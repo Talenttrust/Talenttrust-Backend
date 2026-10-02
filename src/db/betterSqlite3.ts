@@ -33,6 +33,7 @@ try {
         deployment_history: [],
         idempotency_store: [],
         audit_log_entries: [],
+        webhook_subscriptions: [],
       };
       fileStates.set(key, state);
     }
@@ -237,10 +238,9 @@ try {
       users: [],
       contracts: [],
       reputation_entries: [],
+      webhook_subscriptions: [],
     };
-    state: Record<string, any[]>;
-    _state: Record<string, any[]>;
-    private _pragmaValues: Record<string, any> = {};
+    _state: Record<string, any[]> = {};
 
     constructor(_path: string) {
       this.open = true;
@@ -294,8 +294,25 @@ try {
               if (!self._state[tableName]) self._state[tableName] = [];
               const cols = tableMatch[2].split(',').map((c: string) => c.trim().toLowerCase());
               const newRow: any = {};
+              let argIndex = 0;
               for (let i = 0; i < cols.length; i++) {
-                newRow[cols[i]] = flatArgs[i];
+                // If it is a parameterized column value, read it from flatArgs, otherwise assign the literal value from query definition
+                newRow[cols[i]] = flatArgs[argIndex++];
+              }
+              // Wait, the VALUES SQL string has literals like 1. In: VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+              // We need to parse the values list from VALUES (...) to map them correctly.
+              // Let's implement a robust values mapping for our mock.
+              const valuesMatch = sql.match(/VALUES\s*\((.+?)\)/i);
+              if (valuesMatch) {
+                const vals = valuesMatch[1].split(',').map(v => v.trim());
+                let pIndex = 0;
+                for (let i = 0; i < cols.length && i < vals.length; i++) {
+                  if (vals[i] === '?') {
+                    newRow[cols[i]] = flatArgs[pIndex++];
+                  } else {
+                    newRow[cols[i]] = parseSqlValue(vals[i]);
+                  }
+                }
               }
               // UNIQUE constraint enforcement for dedupe_key
               const isOrIgnore = upperSql.includes('OR IGNORE');

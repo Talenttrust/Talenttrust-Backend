@@ -5,7 +5,7 @@
  */
 
 import { getDb, closeDb } from "../db/database";
-import { UserRepository } from "./userRepository";
+import { UserRepository, normalizeEmail } from "./userRepository";
 
 let userRepo: UserRepository;
 
@@ -88,6 +88,38 @@ describe("UserRepository.create", () => {
       }),
     ).toThrow();
   });
+
+  it("normalizes (trims + lowercases) the email before storing it", () => {
+    const user = userRepo.create({
+      username: "alice",
+      email: "  Alice@Example.COM  ",
+      role: "client",
+    });
+    expect(user.email).toBe("alice@example.com");
+    expect(userRepo.findById(user.id)?.email).toBe("alice@example.com");
+  });
+
+  it("throws on a case-variant duplicate email (normalized UNIQUE index)", () => {
+    userRepo.create(baseData());
+    expect(() =>
+      userRepo.create({
+        username: "other",
+        email: "ALICE@EXAMPLE.COM",
+        role: "client",
+      }),
+    ).toThrow();
+  });
+
+  it("throws on a whitespace-variant duplicate email (normalized UNIQUE index)", () => {
+    userRepo.create(baseData());
+    expect(() =>
+      userRepo.create({
+        username: "other",
+        email: " alice@example.com ",
+        role: "client",
+      }),
+    ).toThrow();
+  });
 });
 
 describe("UserRepository.findById", () => {
@@ -112,6 +144,28 @@ describe("UserRepository.findByEmail", () => {
 
   it("returns undefined for an unknown email", () => {
     expect(userRepo.findByEmail("ghost@example.com")).toBeUndefined();
+  });
+
+  it("finds a user regardless of case or surrounding whitespace in the query", () => {
+    const created = userRepo.create({
+      username: "alice",
+      email: "alice@example.com",
+      role: "client",
+    });
+
+    expect(userRepo.findByEmail("Alice@Example.com")?.id).toBe(created.id);
+    expect(userRepo.findByEmail("  alice@example.com  ")?.id).toBe(created.id);
+    expect(userRepo.findByEmail("ALICE@EXAMPLE.COM")?.id).toBe(created.id);
+  });
+});
+
+describe("normalizeEmail", () => {
+  it("trims surrounding whitespace and lowercases", () => {
+    expect(normalizeEmail("  User@Example.COM  ")).toBe("user@example.com");
+  });
+
+  it("is a no-op for an already-normalized email", () => {
+    expect(normalizeEmail("user@example.com")).toBe("user@example.com");
   });
 });
 

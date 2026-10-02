@@ -2,19 +2,31 @@
  * UserRepository — CRUD operations for the `users` table.
  *
  * Uses prepared statements throughout to prevent SQL injection.
- * Username and email uniqueness is enforced at the DB level (UNIQUE constraint)
- * in addition to any application-level validation.
+ * Username and email uniqueness is enforced at the DB level (UNIQUE constraint
+ * on the raw column, plus a unique index on the normalised email — see
+ * migration `add_unique_index_on_normalized_email`) in addition to
+ * application-level validation.
  *
  * Security notes:
  *  - Passwords / credentials are NOT stored here; authentication is handled
  *    externally (Stellar key-based or third-party auth).
- *  - Email addresses are stored verbatim; normalise (lowercase) before
- *    inserting to avoid duplicate-email bypasses.
+ *  - Emails are normalised (trimmed + lowercased) via {@link normalizeEmail}
+ *    on both write and lookup paths to prevent case-variant duplicate
+ *    accounts and the account-confusion/impersonation risk that follows.
  */
 
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { User, UserRole } from "../db/types";
+
+/**
+ * Normalises an email address for storage and lookup: trims surrounding
+ * whitespace and lowercases it, so `" User@X.com "` and `"user@x.com"`
+ * resolve to the same account.
+ */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
 
 /** Raw row shape returned from SQLite (snake_case columns). */
 interface UserRow {
@@ -76,13 +88,14 @@ export class UserRepository {
   /**
    * Finds a user by their unique email address.
    *
-   * @param email - Email address to search for (case-sensitive).
+   * @param email - Email address to search for (normalised before lookup,
+   *                so the match is case- and whitespace-insensitive).
    * @returns The matching User or `undefined` if not found.
    */
   findByEmail(email: string): User | undefined {
     const row = this.db
       .prepare<[string], UserRow>("SELECT * FROM users WHERE email = ?")
-      .get(email);
+      .get(normalizeEmail(email));
     return row ? toUser(row) : undefined;
   }
 
@@ -90,21 +103,24 @@ export class UserRepository {
    * Creates a new user record.
    *
    * @param data - Required user fields (id and createdAt are generated).
-   * @returns  The newly created User.
+   *               The email is normalised (trimmed + lowercased) before
+   *               being persisted.
+   * @returns  The newly created User (with the normalised email).
    * @throws   If username or email already exists (SQLite UNIQUE constraint).
    */
   create(data: Omit<User, "id" | "createdAt">): User {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
+    const email = normalizeEmail(data.email);
 
     this.db
       .prepare<[string, string, string, string, string]>(
         `INSERT INTO users (id, username, email, role, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(id, data.username, data.email, data.role, createdAt);
+      .run(id, data.username, email, data.role, createdAt);
 
-    return { id, ...data, createdAt };
+    return { id, ...data, email, createdAt };
   }
 
   /**

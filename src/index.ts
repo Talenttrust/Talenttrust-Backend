@@ -10,6 +10,9 @@ import type { NextFunction, Request, Response } from 'express';
 import { createApp, attachTerminalHandlers } from './app';
 import { AppError } from './errors/appError';
 import { JobType, JobPayload, QueueManager } from './queue';
+import { createJobQuarantineRouter } from './queue/job-quarantine.routes';
+import { createMilestoneDivergenceRouter } from './milestones/divergence/routes';
+import { milestoneDivergenceSchedulerService } from './milestones/divergence/scheduler';
 import { auditService } from './audit/service';
 import { createAuditRouter } from './audit/router';
 import { createRateLimiter } from './middleware/rateLimiter';
@@ -18,27 +21,47 @@ import { requireAuth, requireRole } from './middleware/authorization';
 import { authMiddleware, type AuthenticatedRequest } from './middleware/auth';
 import { adminAuthGuard } from './middleware/adminAuthGuard';
 import { registerShutdownHandlers } from './shutdown';
+import { validateEnv } from './config/env.schema';
 
 const queueManager = QueueManager.getInstance();
 
 const app = createApp({ includeTerminalHandlers: false });
 
-const auditExportLimiter = createRateLimiter({
-  ...rateLimitConfig.auditExport,
-  keyFn: (req) => {
+function auditActorKeyFn(prefix: string) {
+  return (req: Request) => {
     const authReq = req as typeof req & { user?: { id?: string } };
     const actor = authReq.user?.id ?? 'anonymous';
-    return `audit-export:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
-  },
+    return `${prefix}:${actor}:${req.ip ?? req.socket.remoteAddress ?? 'unknown'}`;
+  };
+}
+
+const auditExportLimiter = createRateLimiter({
+  ...rateLimitConfig.auditExport,
+  keyFn: auditActorKeyFn('audit-export'),
 });
 
-app.use(
-  '/api/v1/audit',
-  createAuditRouter({
-    accessMiddleware: [requireAuth, requireRole('admin', 'auditor')],
-    exportMiddleware: [auditExportLimiter],
-  }),
-);
+const auditQueryLimiter = createRateLimiter({
+  ...rateLimitConfig.audit,
+  keyFn: auditActorKeyFn('audit'),
+});
+
+const auditIntegrityLimiter = createRateLimiter({
+  ...rateLimitConfig.auditIntegrity,
+  keyFn: auditActorKeyFn('audit-integrity'),
+});
+
+// Mount the audit router only when the AUDIT_ENABLED feature flag is on.
+// When disabled, all /api/v1/audit/* requests fall through to the 404 handler.
+if (validateEnv().AUDIT_ENABLED) {
+  app.use(
+    '/api/v1/audit',
+    createAuditRouter({
+      accessMiddleware: [requireAuth, requireRole('admin', 'auditor'), auditQueryLimiter],
+      exportMiddleware: [auditExportLimiter],
+      integrityMiddleware: [auditIntegrityLimiter],
+    }),
+  );
+}
 
 const DLQ_DEFAULT_LIMIT = 50;
 const DLQ_MAX_LIMIT = 100;
@@ -316,6 +339,25 @@ app.post(
   },
 );
 
+const QUARANTINE_DEFAULT_LIMIT = 50;
+const QUARANTINE_MAX_LIMIT = 100;
+
+// Quarantine inspection and replay (admin-only). Routed through its own
+// factory so the endpoints are integration-testable in isolation.
+app.use(
+  '/api/v1/jobs',
+  createJobQuarantineRouter({
+    queueManager,
+    defaultLimit: QUARANTINE_DEFAULT_LIMIT,
+    maxLimit: QUARANTINE_MAX_LIMIT,
+  }),
+);
+
+// Milestone divergence detection (issue #1213): admin-only reporting surface
+// for the bounded comparison job. Both routes require auth + admin role
+// (enforced inside the router factory).
+app.use('/api/v1/milestones/divergence', createMilestoneDivergenceRouter());
+
 app.get('/api/v1/jobs/:type/:jobId', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { type, jobId } = req.params;
@@ -342,6 +384,9 @@ attachTerminalHandlers(app);
 export { app };
 export default app;
 
+import { verifySchemaState } from './db/migrations';
+import { getDb } from './db/database';
+
 const isMainModule = false;
 const isJest = Boolean(process.env.JEST_WORKER_ID);
 const shouldBootstrapServer = (isMainModule && !isJest) || process.env.FORCE_START_INDEX === '1';
@@ -358,10 +403,17 @@ async function initializeQueues(): Promise<void> {
 async function startServer(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3001;
   if (!isJest) {
+    verifySchemaState(getDb());
     await initializeQueues();
   }
 
   if (!isJest) {
+    // Optional periodic divergence scans; opt in via env var. The scan job is
+    // bounded, so a scheduled run never compares more than maxContracts.
+    if (process.env['MILESTONE_DIVERGENCE_SCAN_ENABLED'] === 'true') {
+      await milestoneDivergenceSchedulerService.start();
+    }
+
     const server = app.listen(PORT, () => {
       console.log(`TalentTrust API listening on http://localhost:${PORT}`);
     });

@@ -24,6 +24,7 @@ import jwt from 'jsonwebtoken';
 import { verifyApiKey, validateApiKey, ApiKeyInfo } from '../auth/apiKeys';
 import { redactSecret } from '../utils/redact';
 import { JWT_VERIFY_OPTIONS } from '../auth/jwtConfig';
+import { extractBearerToken, sendUnauthorized, sendForbidden } from '../lib/authHelpers';
 
 /** Shape of the decoded JWT payload. */
 interface AdminJwtPayload {
@@ -56,31 +57,7 @@ const REQUIRED_ADMIN_SCOPES = new Set([
   'jobs:*',
 ]);
 
-// ─── Response helpers ─────────────────────────────────────────────────────────
 
-function unauthorized(res: Response, message = 'Unauthorized'): void {
-  const requestId =
-    typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(401).json({
-    error: {
-      code: 'unauthorized',
-      message,
-      requestId,
-    },
-  });
-}
-
-function forbidden(res: Response, message = 'Forbidden'): void {
-  const requestId =
-    typeof res.locals.requestId === 'string' ? res.locals.requestId : 'unknown';
-  res.status(403).json({
-    error: {
-      code: 'forbidden',
-      message,
-      requestId,
-    },
-  });
-}
 
 // ─── JWT validation ───────────────────────────────────────────────────────────
 
@@ -149,7 +126,7 @@ export async function adminAuthGuard(
   // ── Attempt JWT authentication ────────────────────────────────────────────
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
+    const token = extractBearerToken(req)!;
 
     // Demo tokens for test environments (mirrors authMiddleware behaviour)
     if (token === 'demo-admin-token') {
@@ -163,7 +140,7 @@ export async function adminAuthGuard(
     }
 
     if (token === 'demo-user-token') {
-      return forbidden(res, 'Admin role required.');
+      return sendForbidden(res, 'Admin role required.');
     }
 
     const jwtPayload = validateAdminJwt(token);
@@ -178,7 +155,7 @@ export async function adminAuthGuard(
     }
 
     // Token was provided but invalid — reject immediately
-    return unauthorized(res, 'Invalid or expired JWT token.');
+    return sendUnauthorized(res, 'Invalid or expired JWT token.');
   }
 
   // ── Attempt API key authentication ────────────────────────────────────────
@@ -200,16 +177,16 @@ export async function adminAuthGuard(
 
       // Key was provided but invalid or insufficient scope
       if (apiKeyInfo && !hasAdminScope(apiKeyInfo)) {
-        return forbidden(res, 'API key does not have admin scope.');
+        return sendForbidden(res, 'API key does not have admin scope.');
       }
 
-      return unauthorized(res, 'Invalid API key.');
+      return sendUnauthorized(res, 'Invalid API key.');
     } catch {
-      return unauthorized(res, 'Invalid API key.');
+      return sendUnauthorized(res, 'Invalid API key.');
     }
   }
 
   // ── No credentials provided ────────────────────────────────────────────────
 
-  return unauthorized(res, 'Authentication required. Provide Bearer JWT or X-API-Key.');
+  return sendUnauthorized(res, 'Authentication required. Provide Bearer JWT or X-API-Key.');
 }

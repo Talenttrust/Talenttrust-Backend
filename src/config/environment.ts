@@ -1,9 +1,20 @@
 /**
  * Environment Configuration Module
- * 
+ *
  * Manages environment-specific configurations for deployment across
  * development, staging, and production environments.
- * 
+ *
+ * Concurrency invariants:
+ * - The environment configuration is a pure function of `process.env`
+ *   at the moment of call. Repeated or concurrent calls with the same
+ *   environment produce identical, frozen results.
+ * - A memoized snapshot is only exposed after successful validation, so a
+ *   failed load cannot leak a partially constructed config.
+ * - Concurrent loads share a single in-flight promise, so validation
+ *   and construction run at most once per snapshot and never interleave.
+ * - Callers receive a deep-frozen object; mutation attempts throw in
+ *   strict mode instead of silently corrupting shared state.
+ *
  * @module config/environment
  */
 
@@ -33,12 +44,13 @@ export interface EnvironmentConfig extends EnvConfig {
 }
 
 /**
- * Validates required environment variables using Zod schema.
+ * Validates required environment variables using Zid schema.
  * This is now a wrapper around validateEnv.
+ * @params env - Optional environment object to validate (defaults: process.env)
  * @throws {Error} If required environment variables are missing or invalid
  */
-export function validateEnvironment(): void {
-  validateEnv(process.env);
+export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  validateEnv(env);
 }
 
 /**
@@ -47,24 +59,37 @@ export function validateEnvironment(): void {
  */
 export function getCurrentEnvironment(): Environment {
   const env = process.env.NODE_ENV || 'development';
-  
+
   if (env === 'production' || env === 'staging' || env === 'development' || env === 'test') {
     return env as Environment;
   }
-  
+
   return 'development';
 }
 
 /**
- * Loads environment-specific configuration and validates it against the schema.
- * @returns {EnvironmentConfig} Configuration object for current environment
+ * Freezes an object recursively so that shared configuration cannot be
+ * mutated by any caller. Arrays are frozen as well and their elements
+ * are frozen when they are objects.
  */
-export function loadEnvironmentConfig(): EnvironmentConfig {
-  const validated = validateEnv(process.env);
-  
+function deepFreeze<T>(value: T): T  {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.getOwnPropertyNames(value)) {
+      const child = (value as Record<string, unknown>)[ key ];
+      deepFreeze(child);
+    }
+  }
+  return value;
+}
+
+/**
+ * Builds a frozen EnvironmentConfig from a validated env object.
+ */
+function buildConfig(validated: EnvConfig): EnvironmentConfig {
   const environment = validated.NODE_ENV as Environment;
   const port = validated.PORT;
-  
+
   const baseConfig: EnvironmentConfig = {
     ...validated,
     environment,
@@ -75,10 +100,126 @@ export function loadEnvironmentConfig(): EnvironmentConfig {
     databaseUrl: validated.DATABASE_URL,
     stellarNetwork: environment === 'production' ? 'mainnet' : 'testnet',
     maxRequestSize: validated.MAX_REQUEST_SIZE,
-    corsOrigins: validated.CORS_ALLOWED_ORIGINS ?? (validated.NODE_ENV === 'production' ? [] : ['http://localhost:3000']),
+    corsOrigins:
+      validated.CORS_ALLOWED_ORIGINS ??
+      (validated.NODE_ENV === 'production' ? [] : ['http://localhost:3000']),
   };
-  
-  return baseConfig;
+
+  return deepFreeze(baseConfig);
+}
+
+/**
+ * Cache keyed by the identity of the env snapshot used to build the
+ * configuration. When NODE_ENV or any other relevant variable changes,
+ * the cache is invalidated and a fresh config is built.
+ */
+let cachedKey: string | undefined;
+let cachedConfig: EnvironmentConfig | undefined;
+let inFlight: Promise<EnvironmentConfig> | undefined;
+
+const CACHE_KEY_VARS: ReadonlyArray<string> = [
+  'NODE_ENV',
+  'PORT',
+  'API_BASE_URL',
+  'DEBUG',
+  'DATABASE_URL',
+  'MAX_REQUEST_SIZE',
+  'CORS_ALLOWED_ORIGINS',
+];
+
+/**
+ * Computes a deterministic cache key from the current environment
+ * snapshot. Only values that affect the resulting config are included.
+ */
+function computeCacheKey(env: NodeJS.ProcessEnv): string {
+  return CACHE_KEY_VARS.map((k) => `${k}=${env[k] ?? ''}`).join('\u0000');
+}
+
+/**
+ * Resets the internal configuration cache. Intended for tests and
+ * for explicit reload flows. It is safe to call concurrently: any
+ * in-flight promise is detached and will not be used to satisfy future
+ * requests.
+ */
+export function resetEnvironmentConfigCache(): void {
+  cachedKey = undefined;
+  cachedConfig = undefined;
+  inFlight = undefined;
+}
+
+/**
+ * Loads environment-specific configuration and validates it against
+ * the schema. Results of a successful load are memoized and deep
+ * frozen. Concurrent calls share a single in-flight promise so that
+ * validation runs at most once per env snapshot and cannot interleave.
+ *
+ * @params env - Optional environment object to load from (defaults: process.env)
+ * @returns {Promise<EnvironmentConfig>} Frozen configuration for the current environment
+ */
+export async function loadEnvironmentConfigAsync(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<EnvironmentConfig> {
+  const key = computeCacheKey(env);
+
+  if (cachedConfig && cachedKey === key) {
+    return cachedConfig;
+  }
+
+  if (inFlight && cachedKey === key) {
+    return inFlight;
+  }
+
+  // Start a fresh in-flight build. The promise is assigned before any
+  // await so that concurrent callers observe it atomically.
+  const build = Promise.resolve().then(() => {
+    const validated = validateEnv(env);
+    return buildConfig(validated);
+  });
+
+  cachedKey = key;
+  inFlight = build;
+
+  try {
+    const config = await build;
+    // Only commit to the cache if this promise is still the active
+    // in-flight one. If `resetEnvironmentConfigCache`)` was called while
+    // we were awaiting, the cache must not be repopulated with stale
+    // data.
+    if (inFlight === build) {
+      cachedConfig = config;
+      inFlight = undefined;
+    }
+    return config;
+  } catch (error) {
+    if (inFlight === build) {
+      inFlight = undefined;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Loads environment-specific configuration and validates it against
+ * the schema. Synchronous wrapper retained for backward compatibility
+ * with existing callers. The returned object is deep-frozen.
+ *
+ * @returns {EnvironmentConfig} Configuration object for current environment
+ */
+export function loadEnvironmentConfig(): EnvironmentConfig {
+  const key = computeCacheKey(process.env);
+
+  if (cachedConfig && cachedKey === key) {
+    return cachedConfig;
+  }
+
+  const validated = validateEnv(process.env);
+  const config = buildConfig(validated);
+
+  cachedKey = key;
+  cachedConfig = config;
+  inFlight = undefined;
+
+  return config;
 }
 
 /**
@@ -104,4 +245,3 @@ export function isStaging(): boolean {
 export function isDevelopment(): boolean {
   return getCurrentEnvironment() === 'development';
 }
-

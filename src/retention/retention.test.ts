@@ -1,9 +1,9 @@
 /**
  * Unit Tests for Data Retention Module
- * 
+ *
  * Comprehensive test coverage for retention policies, storage,
  * archival, and audit logging components.
- * 
+ *
  * @test
  */
 
@@ -20,20 +20,20 @@ import {
   ArchivalStorageType,
   RetentionAction,
   RetentionConfig,
-} from './index';
+} from "./index";
 
-describe('RetentionPolicyEngine', () => {
+describe("RetentionPolicyEngine", () => {
   let engine: RetentionPolicyEngine;
 
   beforeEach(() => {
     engine = new RetentionPolicyEngine();
   });
 
-  describe('createPolicy', () => {
-    it('should create a policy with all required fields', () => {
+  describe("createPolicy", () => {
+    it("should create a policy with all required fields", () => {
       const policy = engine.createPolicy({
-        name: 'Test Policy',
-        description: 'A test policy',
+        name: "Test Policy",
+        description: "A test policy",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -45,16 +45,16 @@ describe('RetentionPolicyEngine', () => {
 
       expect(policy).toBeDefined();
       expect(policy.id).toBeDefined();
-      expect(policy.name).toBe('Test Policy');
+      expect(policy.name).toBe("Test Policy");
       expect(policy.createdAt).toBeDefined();
       expect(policy.updatedAt).toBeDefined();
     });
 
-    it('should throw error for empty policy name', () => {
+    it("should throw error for empty policy name", () => {
       expect(() => {
         engine.createPolicy({
-          name: '',
-          description: 'A test policy',
+          name: "",
+          description: "A test policy",
           entityType: DataEntityType.CONTRACT,
           period: RetentionPeriod.NINETY_DAYS,
           classification: DataClassification.CONFIDENTIAL,
@@ -63,15 +63,15 @@ describe('RetentionPolicyEngine', () => {
           allowPermanentRetention: false,
           isActive: true,
         });
-      }).toThrow('Policy name is required');
+      }).toThrow("Policy name is required");
     });
 
-    it('should throw error for invalid entity type', () => {
+    it("should throw error for invalid entity type", () => {
       expect(() => {
         engine.createPolicy({
-          name: 'Test',
-          description: 'A test policy',
-          entityType: 'invalid' as any,
+          name: "Test",
+          description: "A test policy",
+          entityType: "invalid" as any,
           period: RetentionPeriod.NINETY_DAYS,
           classification: DataClassification.CONFIDENTIAL,
           archivalType: ArchivalStorageType.COLD_STORAGE,
@@ -79,15 +79,15 @@ describe('RetentionPolicyEngine', () => {
           allowPermanentRetention: false,
           isActive: true,
         });
-      }).toThrow('Invalid or missing entity type');
+      }).toThrow("Invalid or missing entity type");
     });
   });
 
-  describe('updatePolicy', () => {
-    it('should update policy fields', async () => {
+  describe("updatePolicy", () => {
+    it("should update policy fields", async () => {
       const policy = engine.createPolicy({
-        name: 'Original',
-        description: 'Original description',
+        name: "Original",
+        description: "Original description",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -98,31 +98,33 @@ describe('RetentionPolicyEngine', () => {
       });
 
       // Add small delay to ensure updatedAt is different
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const updated = engine.updatePolicy(policy.id, {
-        name: 'Updated',
+        name: "Updated",
         period: RetentionPeriod.ONE_YEAR,
       });
 
-      expect(updated.name).toBe('Updated');
+      expect(updated.name).toBe("Updated");
       expect(updated.period).toBe(RetentionPeriod.ONE_YEAR);
       expect(updated.createdAt).toEqual(policy.createdAt);
-      expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(policy.updatedAt.getTime());
+      expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(
+        policy.updatedAt.getTime(),
+      );
     });
 
-    it('should throw error when updating non-existent policy', () => {
+    it("should throw error when updating non-existent policy", () => {
       expect(() => {
-        engine.updatePolicy('non-existent', { name: 'Updated' });
-      }).toThrow('Policy not found');
+        engine.updatePolicy("non-existent", { name: "Updated" });
+      }).toThrow("Policy not found");
     });
   });
 
-  describe('getActivePolicies', () => {
-    it('should return only active policies', () => {
+  describe("getActivePolicies", () => {
+    it("should return only active policies", () => {
       const active = engine.createPolicy({
-        name: 'Active Policy',
-        description: 'Active',
+        name: "Active Policy",
+        description: "Active",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -133,8 +135,8 @@ describe('RetentionPolicyEngine', () => {
       });
 
       engine.createPolicy({
-        name: 'Inactive Policy',
-        description: 'Inactive',
+        name: "Inactive Policy",
+        description: "Inactive",
         entityType: DataEntityType.DOCUMENT,
         period: RetentionPeriod.THIRTY_DAYS,
         classification: DataClassification.INTERNAL,
@@ -150,11 +152,11 @@ describe('RetentionPolicyEngine', () => {
     });
   });
 
-  describe('calculateExpirationDate', () => {
-    it('should calculate correct expiration for 30 days', () => {
+  describe("calculateExpirationDate", () => {
+    it("should calculate correct expiration for 30 days", () => {
       const policy = engine.createPolicy({
-        name: 'Test 30d',
-        description: 'Test',
+        name: "Test 30d",
+        description: "Test",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.THIRTY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -165,18 +167,18 @@ describe('RetentionPolicyEngine', () => {
       });
 
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
-        createdAt: new Date('2024-01-01'),
+        createdAt: new Date("2024-01-01"),
         expiresAt: new Date(),
         isArchived: false,
         retentionPolicyId: policy.id,
       };
 
       const expiration = engine.calculateExpirationDate(data);
-      const expectedExpiration = new Date('2024-01-31'); // 30 days later
+      const expectedExpiration = new Date("2024-01-31"); // 30 days later
 
       expect(expiration.getDate()).toBe(expectedExpiration.getDate());
       expect(expiration.getMonth()).toBe(expectedExpiration.getMonth());
@@ -184,10 +186,10 @@ describe('RetentionPolicyEngine', () => {
     });
   });
 
-  describe('determineRetentionStatus', () => {
-    it('should flag data as needing action when expired', () => {
+  describe("determineRetentionStatus", () => {
+    it("should flag data as needing action when expired", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -199,12 +201,12 @@ describe('RetentionPolicyEngine', () => {
       const status = engine.determineRetentionStatus(data);
 
       expect(status.needsAction).toBe(true);
-      expect(status.actionRequired).toContain('should be archived');
+      expect(status.actionRequired).toContain("should be archived");
     });
 
-    it('should flag data expiring soon', () => {
+    it("should flag data expiring soon", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -216,14 +218,14 @@ describe('RetentionPolicyEngine', () => {
       const status = engine.determineRetentionStatus(data);
 
       expect(status.needsAction).toBe(true);
-      expect(status.actionRequired).toContain('approaching');
+      expect(status.actionRequired).toContain("approaching");
     });
   });
 
-  describe('shouldArchive', () => {
-    it('should return true for expired non-archived data', () => {
+  describe("shouldArchive", () => {
+    it("should return true for expired non-archived data", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -235,9 +237,9 @@ describe('RetentionPolicyEngine', () => {
       expect(engine.shouldArchive(data)).toBe(true);
     });
 
-    it('should return false for already archived data', () => {
+    it("should return false for already archived data", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -251,10 +253,10 @@ describe('RetentionPolicyEngine', () => {
     });
   });
 
-  describe('shouldPermanentlyDelete', () => {
-    it('should return true for archived data past post-archival retention', () => {
+  describe("shouldPermanentlyDelete", () => {
+    it("should return true for archived data past post-archival retention", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -267,9 +269,9 @@ describe('RetentionPolicyEngine', () => {
       expect(engine.shouldPermanentlyDelete(data, 30)).toBe(true); // 30 day post-archival
     });
 
-    it('should return false for recently archived data', () => {
+    it("should return false for recently archived data", () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
         data: {},
         classification: DataClassification.CONFIDENTIAL,
@@ -284,7 +286,7 @@ describe('RetentionPolicyEngine', () => {
   });
 });
 
-describe('StorageManager', () => {
+describe("StorageManager", () => {
   let manager: StorageManager;
 
   beforeEach(() => {
@@ -294,12 +296,12 @@ describe('StorageManager', () => {
     );
   });
 
-  describe('store and retrieve', () => {
-    it('should store and retrieve data', async () => {
+  describe("store and retrieve", () => {
+    it("should store and retrieve data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -307,21 +309,27 @@ describe('StorageManager', () => {
       };
 
       await manager.store(data, ArchivalStorageType.LOCAL);
-      const retrieved = await manager.retrieve('test-1', ArchivalStorageType.LOCAL);
+      const retrieved = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.LOCAL,
+      );
 
       expect(retrieved).toEqual(data);
     });
 
-    it('should return null for non-existent data', async () => {
-      const retrieved = await manager.retrieve('non-existent', ArchivalStorageType.LOCAL);
+    it("should return null for non-existent data", async () => {
+      const retrieved = await manager.retrieve(
+        "non-existent",
+        ArchivalStorageType.LOCAL,
+      );
       expect(retrieved).toBeNull();
     });
 
-    it('should store to archive storage', async () => {
+    it("should store to archive storage", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -330,16 +338,19 @@ describe('StorageManager', () => {
       };
 
       await manager.store(data, ArchivalStorageType.COLD_STORAGE);
-      const retrieved = await manager.retrieve('test-1', ArchivalStorageType.COLD_STORAGE);
+      const retrieved = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.COLD_STORAGE,
+      );
 
       expect(retrieved).toBeDefined();
     });
 
-    it('should store to encrypted archive', async () => {
+    it("should store to encrypted archive", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.RESTRICTED,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -348,18 +359,21 @@ describe('StorageManager', () => {
       };
 
       await manager.store(data, ArchivalStorageType.ENCRYPTED_ARCHIVE);
-      const retrieved = await manager.retrieve('test-1', ArchivalStorageType.ENCRYPTED_ARCHIVE);
+      const retrieved = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.ENCRYPTED_ARCHIVE,
+      );
 
       expect(retrieved).toBeDefined();
     });
   });
 
-  describe('moveData', () => {
-    it('should move data between storage types', async () => {
+  describe("moveData", () => {
+    it("should move data between storage types", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -368,23 +382,29 @@ describe('StorageManager', () => {
 
       await manager.store(data, ArchivalStorageType.LOCAL);
       const success = await manager.moveData(
-        'test-1',
+        "test-1",
         ArchivalStorageType.LOCAL,
         ArchivalStorageType.COLD_STORAGE,
       );
 
       expect(success).toBe(true);
 
-      const fromLocal = await manager.retrieve('test-1', ArchivalStorageType.LOCAL);
+      const fromLocal = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.LOCAL,
+      );
       expect(fromLocal).toBeNull();
 
-      const fromCold = await manager.retrieve('test-1', ArchivalStorageType.COLD_STORAGE);
+      const fromCold = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.COLD_STORAGE,
+      );
       expect(fromCold).toBeDefined();
     });
 
-    it('should fail move for non-existent data', async () => {
+    it("should fail move for non-existent data", async () => {
       const success = await manager.moveData(
-        'non-existent',
+        "non-existent",
         ArchivalStorageType.LOCAL,
         ArchivalStorageType.COLD_STORAGE,
       );
@@ -393,12 +413,12 @@ describe('StorageManager', () => {
     });
   });
 
-  describe('delete', () => {
-    it('should delete data', async () => {
+  describe("delete", () => {
+    it("should delete data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -406,22 +426,28 @@ describe('StorageManager', () => {
       };
 
       await manager.store(data, ArchivalStorageType.LOCAL);
-      const deleted = await manager.delete('test-1', ArchivalStorageType.LOCAL);
+      const deleted = await manager.delete("test-1", ArchivalStorageType.LOCAL);
 
       expect(deleted).toBe(true);
 
-      const retrieved = await manager.retrieve('test-1', ArchivalStorageType.LOCAL);
+      const retrieved = await manager.retrieve(
+        "test-1",
+        ArchivalStorageType.LOCAL,
+      );
       expect(retrieved).toBeNull();
     });
 
-    it('should return false when deleting non-existent data', async () => {
-      const deleted = await manager.delete('non-existent', ArchivalStorageType.LOCAL);
+    it("should return false when deleting non-existent data", async () => {
+      const deleted = await manager.delete(
+        "non-existent",
+        ArchivalStorageType.LOCAL,
+      );
       expect(deleted).toBe(false);
     });
   });
 });
 
-describe('DataArchivalService', () => {
+describe("DataArchivalService", () => {
   let service: DataArchivalService;
   let engine: RetentionPolicyEngine;
   let manager: StorageManager;
@@ -435,12 +461,12 @@ describe('DataArchivalService', () => {
     service = new DataArchivalService(manager, engine, true); // encryption enabled
   });
 
-  describe('archiveData', () => {
-    it('should archive data successfully', async () => {
+  describe("archiveData", () => {
+    it("should archive data successfully", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -450,16 +476,16 @@ describe('DataArchivalService', () => {
       const result = await service.archiveData(data);
 
       expect(result.success).toBe(true);
-      expect(result.dataId).toBe('test-1');
+      expect(result.dataId).toBe("test-1");
       expect(result.archivedAt).toBeDefined();
       expect(result.location).toBeDefined();
     });
 
-    it('should throw error for already archived data', async () => {
+    it("should throw error for already archived data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -467,14 +493,16 @@ describe('DataArchivalService', () => {
         archivedAt: new Date(),
       };
 
-      await expect(service.archiveData(data)).rejects.toThrow('already archived');
+      await expect(service.archiveData(data)).rejects.toThrow(
+        "already archived",
+      );
     });
 
-    it('should encrypt restricted data', async () => {
+    it("should encrypt restricted data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.RESTRICTED,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -486,10 +514,10 @@ describe('DataArchivalService', () => {
       expect(result.encrypted).toBe(true);
     });
 
-    it('should encrypt confidential data when policy requires', async () => {
+    it("should encrypt confidential data when policy requires", async () => {
       const policy = engine.createPolicy({
-        name: 'Encrypted Policy',
-        description: 'Test',
+        name: "Encrypted Policy",
+        description: "Test",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -500,9 +528,9 @@ describe('DataArchivalService', () => {
       });
 
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -514,7 +542,7 @@ describe('DataArchivalService', () => {
       expect(result.encrypted).toBe(true);
     });
 
-    it('should not encrypt public data when encryption disabled', async () => {
+    it("should not encrypt public data when encryption disabled", async () => {
       // Create service with encryption disabled
       const disabledService = new DataArchivalService(
         new StorageManager(
@@ -526,9 +554,9 @@ describe('DataArchivalService', () => {
       );
 
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.PUBLIC,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -539,11 +567,11 @@ describe('DataArchivalService', () => {
       expect(result.encrypted).toBe(false);
     });
 
-    it('should respect options override for encryption', async () => {
+    it("should respect options override for encryption", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.PUBLIC,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -554,32 +582,34 @@ describe('DataArchivalService', () => {
       expect(result.encrypted).toBe(true);
     });
 
-    it('should use custom location when provided', async () => {
+    it("should use custom location when provided", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
         isArchived: false,
       };
 
-      const customLocation = '/custom/path/test-1';
-      const result = await service.archiveData(data, { location: customLocation });
-      
+      const customLocation = "/custom/path/test-1";
+      const result = await service.archiveData(data, {
+        location: customLocation,
+      });
+
       // The location in metadata should contain the custom location
       expect(result.location).toBeDefined();
       expect(result.metadata?.location || result.location).toBeDefined();
     });
   });
 
-  describe('restoreArchivedData', () => {
-    it('should restore archived data successfully', async () => {
+  describe("restoreArchivedData", () => {
+    it("should restore archived data successfully", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -590,23 +620,25 @@ describe('DataArchivalService', () => {
       await service.archiveData(data);
 
       // Then restore it
-      const restored = await service.restoreArchivedData('test-1');
+      const restored = await service.restoreArchivedData("test-1");
 
       expect(restored.isArchived).toBe(false);
       expect(restored.archivedAt).toBeUndefined();
     });
 
-    it('should throw error for non-existent archived data', async () => {
-      await expect(service.restoreArchivedData('non-existent')).rejects.toThrow('not found');
+    it("should throw error for non-existent archived data", async () => {
+      await expect(service.restoreArchivedData("non-existent")).rejects.toThrow(
+        "not found",
+      );
     });
   });
 
-  describe('getArchivedData', () => {
-    it('should retrieve archived data', async () => {
+  describe("getArchivedData", () => {
+    it("should retrieve archived data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -614,24 +646,24 @@ describe('DataArchivalService', () => {
       };
 
       await service.archiveData(data);
-      const archived = await service.getArchivedData('test-1');
+      const archived = await service.getArchivedData("test-1");
 
       expect(archived).toBeDefined();
       expect(archived!.isArchived).toBe(true);
     });
 
-    it('should return null for non-existent archived data', async () => {
-      const archived = await service.getArchivedData('non-existent');
+    it("should return null for non-existent archived data", async () => {
+      const archived = await service.getArchivedData("non-existent");
       expect(archived).toBeNull();
     });
   });
 
-  describe('permanentlyDeleteArchived', () => {
-    it('should permanently delete archived data', async () => {
+  describe("permanentlyDeleteArchived", () => {
+    it("should permanently delete archived data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -639,21 +671,21 @@ describe('DataArchivalService', () => {
       };
 
       await service.archiveData(data);
-      const deleted = await service.permanentlyDeleteArchived('test-1');
+      const deleted = await service.permanentlyDeleteArchived("test-1");
 
       expect(deleted).toBe(true);
 
-      const retrieved = await service.getArchivedData('test-1');
+      const retrieved = await service.getArchivedData("test-1");
       expect(retrieved).toBeNull();
     });
   });
 
-  describe('getArchivalStatus', () => {
-    it('should get archival status for archived data', async () => {
+  describe("getArchivalStatus", () => {
+    it("should get archival status for archived data", async () => {
       const data = {
-        id: 'test-1',
+        id: "test-1",
         entityType: DataEntityType.CONTRACT,
-        data: { contractId: '123' },
+        data: { contractId: "123" },
         classification: DataClassification.CONFIDENTIAL,
         createdAt: new Date(),
         expiresAt: new Date(),
@@ -661,186 +693,251 @@ describe('DataArchivalService', () => {
       };
 
       await service.archiveData(data);
-      const status = await service.getArchivalStatus('test-1');
+      const status = await service.getArchivalStatus("test-1");
 
       expect(status.archived).toBe(true);
       expect(status.location).toBeDefined();
       expect(status.timestamp).toBeDefined();
     });
 
-    it('should return not archived for non-existent data', async () => {
-      const status = await service.getArchivalStatus('non-existent');
+    it("should return not archived for non-existent data", async () => {
+      const status = await service.getArchivalStatus("non-existent");
       expect(status.archived).toBe(false);
     });
   });
 });
 
-describe('ComplianceAuditLogger', () => {
+describe("ComplianceAuditLogger", () => {
   let logger: ComplianceAuditLogger;
 
   beforeEach(() => {
     logger = new ComplianceAuditLogger();
   });
 
-  describe('logAction', () => {
-    it('should log action successfully', () => {
+  describe("logAction", () => {
+    it("should log action successfully", () => {
       const log = logger.logAction({
-        entityId: 'test-1',
+        entityId: "test-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user@example.com',
-        details: { policyId: 'policy-1' },
-        compliance: 'GDPR',
+        actor: "user@example.com",
+        details: { policyId: "policy-1" },
+        compliance: "GDPR",
       });
 
       expect(log.id).toBeDefined();
-      expect(log.entityId).toBe('test-1');
+      expect(log.entityId).toBe("test-1");
       expect(log.action).toBe(RetentionAction.CREATE);
       expect(log.timestamp).toBeDefined();
     });
 
-    it('should log action with optional notes', () => {
+    it("should log action with optional notes", () => {
       const log = logger.logAction({
-        entityId: 'test-1',
+        entityId: "test-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.DELETE,
-        actor: 'admin',
+        actor: "admin",
         details: {},
-        compliance: 'CCPA',
-        notes: 'Deletion requested by user',
+        compliance: "CCPA",
+        notes: "Deletion requested by user",
       });
 
-      expect(log.notes).toBe('Deletion requested by user');
+      expect(log.notes).toBe("Deletion requested by user");
+    });
+
+    it("should generate a valid proof for archive actions and verify it successfully", () => {
+      const originalSecret = process.env.COMPLIANCE_AUDIT_SECRET;
+      process.env.COMPLIANCE_AUDIT_SECRET = "a".repeat(32);
+
+      try {
+        const log = logger.logAction({
+          entityId: "proof-1",
+          entityType: DataEntityType.CONTRACT,
+          action: RetentionAction.ARCHIVE,
+          actor: "system",
+          details: { reason: "retention expired" },
+          compliance: "GDPR",
+        });
+
+        expect(log.proof).toBeDefined();
+        expect(logger.verifyProof(log)).toBe(true);
+      } finally {
+        process.env.COMPLIANCE_AUDIT_SECRET = originalSecret;
+      }
+    });
+
+    it("should throw when COMPLIANCE_AUDIT_SECRET is missing for proof generation", () => {
+      const originalSecret = process.env.COMPLIANCE_AUDIT_SECRET;
+      delete process.env.COMPLIANCE_AUDIT_SECRET;
+
+      try {
+        expect(() => {
+          logger.logAction({
+            entityId: "proof-2",
+            entityType: DataEntityType.CONTRACT,
+            action: RetentionAction.DELETE,
+            actor: "admin",
+            details: {},
+            compliance: "CCPA",
+          });
+        }).toThrow(/COMPLIANCE_AUDIT_SECRET/);
+      } finally {
+        process.env.COMPLIANCE_AUDIT_SECRET = originalSecret;
+      }
+    });
+
+    it("should detect a tampered proof as invalid", () => {
+      const originalSecret = process.env.COMPLIANCE_AUDIT_SECRET;
+      process.env.COMPLIANCE_AUDIT_SECRET = "a".repeat(32);
+
+      try {
+        const log = logger.logAction({
+          entityId: "proof-3",
+          entityType: DataEntityType.CONTRACT,
+          action: RetentionAction.DELETE,
+          actor: "admin",
+          details: {},
+          compliance: "CCPA",
+        });
+
+        expect(logger.verifyProof(log)).toBe(true);
+        const tamperedLog = { ...log, details: { tampered: true } };
+        expect(logger.verifyProof(tamperedLog as any)).toBe(false);
+      } finally {
+        process.env.COMPLIANCE_AUDIT_SECRET = originalSecret;
+      }
     });
   });
 
-  describe('getLogsForEntity', () => {
-    it('should retrieve logs for specific entity', () => {
+  describe("getLogsForEntity", () => {
+    it("should retrieve logs for specific entity", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.ARCHIVE,
-        actor: 'system',
+        actor: "system",
         details: {},
       });
 
       logger.logAction({
-        entityId: 'entity-2',
+        entityId: "entity-2",
         entityType: DataEntityType.DOCUMENT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
-      const logs = logger.getLogsForEntity('entity-1');
+      const logs = logger.getLogsForEntity("entity-1");
       expect(logs).toHaveLength(2);
-      expect(logs.every(log => log.entityId === 'entity-1')).toBe(true);
+      expect(logs.every((log) => log.entityId === "entity-1")).toBe(true);
     });
 
-    it('should return empty array for entity with no logs', () => {
-      const logs = logger.getLogsForEntity('non-existent');
+    it("should return empty array for entity with no logs", () => {
+      const logs = logger.getLogsForEntity("non-existent");
       expect(logs).toHaveLength(0);
     });
 
-    it('should return logs sorted by timestamp', () => {
+    it("should return logs sorted by timestamp", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
       // Small delay to ensure different timestamps
       setTimeout(() => {
         logger.logAction({
-          entityId: 'entity-1',
+          entityId: "entity-1",
           entityType: DataEntityType.CONTRACT,
           action: RetentionAction.ARCHIVE,
-          actor: 'system',
+          actor: "system",
           details: {},
         });
       }, 10);
 
-      const logs = logger.getLogsForEntity('entity-1');
+      const logs = logger.getLogsForEntity("entity-1");
       for (let i = 1; i < logs.length; i++) {
-        expect(logs[i].timestamp.getTime()).toBeGreaterThanOrEqual(logs[i - 1].timestamp.getTime());
+        expect(logs[i].timestamp.getTime()).toBeGreaterThanOrEqual(
+          logs[i - 1].timestamp.getTime(),
+        );
       }
     });
   });
 
-  describe('queryLogs', () => {
+  describe("queryLogs", () => {
     beforeEach(() => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user1',
+        actor: "user1",
         details: {},
-        compliance: 'GDPR',
+        compliance: "GDPR",
       });
 
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.ARCHIVE,
-        actor: 'system',
+        actor: "system",
         details: {},
-        compliance: 'CCPA',
+        compliance: "CCPA",
       });
 
       logger.logAction({
-        entityId: 'entity-2',
+        entityId: "entity-2",
         entityType: DataEntityType.DOCUMENT,
         action: RetentionAction.DELETE,
-        actor: 'admin',
+        actor: "admin",
         details: {},
-        compliance: 'GDPR',
+        compliance: "GDPR",
       });
     });
 
-    it('should filter by action', () => {
+    it("should filter by action", () => {
       const logs = logger.queryLogs({ action: RetentionAction.CREATE });
       expect(logs).toHaveLength(1);
       expect(logs[0].action).toBe(RetentionAction.CREATE);
     });
 
-    it('should filter by compliance standard', () => {
-      const logs = logger.queryLogs({ compliance: 'GDPR' });
+    it("should filter by compliance standard", () => {
+      const logs = logger.queryLogs({ compliance: "GDPR" });
       expect(logs).toHaveLength(2);
-      expect(logs.every(l => l.compliance === 'GDPR')).toBe(true);
+      expect(logs.every((l) => l.compliance === "GDPR")).toBe(true);
     });
 
-    it('should filter by actor', () => {
-      const logs = logger.queryLogs({ actor: 'system' });
+    it("should filter by actor", () => {
+      const logs = logger.queryLogs({ actor: "system" });
       expect(logs).toHaveLength(1);
-      expect(logs[0].actor).toBe('system');
+      expect(logs[0].actor).toBe("system");
     });
 
-    it('should filter by entity type', () => {
+    it("should filter by entity type", () => {
       const logs = logger.queryLogs({ entityType: DataEntityType.CONTRACT });
       expect(logs).toHaveLength(2);
     });
 
-    it('should filter by multiple criteria', () => {
+    it("should filter by multiple criteria", () => {
       const logs = logger.queryLogs({
         entityType: DataEntityType.CONTRACT,
-        actor: 'system',
-        compliance: 'CCPA',
+        actor: "system",
+        compliance: "CCPA",
       });
       expect(logs).toHaveLength(1);
       expect(logs[0].action).toBe(RetentionAction.ARCHIVE);
     });
 
-    it('should filter by date range', () => {
+    it("should filter by date range", () => {
       const now = new Date();
       const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
@@ -852,19 +949,19 @@ describe('ComplianceAuditLogger', () => {
       expect(logs.length).toBeGreaterThan(0);
     });
 
-    it('should return empty array for non-matching filters', () => {
-      const logs = logger.queryLogs({ actor: 'non-existent-actor' });
+    it("should return empty array for non-matching filters", () => {
+      const logs = logger.queryLogs({ actor: "non-existent-actor" });
       expect(logs).toHaveLength(0);
     });
   });
 
-  describe('getLogById', () => {
-    it('should retrieve log by ID', () => {
+  describe("getLogById", () => {
+    it("should retrieve log by ID", () => {
       const log = logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
@@ -872,39 +969,39 @@ describe('ComplianceAuditLogger', () => {
       expect(retrieved).toEqual(log);
     });
 
-    it('should return undefined for non-existent log ID', () => {
-      const retrieved = logger.getLogById('non-existent-id');
+    it("should return undefined for non-existent log ID", () => {
+      const retrieved = logger.getLogById("non-existent-id");
       expect(retrieved).toBeUndefined();
     });
   });
 
-  describe('getComplianceReport', () => {
-    it('should generate compliance report', () => {
+  describe("getComplianceReport", () => {
+    it("should generate compliance report", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
-        compliance: 'GDPR',
+        compliance: "GDPR",
       });
 
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.ARCHIVE,
-        actor: 'system',
+        actor: "system",
         details: {},
-        compliance: 'GDPR',
+        compliance: "GDPR",
       });
 
       logger.logAction({
-        entityId: 'entity-2',
+        entityId: "entity-2",
         entityType: DataEntityType.DOCUMENT,
         action: RetentionAction.DELETE,
-        actor: 'admin',
+        actor: "admin",
         details: {},
-        compliance: 'CCPA',
+        compliance: "CCPA",
       });
 
       const report = logger.getComplianceReport();
@@ -917,48 +1014,48 @@ describe('ComplianceAuditLogger', () => {
     });
   });
 
-  describe('getEntityAuditSummary', () => {
-    it('should return audit summary for entity', () => {
+  describe("getEntityAuditSummary", () => {
+    it("should return audit summary for entity", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.ARCHIVE,
-        actor: 'system',
+        actor: "system",
         details: {},
       });
 
-      const summary = logger.getEntityAuditSummary('entity-1');
+      const summary = logger.getEntityAuditSummary("entity-1");
 
-      expect(summary.entity).toBe('entity-1');
+      expect(summary.entity).toBe("entity-1");
       expect(summary.actionCount).toBe(2);
       expect(summary.actions).toContain(RetentionAction.CREATE);
       expect(summary.actions).toContain(RetentionAction.ARCHIVE);
     });
 
-    it('should return empty summary for entity with no logs', () => {
-      const summary = logger.getEntityAuditSummary('non-existent');
+    it("should return empty summary for entity with no logs", () => {
+      const summary = logger.getEntityAuditSummary("non-existent");
 
-      expect(summary.entity).toBe('non-existent');
+      expect(summary.entity).toBe("non-existent");
       expect(summary.actionCount).toBe(0);
       expect(summary.actions).toHaveLength(0);
     });
   });
 
-  describe('exportLogs', () => {
-    it('should export all logs', () => {
+  describe("exportLogs", () => {
+    it("should export all logs", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
@@ -966,38 +1063,38 @@ describe('ComplianceAuditLogger', () => {
       expect(exported).toHaveLength(1);
     });
 
-    it('should export filtered logs', () => {
+    it("should export filtered logs", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
-        compliance: 'GDPR',
+        compliance: "GDPR",
       });
 
       logger.logAction({
-        entityId: 'entity-2',
+        entityId: "entity-2",
         entityType: DataEntityType.DOCUMENT,
         action: RetentionAction.DELETE,
-        actor: 'admin',
+        actor: "admin",
         details: {},
-        compliance: 'CCPA',
+        compliance: "CCPA",
       });
 
-      const exported = logger.exportLogs({ compliance: 'GDPR' });
+      const exported = logger.exportLogs({ compliance: "GDPR" });
       expect(exported).toHaveLength(1);
-      expect(exported[0].compliance).toBe('GDPR');
+      expect(exported[0].compliance).toBe("GDPR");
     });
   });
 
-  describe('clearLogs', () => {
-    it('should clear all logs', () => {
+  describe("clearLogs", () => {
+    it("should clear all logs", () => {
       logger.logAction({
-        entityId: 'entity-1',
+        entityId: "entity-1",
         entityType: DataEntityType.CONTRACT,
         action: RetentionAction.CREATE,
-        actor: 'user',
+        actor: "user",
         details: {},
       });
 
@@ -1009,18 +1106,18 @@ describe('ComplianceAuditLogger', () => {
   });
 });
 
-describe('DataRetentionManager', () => {
+describe("DataRetentionManager", () => {
   let manager: DataRetentionManager;
   const config: RetentionConfig = {
     enabled: true,
-    storageBasePath: '/data',
-    archiveBasePath: '/archive',
+    storageBasePath: "/data",
+    archiveBasePath: "/archive",
     checksIntervalMs: 60000,
     batchSize: 100,
     automaticArchival: true,
     automaticDeletion: false,
     postArchivalRetentionDays: 30,
-    complianceStandard: 'GDPR',
+    complianceStandard: "GDPR",
     encryptionEnabled: true,
   };
 
@@ -1028,11 +1125,11 @@ describe('DataRetentionManager', () => {
     manager = new DataRetentionManager(config);
   });
 
-  describe('storeData', () => {
-    it('should store data with retention policy', async () => {
+  describe("storeData", () => {
+    it("should store data with retention policy", async () => {
       const policy = manager.createRetentionPolicy({
-        name: 'Test Policy',
-        description: 'Test',
+        name: "Test Policy",
+        description: "Test",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -1045,12 +1142,12 @@ describe('DataRetentionManager', () => {
       const result = await manager.storeData(
         {
           entityType: DataEntityType.CONTRACT,
-          data: { contractId: '123' },
+          data: { contractId: "123" },
           classification: DataClassification.CONFIDENTIAL,
           createdAt: new Date(),
         },
         policy.id,
-        'user@example.com',
+        "user@example.com",
       );
 
       expect(result.data.id).toBeDefined();
@@ -1059,11 +1156,11 @@ describe('DataRetentionManager', () => {
     });
   });
 
-  describe('createRetentionPolicy', () => {
-    it('should create and register policy', () => {
+  describe("createRetentionPolicy", () => {
+    it("should create and register policy", () => {
       const policy = manager.createRetentionPolicy({
-        name: 'Contract Retention',
-        description: 'Retain contracts for 1 year',
+        name: "Contract Retention",
+        description: "Retain contracts for 1 year",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.ONE_YEAR,
         classification: DataClassification.CONFIDENTIAL,
@@ -1074,18 +1171,18 @@ describe('DataRetentionManager', () => {
       });
 
       expect(policy.id).toBeDefined();
-      expect(policy.name).toBe('Contract Retention');
+      expect(policy.name).toBe("Contract Retention");
 
       const retrieved = manager.getRetentionPolicy(policy.id);
       expect(retrieved).toEqual(policy);
     });
   });
 
-  describe('getActivePolicies', () => {
-    it('should return all active policies', () => {
+  describe("getActivePolicies", () => {
+    it("should return all active policies", () => {
       manager.createRetentionPolicy({
-        name: 'Policy 1',
-        description: '',
+        name: "Policy 1",
+        description: "",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -1096,8 +1193,8 @@ describe('DataRetentionManager', () => {
       });
 
       manager.createRetentionPolicy({
-        name: 'Policy 2',
-        description: '',
+        name: "Policy 2",
+        description: "",
         entityType: DataEntityType.DOCUMENT,
         period: RetentionPeriod.THIRTY_DAYS,
         classification: DataClassification.INTERNAL,
@@ -1112,8 +1209,8 @@ describe('DataRetentionManager', () => {
     });
   });
 
-  describe('automated processing', () => {
-    it('should start and stop automated processing', () => {
+  describe("automated processing", () => {
+    it("should start and stop automated processing", () => {
       manager.startAutomatedProcessing();
       expect(true).toBe(true); // Processing started without error
 
@@ -1121,7 +1218,7 @@ describe('DataRetentionManager', () => {
       expect(true).toBe(true); // Processing stopped without error
     });
 
-    it('should not start if retention disabled', () => {
+    it("should not start if retention disabled", () => {
       const disabledManager = new DataRetentionManager({
         ...config,
         enabled: false,
@@ -1132,11 +1229,11 @@ describe('DataRetentionManager', () => {
     });
   });
 
-  describe('audit logging', () => {
-    it('should provide audit logs', async () => {
+  describe("audit logging", () => {
+    it("should provide audit logs", async () => {
       const policy = manager.createRetentionPolicy({
-        name: 'Policy',
-        description: '',
+        name: "Policy",
+        description: "",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,
@@ -1149,7 +1246,7 @@ describe('DataRetentionManager', () => {
       await manager.storeData(
         {
           entityType: DataEntityType.CONTRACT,
-          data: { contractId: '123' },
+          data: { contractId: "123" },
           classification: DataClassification.CONFIDENTIAL,
           createdAt: new Date(),
         },
@@ -1160,10 +1257,10 @@ describe('DataRetentionManager', () => {
       expect(logs.length).toBeGreaterThan(0);
     });
 
-    it('should provide compliance report', () => {
+    it("should provide compliance report", () => {
       manager.createRetentionPolicy({
-        name: 'Policy',
-        description: '',
+        name: "Policy",
+        description: "",
         entityType: DataEntityType.CONTRACT,
         period: RetentionPeriod.NINETY_DAYS,
         classification: DataClassification.CONFIDENTIAL,

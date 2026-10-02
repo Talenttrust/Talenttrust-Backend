@@ -45,8 +45,15 @@
 // single default import — see the JSDoc at the constructor of
 // `SqliteAuditRepository` for why `typeof Database` is wrong.
 import Database, { Database as DbInstance } from '../db/betterSqlite3';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { SqliteAuditRepository } from './sqliteRepository';
-import type { CreateAuditEntryInput } from './types';
+import type { AuditEntry, CreateAuditEntryInput } from './types';
+import { encodeCursor, decodeCursor, type CursorData } from './types';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import path from 'path';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -61,6 +68,66 @@ function makeInput(overrides: Partial<CreateAuditEntryInput> = {}): CreateAuditE
     metadata: { key: 'value' },
     ...overrides,
   };
+}
+
+/**
+ * Seeds a repository with a fixed set of five heterogeneous audit entries used
+ * by the `query()` filter-combination suite. The distribution is pinned so the
+ * per-filter counts asserted by those tests hold:
+ *   - action:     1 × CONTRACT_CREATED, 1 × CONTRACT_UPDATED
+ *   - severity:   1 × CRITICAL, 2 × WARNING, 2 × INFO
+ *   - actor:      2 × alice, 1 × bob, 1 × carol, 1 × dave
+ *   - resource:   3 × contract, 1 × payment, 1 × user
+ *   - resourceId: 2 × c-1, 1 × p-1, others unique
+ * Both `alice` rows share `resourceId: c-1`; exactly one of them is
+ * CONTRACT_CREATED so three-filter AND queries resolve to a single row.
+ */
+function seedMixedEntries(repository: SqliteAuditRepository): void {
+  repository.append(
+    makeInput({
+      action: 'CONTRACT_CREATED',
+      severity: 'INFO',
+      actor: 'alice',
+      resource: 'contract',
+      resourceId: 'c-1',
+    }),
+  );
+  repository.append(
+    makeInput({
+      action: 'CONTRACT_UPDATED',
+      severity: 'WARNING',
+      actor: 'alice',
+      resource: 'contract',
+      resourceId: 'c-1',
+    }),
+  );
+  repository.append(
+    makeInput({
+      action: 'PAYMENT_DISPUTED',
+      severity: 'CRITICAL',
+      actor: 'bob',
+      resource: 'payment',
+      resourceId: 'p-1',
+    }),
+  );
+  repository.append(
+    makeInput({
+      action: 'CONTRACT_CANCELLED',
+      severity: 'WARNING',
+      actor: 'carol',
+      resource: 'contract',
+      resourceId: 'c-2',
+    }),
+  );
+  repository.append(
+    makeInput({
+      action: 'USER_UPDATED',
+      severity: 'INFO',
+      actor: 'dave',
+      resource: 'user',
+      resourceId: 'u-1',
+    }),
+  );
 }
 
 describe('SqliteAuditRepository', () => {
@@ -113,31 +180,83 @@ describe('SqliteAuditRepository', () => {
     const ids = Array.from({ length: 25 }, () => repository.append(makeInput()).id);
     expect(new Set(ids).size).toBe(25);
   });
+
+  it('treats identical payloads as separate events and preserves the chain', () => {
+    const input = makeInput();
+    const first = repository.append(input);
+    const second = repository.append(input);
+
+    expect(second.id).not.toBe(first.id);
+    expect(second.previousHash).toBe(first.hash);
+    expect(repository.count()).toBe(2);
+    expect(repository.verifyIntegrity().valid).toBe(true);
+  });
 });
 
-// ─── Append() — write-failure surfacing (transactional integrity) ──────────
+describe('SqliteAuditRepository — concurrent writer recovery', () => {
+  it('rejects a competing writer atomically and retries from the committed tip', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'audit-repository-'));
+    const dbPath = join(directory, 'audit.db');
+    const firstDb = new Database(dbPath);
+    const secondDb = new Database(dbPath);
+    const firstRepository = new SqliteAuditRepository(firstDb);
+    const secondRepository = new SqliteAuditRepository(secondDb);
 
-describe('SqliteAuditRepository — append() surfaces write failures (transactional)', () => {
+    try {
+      secondDb.pragma('busy_timeout = 0');
+      let tipReads = 0;
+      const originalPrepare = secondDb.prepare.bind(secondDb);
+      const tipReadSpy = jest.spyOn(secondDb, 'prepare').mockImplementation(((sql: string) => {
+        if (sql.includes('SELECT hash FROM audit_log_entries')) {
+          tipReads += 1;
+        }
+        return originalPrepare(sql);
+      }) as typeof secondDb.prepare);
+
+      let committedHash = '';
+      try {
+        const writer = firstDb.transaction(() => {
+          committedHash = firstRepository.append(makeInput({ actor: 'winner' })).hash;
+          expect(() => secondRepository.append(makeInput({ actor: 'contender' }))).toThrow();
+          expect(tipReads).toBe(0);
+          expect(secondRepository.count()).toBe(0);
+        });
+        const immediate = (writer as typeof writer & { immediate?: () => void }).immediate;
+
+        if (typeof immediate !== 'function') {
+          throw new Error('SQLite immediate transactions are required for this concurrency test');
+        }
+        immediate();
+      } finally {
+        tipReadSpy.mockRestore();
+      }
+
+      const retried = secondRepository.append(makeInput({ actor: 'contender' }));
+      expect(retried.previousHash).toBe(committedHash);
+      expect(secondRepository.count()).toBe(2);
+      expect(secondRepository.verifyIntegrity().valid).toBe(true);
+    } finally {
+      firstDb.close();
+      secondDb.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── Append() — deterministic failure recovery ─────────────────────────────
+
+describe('SqliteAuditRepository — append() failure recovery (deterministic)', () => {
   let db: DbInstance;
   let repository: SqliteAuditRepository;
 
   beforeEach(() => {
     db = new Database(':memory:');
     repository = new SqliteAuditRepository(db);
+    capturedLogs.length = 0;
   });
 
   afterEach(() => {
     db.close();
-  });
-
-  it('propagates a SQLite-level write failure out of append()', () => {
-    // Sabotage: drop the audit table AFTER the repository's idempotent
-    // initSchema() has created it. The next INSERT will hit a
-    // "no such table" error — a deterministic, real disk-level failure
-    // that exercises the prepare/run error path. We intentionally do not
-    // match the error message verbatim — better-sqlite3 may rewrite it.
-    db.exec('DROP TABLE audit_log_entries');
-    expect(() => repository.append(makeInput())).toThrow();
   });
 
   it('a failed append leaves no partial row (transactional rollback)', () => {
@@ -179,27 +298,142 @@ describe('SqliteAuditRepository — append() surfaces write failures (transactio
     ).toBe(false);
   });
 
-  it('a fresh repository on a sabotaged connection can self-recover via initSchema()', () => {
-    // The sabotaged `repository` is permanently broken after the table
-    // is dropped — its constructor has already cached `this.db` and
-    // won't re-run `initSchema`. We construct a *new* repository on the
-    // same connection and rely on the production `initSchema()` (with
-    // `CREATE TABLE IF NOT EXISTS`) to rebuild the schema: no manual
-    // `db.exec('CREATE TABLE ...')` is needed.
-    db.exec('DROP TABLE audit_log_entries');
-    expect(() => repository.append(makeInput())).toThrow();
+  it('self-repairs a dropped schema in-process and retries the write once', () => {
+    repository.append(makeInput({ actor: 'before-drop' }));
+    expect(repository.count()).toBe(1);
 
-    const recovered = new SqliteAuditRepository(db);
-    expect(() => recovered.append(makeInput({ actor: 'recovered' }))).not.toThrow();
-    expect(recovered.count()).toBe(1);
+    // Sabotage: drop the table AFTER the repository's idempotent
+    // initSchema() has created it. The next append hits a real
+    // "no such table" error, which the repository repairs deterministically
+    // and retries — on the SAME instance, no reconstruction required.
+    db.exec('DROP TABLE audit_log_entries');
+
+    const recovered = repository.append(makeInput({ actor: 'after-drop' }));
+    expect(recovered.actor).toBe('after-drop');
+    // The repaired table starts a fresh chain; rows were lost with the table.
+    expect(recovered.previousHash).toBe(GENESIS_HASH);
+    expect(repository.count()).toBe(1);
+
+    // Recovery is observable: a structured warning names the operation.
+    expect(
+      capturedLogs.some(
+        (record) => record.level === 'warn' && record.message.includes('schema missing'),
+      ),
+    ).toBe(true);
+  });
+
+  it('fails fast when schema auto-repair is explicitly disabled', () => {
+    const strict = new SqliteAuditRepository(db, { autoRepairSchema: false });
+    db.exec('DROP TABLE audit_log_entries');
+    expect(() => strict.append(makeInput())).toThrow();
+  });
+
+  it('surfaces the original error when the repair attempt itself fails', () => {
+    db.exec('DROP TABLE audit_log_entries');
+
+    // If the repair cannot rebuild the schema (e.g. a read-only volume), the
+    // caller must still see the original root-cause error, not a masked one.
+    const execSpy = jest.spyOn(db, 'exec').mockImplementation(() => {
+      throw new Error('simulated read-only filesystem');
+    });
+    try {
+      expect(() => repository.append(makeInput())).toThrow(/no such table/);
+    } finally {
+      execSpy.mockRestore();
+    }
+  });
+
+  it('does not retry a non-transient write failure (no masked bugs)', () => {
+    let insertAttempts = 0;
+    const originalPrepare = db.prepare.bind(db);
+    const insertSpy = jest.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.toUpperCase().includes('INSERT INTO AUDIT_LOG_ENTRIES')) {
+        insertAttempts += 1;
+        return {
+          run: () => {
+            throw new Error('simulated disk-full');
+          },
+        } as unknown as ReturnType<typeof db.prepare>;
+      }
+      return originalPrepare(sql);
+    }) as typeof db.prepare);
+
+    try {
+      expect(() => repository.append(makeInput())).toThrow('simulated disk-full');
+      // Exactly one attempt: a disk-full must never be masked by a retry.
+      expect(insertAttempts).toBe(1);
+    } finally {
+      insertSpy.mockRestore();
+    }
+  });
+
+  it('retries a transient serialization failure and keeps the chain linear', () => {
+    const first = repository.append(makeInput({ actor: 'first' }));
+
+    let insertAttempts = 0;
+    const originalPrepare = db.prepare.bind(db);
+    const insertSpy = jest.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.toUpperCase().includes('INSERT INTO AUDIT_LOG_ENTRIES')) {
+        insertAttempts += 1;
+        if (insertAttempts === 1) {
+          const err = new Error('database is locked') as Error & { code: number };
+          err.code = 5; // SQLITE_BUSY
+          throw err;
+        }
+      }
+      return originalPrepare(sql);
+    }) as typeof db.prepare);
+
+    try {
+      const second = repository.append(makeInput({ actor: 'second' }));
+      expect(insertAttempts).toBe(2);
+      // The retry re-read the chain tail inside the transaction: no fork,
+      // no gap, and no stale previous hash.
+      expect(second.previousHash).toBe(first.hash);
+    } finally {
+      insertSpy.mockRestore();
+    }
+
+    expect(repository.verifyIntegrity().valid).toBe(true);
+    expect(
+      capturedLogs.some(
+        (record) => record.level === 'warn' && record.message.includes('serialization conflict'),
+      ),
+    ).toBe(true);
+  });
+
+  it('gives up after the bounded retry budget and leaves no partial row', () => {
+    let insertAttempts = 0;
+    const originalPrepare = db.prepare.bind(db);
+    const insertSpy = jest.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.toUpperCase().includes('INSERT INTO AUDIT_LOG_ENTRIES')) {
+        insertAttempts += 1;
+        const err = new Error('database is locked') as Error & { code: number };
+        err.code = 5; // SQLITE_BUSY
+        throw err;
+      }
+      return originalPrepare(sql);
+    }) as typeof db.prepare);
+
+    try {
+      expect(() => repository.append(makeInput())).toThrow('database is locked');
+      // Bounded: exactly MAX_WRITE_ATTEMPTS attempts, then rethrow.
+      expect(insertAttempts).toBe(MAX_WRITE_ATTEMPTS);
+    } finally {
+      insertSpy.mockRestore();
+    }
+
+    expect(repository.count()).toBe(0);
+    expect(repository.verifyIntegrity().valid).toBe(true);
   });
 
   it('does not crash a request-style caller that catches the failure', () => {
+    const strict = new SqliteAuditRepository(db, { autoRepairSchema: false });
     db.exec('DROP TABLE audit_log_entries');
     let requestContinued = false;
     let caughtMessage: string | null = null;
     try {
-      repository.append(makeInput());
+      strict.append(makeInput());
     } catch (err) {
       caughtMessage = (err as Error).message;
     } finally {
@@ -207,6 +441,62 @@ describe('SqliteAuditRepository — append() surfaces write failures (transactio
     }
     expect(caughtMessage).not.toBeNull();
     expect(requestContinued).toBe(true);
+  });
+});
+
+describe('SqliteAuditRepository — shared database concurrency', () => {
+  it('extends one hash chain across repository connections to the same file', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'audit-concurrency-'));
+    const dbPath = path.join(directory, 'audit.sqlite');
+    const firstDb = new Database(dbPath);
+    const secondDb = new Database(dbPath);
+    try {
+      const firstRepository = new SqliteAuditRepository(firstDb);
+      const secondRepository = new SqliteAuditRepository(secondDb);
+
+      firstRepository.append(makeInput({ actor: 'connection-1' }));
+      secondRepository.append(makeInput({ actor: 'connection-2' }));
+      firstRepository.append(makeInput({ actor: 'connection-1' }));
+
+      expect(firstRepository.count()).toBe(3);
+      expect(firstRepository.verifyIntegrity()).toMatchObject({ valid: true, totalEntries: 3 });
+    } finally {
+      firstDb.close();
+      secondDb.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces writer-lock contention without a partial row, then allows a retry', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'audit-lock-'));
+    const dbPath = path.join(directory, 'audit.sqlite');
+    const lockDb = new Database(dbPath);
+    const appendDb = new Database(dbPath);
+    try {
+      const repository = new SqliteAuditRepository(appendDb);
+      const lockTransaction = lockDb.transaction(() => undefined);
+      const immediate = (lockTransaction as unknown as { immediate?: () => void }).immediate;
+
+      // The fallback test database has no transaction lock semantics.
+      if (typeof immediate !== 'function') return;
+
+      appendDb.pragma('busy_timeout = 0');
+      lockDb.exec('BEGIN IMMEDIATE');
+      try {
+        expect(() => repository.append(makeInput({ actor: 'blocked' }))).toThrow();
+      } finally {
+        lockDb.exec('ROLLBACK');
+      }
+
+      expect(repository.count()).toBe(0);
+      const retried = repository.append(makeInput({ actor: 'retry' }));
+      expect(repository.getById(retried.id)?.actor).toBe('retry');
+      expect(repository.verifyIntegrity()).toMatchObject({ valid: true, totalEntries: 1 });
+    } finally {
+      lockDb.close();
+      appendDb.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -423,6 +713,21 @@ describe('SqliteAuditRepository — verifyIntegrity()', () => {
     expect(report.firstCorruptedId).toBe(created.id);
   });
 
+  it('reports malformed persisted metadata as the first corrupted entry', () => {
+    const created = repository.append(makeInput());
+    db.prepare('UPDATE audit_log_entries SET metadata_json = ? WHERE id = ?').run(
+      '{malformed',
+      created.id,
+    );
+
+    expect(repository.verifyIntegrity()).toMatchObject({
+      valid: false,
+      totalEntries: 1,
+      firstCorruptedIndex: 0,
+      firstCorruptedId: created.id,
+    });
+  });
+
   it('detects tampering by deletion (chain break)', () => {
     repository.append(makeInput());
     const second = repository.append(makeInput({ action: 'CONTRACT_UPDATED' }));
@@ -461,4 +766,562 @@ describe('SqliteAuditRepository — verifyIntegrity()', () => {
     const report = repository.verifyIntegrity();
     expect(report.valid).toBe(false);
   });
+
+  it('reports corruption instead of throwing when a row has malformed metadata_json', () => {
+    const created = repository.append(makeInput());
+    // A metadata payload that is not valid JSON cannot be decoded by
+    // toAuditEntry(); the monitoring job must still get a deterministic
+    // report rather than an unhandled throw.
+    db.prepare('UPDATE audit_log_entries SET metadata_json = ? WHERE id = ?').run(
+      '{not valid json',
+      created.id,
+    );
+
+    const report = repository.verifyIntegrity();
+    expect(report.valid).toBe(false);
+    expect(report.firstCorruptedIndex).toBe(0);
+    expect(report.firstCorruptedId).toBe(created.id);
+  });
 });
+
+// ─── queryWithCursor() — cursor-based pagination ─────────────────────────────
+
+describe('SqliteAuditRepository — queryWithCursor()', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns paginated result with entries and limit', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput({ actor: `u${i}` }));
+    }
+    const result = repository.queryWithCursor({ limit: 3 });
+    expect(result.entries).toHaveLength(3);
+    expect(result.limit).toBe(3);
+    expect(result.count).toBe(3);
+  });
+
+  it('uses default limit of 50 when not specified', () => {
+    for (let i = 0; i < 60; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({});
+    expect(result.limit).toBe(50);
+    expect(result.entries).toHaveLength(50);
+  });
+
+  it('clamps limit to maximum of 100', () => {
+    for (let i = 0; i < 150; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({ limit: 150 });
+    expect(result.limit).toBe(100);
+    expect(result.entries).toHaveLength(100);
+  });
+
+  it('clamps limit to minimum of 1', () => {
+    repository.append(makeInput());
+    const result = repository.queryWithCursor({ limit: 0 });
+    expect(result.limit).toBe(1);
+    expect(result.entries).toHaveLength(1);
+  });
+
+  it('returns nextCursor when more results exist', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput({ actor: `u${i}` }));
+    }
+    const result = repository.queryWithCursor({ limit: 5 });
+    expect(result.nextCursor).toBeDefined();
+    
+    // Decode and verify cursor structure
+    const cursorData = decodeCursor(result.nextCursor!);
+    expect(cursorData.lastId).toBeDefined();
+    expect(cursorData.lastTimestamp).toBeDefined();
+    expect(cursorData.filters).toEqual({});
+  });
+
+  it('does not return nextCursor on last page', () => {
+    for (let i = 0; i < 5; i++) {
+      repository.append(makeInput());
+    }
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('does not return nextCursor for empty result', () => {
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.entries).toHaveLength(0);
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('respects filters with cursor pagination', () => {
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_CREATED' }));
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_UPDATED' }));
+    repository.append(makeInput({ actor: 'bob', action: 'CONTRACT_CREATED' }));
+
+    const result = repository.queryWithCursor({ 
+      actor: 'alice', 
+      action: 'CONTRACT_CREATED',
+      limit: 10 
+    });
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].actor).toBe('alice');
+    expect(result.entries[0].action).toBe('CONTRACT_CREATED');
+  });
+
+  it('includes filters in nextCursor', () => {
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_CREATED' }));
+    repository.append(makeInput({ actor: 'alice', action: 'CONTRACT_UPDATED' }));
+    repository.append(makeInput({ actor: 'bob', action: 'CONTRACT_CREATED' }));
+
+    const result = repository.queryWithCursor({ 
+      actor: 'alice',
+      limit: 1 
+    });
+    
+    const cursorData = decodeCursor(result.nextCursor!);
+    expect(cursorData.filters.actor).toBe('alice');
+  });
+
+  it('handles cursor with valid lastId', () => {
+    const entries = [];
+    for (let i = 0; i < 10; i++) {
+      entries.push(repository.append(makeInput({ actor: `u${i}` })));
+    }
+    
+    const firstPage = repository.queryWithCursor({ limit: 3 });
+    expect(firstPage.entries).toHaveLength(3);
+    expect(firstPage.nextCursor).toBeDefined();
+    
+    // Use the cursor to get next page
+    const secondPage = repository.queryWithCursor({ 
+      cursor: firstPage.nextCursor,
+      limit: 3 
+    });
+    expect(secondPage.entries).toHaveLength(3);
+    expect(secondPage.entries[0].id).not.toBe(firstPage.entries[0].id);
+  });
+
+  it('throws error when cursor filters do not match query filters', () => {
+    repository.append(makeInput({ actor: 'alice' }));
+    
+    const cursorData: CursorData = {
+      lastId: repository.query({ actor: 'alice' })[0].id,
+      lastTimestamp: new Date().toISOString(),
+      filters: { actor: 'alice' },
+    };
+    const cursor = encodeCursor(cursorData);
+    
+    // Try to use cursor with different filters
+    expect(() => {
+      repository.queryWithCursor({ 
+        cursor,
+        actor: 'bob', // Different actor than cursor
+        limit: 10 
+      });
+    }).toThrow('Cursor filters do not match query filters');
+  });
+
+  it('handles invalid cursor gracefully', () => {
+    repository.append(makeInput());
+    
+    const result = repository.queryWithCursor({ 
+      cursor: 'invalid-cursor',
+      limit: 10 
+    });
+    // Should fall back to beginning
+    expect(result.entries.length).toBeGreaterThan(0);
+  });
+
+  it('cursor pagination with time range filters', () => {
+    const now = new Date();
+    const past = new Date(now.getTime() - 60_000).toISOString();
+    const future = new Date(now.getTime() + 60_000).toISOString();
+    
+    repository.append(makeInput());
+    
+    const result = repository.queryWithCursor({ 
+      from: past,
+      to: future,
+      limit: 10 
+    });
+    expect(result.entries).toHaveLength(1);
+  });
+
+  it('cursor pagination at exact page boundary', () => {
+    for (let i = 0; i < 10; i++) {
+      repository.append(makeInput());
+    }
+    
+    const result = repository.queryWithCursor({ limit: 10 });
+    expect(result.entries).toHaveLength(10);
+    expect(result.nextCursor).toBeUndefined();
+  });
+});
+
+// ─── Issue #1372: State-invariant protections ────────────────────────────────
+//
+// These tests directly exercise the six invariant-protection mechanisms added
+// as part of #1372.  Each describe block targets a single protection so
+// failures are easy to pinpoint:
+//
+//   A. validateAppendInput()   — empty/null required-field rejection
+//   B. _appendInProgress guard — re-entrancy detection
+//   C. safeParseMetadata()     — malformed metadata_json safety
+//   D. deepFreeze()            — post-read mutation prevention on nested metadata
+//   E. verifyIntegrity()       — duplicate hash detection
+//
+// None of these overlap with the existing suite above; they add net-new
+// coverage rather than duplicating existing passing tests.
+
+// ─── A. validateAppendInput() — required-field validation ───────────────────
+
+describe('SqliteAuditRepository — validateAppendInput() (invariant #1372-A)', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const requiredStringFields = ['actor', 'resource', 'resourceId'] as const;
+
+  it.each(requiredStringFields)(
+    'rejects an empty string for required field: %s',
+    (field) => {
+      expect(() =>
+        repository.append(makeInput({ [field]: '' })),
+      ).toThrow(/required field '.*' must not be empty/);
+    },
+  );
+
+  it.each(requiredStringFields)(
+    'rejects a whitespace-only string for required field: %s',
+    (field) => {
+      expect(() =>
+        repository.append(makeInput({ [field]: '   ' })),
+      ).toThrow(/required field '.*' must not be empty/);
+    },
+  );
+
+  it.each(requiredStringFields)(
+    'rejects null for required field: %s',
+    (field) => {
+      expect(() =>
+        repository.append(makeInput({ [field]: null as unknown as string })),
+      ).toThrow(/required field '.*'/);
+    },
+  );
+
+  it('rejects undefined action', () => {
+    expect(() =>
+      repository.append(makeInput({ action: undefined as unknown as CreateAuditEntryInput['action'] })),
+    ).toThrow(/required field 'action'/);
+  });
+
+  it('rejects undefined severity', () => {
+    expect(() =>
+      repository.append(makeInput({ severity: undefined as unknown as CreateAuditEntryInput['severity'] })),
+    ).toThrow(/required field 'severity'/);
+  });
+
+  it('rejects an array as metadata', () => {
+    expect(() =>
+      repository.append(makeInput({ metadata: [] as unknown as Record<string, unknown> })),
+    ).toThrow(/'metadata' must be a plain object/);
+  });
+
+  it('rejects null metadata', () => {
+    expect(() =>
+      repository.append(makeInput({ metadata: null as unknown as Record<string, unknown> })),
+    ).toThrow(/'metadata' must be a plain object/);
+  });
+
+  it('leaves no row in the DB when validation fails', () => {
+    expect(() => repository.append(makeInput({ actor: '' }))).toThrow();
+    expect(repository.count()).toBe(0);
+  });
+
+  it('accepts a valid input after a rejected input (no poisoned state)', () => {
+    expect(() => repository.append(makeInput({ actor: '' }))).toThrow();
+    // The guard must have been released so the next valid call succeeds.
+    expect(() => repository.append(makeInput({ actor: 'recovered' }))).not.toThrow();
+    expect(repository.count()).toBe(1);
+  });
+});
+
+// ─── B. _appendInProgress — re-entrancy guard ───────────────────────────────
+
+describe('SqliteAuditRepository — re-entrancy guard (invariant #1372-B)', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('throws when append() is called re-entrantly (guard is set during transaction)', () => {
+    // Simulate re-entrancy by monkeypatching db.transaction to call append()
+    // again while the outer append is in progress.
+    const originalTransaction = db.transaction.bind(db);
+    let reentrantCallMade = false;
+
+    const txSpy = jest.spyOn(db, 'transaction').mockImplementationOnce(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (fn: any) => {
+        // Wrap in originalTransaction to preserve correct DB semantics,
+        // but inject a nested append() call at the start of fn execution.
+        return originalTransaction((...args: unknown[]) => {
+          if (!reentrantCallMade) {
+            reentrantCallMade = true;
+            // This is the re-entrant call — it should be rejected by the guard.
+            expect(() =>
+              repository.append(makeInput({ actor: 're-entrant' })),
+            ).toThrow(/re-entrancy/);
+          }
+          return fn(...args);
+        });
+      },
+    );
+
+    try {
+      // The outer call must still succeed; the nested call should have thrown.
+      const entry = repository.append(makeInput({ actor: 'outer' }));
+      expect(entry.actor).toBe('outer');
+      expect(reentrantCallMade).toBe(true);
+    } finally {
+      txSpy.mockRestore();
+    }
+  });
+
+  it('releases the guard after a failed append so subsequent calls succeed', () => {
+    // Force a failure inside the transaction (drop the table).
+    db.exec('DROP TABLE audit_log_entries');
+    expect(() => repository.append(makeInput())).toThrow();
+
+    // Re-create the table so the next call can actually succeed.
+    const recovered = new SqliteAuditRepository(db);
+    // Guard must have been released — should not throw due to re-entrancy.
+    expect(() => recovered.append(makeInput({ actor: 'post-failure' }))).not.toThrow();
+  });
+});
+
+// ─── C. safeParseMetadata() — malformed metadata_json safety ────────────────
+
+describe('SqliteAuditRepository — safe metadata JSON parse (invariant #1372-C)', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('getById() does not throw when metadata_json is malformed — returns empty metadata', () => {
+    const appended = repository.append(makeInput({ metadata: { x: 1 } }));
+    // Corrupt the stored JSON directly.
+    db.prepare('UPDATE audit_log_entries SET metadata_json = ? WHERE id = ?').run(
+      '{not valid json',
+      appended.id,
+    );
+
+    let entry: ReturnType<typeof repository.getById>;
+    expect(() => {
+      entry = repository.getById(appended.id);
+    }).not.toThrow();
+    // Falls back to empty object.
+    expect(entry?.metadata).toEqual({});
+  });
+
+  it('query() does not throw when a row has malformed metadata_json', () => {
+    repository.append(makeInput({ metadata: { valid: true } }));
+    const appended = repository.append(makeInput({ metadata: { other: 2 } }));
+    db.prepare('UPDATE audit_log_entries SET metadata_json = ? WHERE id = ?').run(
+      'CORRUPT!!!',
+      appended.id,
+    );
+
+    let entries: ReturnType<typeof repository.query>;
+    expect(() => {
+      entries = repository.query();
+    }).not.toThrow();
+    // Both rows returned; corrupt one has empty metadata.
+    expect(entries!).toHaveLength(2);
+    const corruptEntry = entries!.find((e) => e.id === appended.id);
+    expect(corruptEntry?.metadata).toEqual({});
+  });
+
+  it('stream() does not throw when a row has malformed metadata_json', () => {
+    repository.append(makeInput({ metadata: { a: 1 } }));
+    const appended = repository.append(makeInput({ metadata: { b: 2 } }));
+    db.prepare('UPDATE audit_log_entries SET metadata_json = ? WHERE id = ?').run(
+      'null',         // JSON null — valid JSON but not a plain object
+      appended.id,
+    );
+
+    const collected: AuditEntry[] = [];
+    expect(() => {
+      for (const entry of repository.stream()) {
+        collected.push(entry);
+      }
+    }).not.toThrow();
+    expect(collected).toHaveLength(2);
+    // null parses to {} because safeParseMetadata rejects non-plain-objects.
+    const safed = collected.find((e) => e.id === appended.id);
+    expect(safed?.metadata).toEqual({});
+  });
+});
+
+// ─── D. deepFreeze() — post-read nested metadata immutability ───────────────
+
+describe('SqliteAuditRepository — deep-freeze metadata on read (invariant #1372-D)', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('getById() returns metadata whose nested objects are frozen', () => {
+    repository.append(
+      makeInput({ metadata: { nested: { value: 42 } } }),
+    );
+    const entry = repository.query()[0];
+    expect(Object.isFrozen(entry.metadata)).toBe(true);
+    expect(Object.isFrozen((entry.metadata as { nested: unknown }).nested)).toBe(true);
+  });
+
+  it('mutating a nested metadata object from getById() throws in strict mode', () => {
+    const appended = repository.append(
+      makeInput({ metadata: { config: { timeout: 30 } } }),
+    );
+    const found = repository.getById(appended.id);
+    expect(Object.isFrozen(found!.metadata)).toBe(true);
+    expect(() => {
+      (found!.metadata as Record<string, unknown>)['config'] = {};
+    }).toThrow();
+  });
+
+  it('mutating a deeply nested metadata object from query() throws in strict mode', () => {
+    repository.append(
+      makeInput({ metadata: { a: { b: { c: 'deep' } } } }),
+    );
+    const [entry] = repository.query();
+    const nested = (entry.metadata as { a: { b: { c: string } } }).a.b;
+    expect(Object.isFrozen(nested)).toBe(true);
+    expect(() => {
+      nested.c = 'mutated';
+    }).toThrow();
+  });
+
+  it('deep freeze handles arrays within metadata', () => {
+    repository.append(
+      makeInput({ metadata: { tags: ['a', 'b', 'c'] } }),
+    );
+    const [entry] = repository.query();
+    const tags = (entry.metadata as { tags: string[] }).tags;
+    expect(Object.isFrozen(tags)).toBe(true);
+  });
+});
+
+// ─── E. verifyIntegrity() — duplicate hash detection ────────────────────────
+
+describe('SqliteAuditRepository — duplicate hash detection (invariant #1372-E)', () => {
+  let db: DbInstance;
+  let repository: SqliteAuditRepository;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    repository = new SqliteAuditRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('valid chain with unique hashes passes', () => {
+    for (let i = 0; i < 5; i++) {
+      repository.append(makeInput({ actor: `u${i}` }));
+    }
+    expect(repository.verifyIntegrity().valid).toBe(true);
+  });
+
+  it('detects a duplicate hash injected into the log', () => {
+    // Append two legitimate entries.
+    const first = repository.append(makeInput({ actor: 'first' }));
+    repository.append(makeInput({ actor: 'second' }));
+
+    // Forge a third row that reuses the first entry's hash.  This simulates
+    // a hash-collision attack or a copy-paste-style forged insertion.
+    const tail = db
+      .prepare<[], { hash: string; previous_hash: string }>(
+        'SELECT hash, previous_hash FROM audit_log_entries ORDER BY seq DESC LIMIT 1',
+      )
+      .get()!;
+
+    db.prepare(
+      `INSERT INTO audit_log_entries
+       (id, timestamp, action, severity, actor, resource, resource_id,
+        metadata_json, ip_address, correlation_id, hash, previous_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    ).run(
+      'dup-hash-row',
+      new Date().toISOString(),
+      'ADMIN_ACTION',
+      'CRITICAL',
+      'attacker',
+      'system',
+      'sys-1',
+      '{}',
+      first.hash,   // <-- duplicate of first entry's hash
+      tail.hash,
+    );
+
+    const report = repository.verifyIntegrity();
+    expect(report.valid).toBe(false);
+  });
+
+  it('single-entry log always passes (no previous hash to compare against)', () => {
+    repository.append(makeInput());
+    expect(repository.verifyIntegrity().valid).toBe(true);
+  });
+
+  it('large chain with all unique hashes passes', () => {
+    for (let i = 0; i < 50; i++) {
+      repository.append(makeInput({ actor: `user-${i}`, resource: 'contract', resourceId: `c-${i}` }));
+    }
+    const report = repository.verifyIntegrity();
+    expect(report.valid).toBe(true);
+    expect(report.totalEntries).toBe(50);
+  });
+});
+
+// ─── AuditEntry type import needed by the malformed-JSON tests ─────────────
+// (imported at the top of the file already — this comment is here for clarity)

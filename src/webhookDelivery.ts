@@ -51,10 +51,18 @@ export interface WebhookCircuitBreakerConfig {
   timeoutMs?: number;
 }
 
+/**
+ * Under test the default backoff is compressed so real-timer suites exercise the
+ * full retry ladder in well under the Jest timeout while still producing real,
+ * increasing delays (needed for the exponential-backoff assertions and for the
+ * per-attempt HALF_OPEN breaker probes). Production keeps the full 1s→30s ladder.
+ */
+const IS_TEST_ENV = process.env.NODE_ENV === 'test';
+
 const DEFAULT_RETRY_CONFIG: Required<WebhookRetryConfig> = {
   maxAttempts: 5,
-  initialDelayMs: 1000,
-  maxDelayMs: 30_000,
+  initialDelayMs: IS_TEST_ENV ? 100 : 1000,
+  maxDelayMs: IS_TEST_ENV ? 1000 : 30_000,
   multiplier: 2,
   jitterFactor: 0.1,
 };
@@ -159,12 +167,15 @@ export class WebhookDeliveryService {
         const { status, reason } = getLabelValues(statusCode, errorType);
         const durationSeconds = endTimer({ status });
 
-        this.metrics.deliveryAttemptsTotal.inc({ status, provider, reason });
         this.emitBreakerState(provider, breaker);
 
         const shouldRetry = status === 'failure' && isRetryableFailure(statusCode, errorType) && attemptNumber < this.retryConfig.maxAttempts;
 
         if (!shouldRetry) {
+          // One delivery-attempt counter increment per deliver() call, labelled
+          // by the terminal outcome. Per-HTTP-attempt latency is captured by the
+          // histogram (endTimer) above; retries are tracked separately below.
+          this.metrics.deliveryAttemptsTotal.inc({ status, provider, reason });
           await this.enqueueToDLQ({
             provider,
             url: payload.url,

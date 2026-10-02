@@ -27,6 +27,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Contract storage regressions are Rust tests, outside the Node/Jest suite.
+  contracts:
+    name: Contract Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt, clippy
+      - name: Check contract formatting
+        run: cargo fmt --manifest-path contracts/Cargo.toml -- --check
+      - name: Test contract invariants
+        run: cargo test --locked --manifest-path contracts/Cargo.toml
+      - name: Lint contract crate
+        run: cargo clippy --locked --manifest-path contracts/Cargo.toml --all-targets -- -D warnings
+      - name: Build contract crate
+        run: cargo build --locked --manifest-path contracts/Cargo.toml
+
   # ── 1. Lint ────────────────────────────────────────────────────────────────
   lint:
     name: Lint
@@ -37,7 +55,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -66,7 +84,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -101,7 +119,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -130,7 +148,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -166,7 +184,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies

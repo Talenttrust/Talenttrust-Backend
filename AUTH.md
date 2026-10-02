@@ -158,7 +158,14 @@ The authentication path employs strict measures to prevent attackers from determ
 1. **Constant-Time Verification**: On login, if an email is not found, the service hashes a dummy password (``${"a".repeat(32)}:${"b".repeat(128)}``) to ensure that the request takes the same amount of time as a matching account check.
 2. **Generic Error Messages**: Registration and login endpoints return generic codes and messages (e.g., `invalid_credentials` or `Registration failed. Please try again.`) without disclosing whether the password or the email was incorrect.
 
-### E. Centralized JWT Configuration (Algorithm Confusion Mitigation)
+### E. Email Normalization (Case-Variant Duplicate Prevention)
+Emails are normalized (trimmed + lowercased) before every write and lookup, via a single shared helper (`normalizeEmail` in [userRepository.ts](file:///c:/Users/DELL/Desktop/Talenttrust-Backend/src/repositories/userRepository.ts)) used by both `AuthService` (register/login) and `UserRepository` (create/findByEmail). This prevents `User@x.com` and `user@x.com` from registering as two distinct accounts, which would otherwise allow account confusion or impersonation of an existing identity.
+
+As defense in depth, a `UNIQUE` index on `LOWER(TRIM(email))` is enforced at the schema level (migration `add_unique_index_on_normalized_email`), so a case-variant duplicate is rejected by the database even if application code ever fails to normalize before an insert.
+
+The anti-enumeration behavior on login (Section D) is unaffected: the constant-time comparison still runs regardless of whether the normalized email matches an existing row.
+
+### F. Centralized JWT Configuration (Algorithm Confusion Mitigation)
 To prevent algorithm-confusion vulnerabilities (e.g., where a verification library honors a token header specifying `alg: none` or swaps RSA public keys for HMAC validation), all token verification calls MUST use the centralized config in [jwtConfig.ts](file:///c:/Users/DELL/Desktop/Talenttrust-Backend/src/auth/jwtConfig.ts):
 ```typescript
 export const JWT_VERIFY_OPTIONS = {
@@ -268,3 +275,187 @@ Revokes the current user session by clearing the refresh token hash from the dat
     "message": "Logged out successfully"
   }
   ```
+
+---
+
+## 6. Authorization Matrix (RBAC)
+
+The platform uses a **deny-by-default Role-Based Access Control (RBAC)** system enforced in `src/lib/authorization.ts`.
+
+### 6.1 Design goals
+
+| Goal | How it is enforced |
+|---|---|
+| Exhaustive at compile-time | The matrix is typed as `Record<Resource, Record<Action, Record<Role, CellValue>>>`. Adding a new `Resource` or `Action` to `types.ts` without a matrix entry is a **TypeScript compile error**. |
+| Deny-by-default at runtime | If a (resource, action, role) triplet is not found at runtime (e.g., from unsanitised input), `isAuthorized` returns `granted: false` and emits a structured `warn` log. |
+| No silent pass-through | There is no implicit fallback to "allowed". Every unresolved pair is explicitly denied and logged. |
+
+### 6.2 Types
+
+```
+Resource  = "users" | "jobs" | "proposals" | "contracts"
+          | "payments" | "reviews" | "reports" | "settings"
+
+Action    = "create" | "read" | "update" | "delete" | "list"
+
+Role      = "admin" | "auditor" | "client" | "freelancer"
+
+CellValue = false              // always denied
+          | true               // always granted
+          | { ownOnly: true }  // granted only when caller owns the record
+```
+
+### 6.3 Permission matrix
+
+Legend: `✓` = allow, `✗` = deny, `own` = allow only when `resourceOwnerId === user.id`
+
+#### `users`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✗      | ✗          |
+| read     | ✓     | ✓       | ✗      | ✗          |
+| update   | ✓     | ✗       | ✗      | ✗          |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | ✗      | ✗          |
+
+#### `jobs`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✓      | ✗          |
+| read     | ✓     | ✓       | ✓      | ✓          |
+| update   | ✓     | ✗       | own    | ✗          |
+| delete   | ✓     | ✗       | own    | ✗          |
+| list     | ✓     | ✓       | ✓      | ✓          |
+
+#### `proposals`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✗      | ✓          |
+| read     | ✓     | ✓       | own    | own        |
+| update   | ✓     | ✗       | ✗      | own        |
+| delete   | ✓     | ✗       | ✗      | own        |
+| list     | ✓     | ✓       | own    | own        |
+
+#### `contracts`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✓      | ✗          |
+| read     | ✓     | ✓       | own    | own        |
+| update   | ✓     | ✗       | own    | own        |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | own    | own        |
+
+Ownership for `own` cells is resolved from `contract.clientId` (not `freelancerId`).
+There is no separate `tenantId` / org scope — “cross-tenant” denial means cross-owner denial.
+Collection routes (`GET /`, `/stats`, `/bounds`) do not pass an owner resolver, so client/freelancer `own` list/read cells become **403**.
+Focused HTTP coverage: `src/controllers/contracts.auth.test.ts` (issue #729).
+
+#### `payments`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✓      | ✗          |
+| read     | ✓     | ✓       | own    | own        |
+| update   | ✓     | ✗       | ✗      | ✗          |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | own    | own        |
+
+#### `reviews`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✓      | ✓          |
+| read     | ✓     | ✓       | ✓      | ✓          |
+| update   | ✓     | ✗       | own    | own        |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | ✓      | ✓          |
+
+#### `reports`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✗      | ✗          |
+| read     | ✓     | ✓       | ✗      | ✗          |
+| update   | ✓     | ✗       | ✗      | ✗          |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | ✗      | ✗          |
+
+#### `settings`
+
+| Action   | admin | auditor | client | freelancer |
+|----------|-------|---------|--------|------------|
+| create   | ✓     | ✗       | ✗      | ✗          |
+| read     | ✓     | ✓       | own    | own        |
+| update   | ✓     | ✗       | own    | own        |
+| delete   | ✓     | ✗       | ✗      | ✗          |
+| list     | ✓     | ✓       | ✗      | ✗          |
+
+### 6.4 `isAuthorized` API
+
+```typescript
+import { isAuthorized } from "src/lib/authorization";
+
+const result = isAuthorized({
+  user:            req.user,           // { id, email, role }
+  resource:        "contracts",
+  action:          "update",
+  resourceOwnerId: contract.ownerId,   // required for ownOnly cells
+});
+
+if (!result.granted) {
+  // result.reason — human-readable explanation (safe to log, not echoed to client)
+  return res.status(403).json({ error: { code: "forbidden" } });
+}
+```
+
+`isAuthorized` never throws. It always returns `{ granted: boolean, reason: string }`.
+
+### 6.5 Deny-by-default: runtime structured log
+
+When a (resource, action, role) triplet is not found in the matrix at runtime, the function emits a `warn`-level structured log record:
+
+```json
+{
+  "timestamp": "2026-07-21T20:00:00.000Z",
+  "level": "warn",
+  "message": "authorization_deny_unresolved_resource",
+  "service": "talenttrust-backend",
+  "reason": "resource not found in permission matrix",
+  "resource": "<value>",
+  "action": "<value>",
+  "userId": "<user-id>",
+  "role": "<role>"
+}
+```
+
+Possible `message` values and their meaning:
+
+| message | trigger |
+|---|---|
+| `authorization_deny_unresolved_resource` | `resource` is not a key in `PERMISSION_MATRIX` |
+| `authorization_deny_unresolved_action` | `action` is not a key under the resource entry |
+| `authorization_deny_unresolved_role` | `role` is not a key in the action cell |
+
+### 6.6 Adding a new Resource or Action
+
+1. Add the value to the `Resource` or `Action` union in `src/lib/types.ts`.
+2. `npm run build` will immediately surface a TypeScript error in `src/lib/authorization.ts` because the `satisfies PermissionMatrix` check fails for the missing entry.
+3. Fill in the new column/row for every role. Use `DENY` (= `false`), `ALLOW` (= `true`), or `OWN` (= `{ ownOnly: true }`).
+4. Run `npm test` to verify all cells are covered.
+
+### 6.7 `isValidRole`
+
+```typescript
+import { isValidRole } from "src/lib/authorization";
+
+// Returns true only for: "admin" | "auditor" | "client" | "freelancer"
+if (!isValidRole(tokenPayload.role)) {
+  throw new ForbiddenError("Unknown role in token.");
+}
+```
+
+Used by `requireAuth` middleware to validate the `role` claim before attaching `req.user`.

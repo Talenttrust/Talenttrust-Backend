@@ -5,6 +5,9 @@
  * Each job type has a specific payload structure for type safety.
  */
 
+import { PriorityLevel } from './fair-scheduler';
+import type { MilestoneDivergenceScanPayload } from '../milestones/divergence/types';
+
 /**
  * Available job types in the system
  */
@@ -14,6 +17,8 @@ export enum JobType {
   REPUTATION_UPDATE = 'reputation-update',
   REPUTATION_RECOMPUTE = 'reputation-recompute',
   BLOCKCHAIN_SYNC = 'blockchain-sync',
+  MILESTONE_DIVERGENCE_SCAN = 'milestone-divergence-scan',
+  RAW_EVENT_RETENTION = 'raw-event-retention',
 }
 
 /**
@@ -73,6 +78,17 @@ export interface BlockchainSyncPayload {
   requestId?: string;
 }
 
+export type { RawEventRetentionJobPayload } from '../events/rawEventRetention.types';
+
+/**
+ * Milestone divergence scan job payload.
+ *
+ * A bounded comparison job that detects divergence between the backend's
+ * indexed milestone state and the on-chain milestone state (issue #1213).
+ * See `src/milestones/divergence/types.ts` for the full shape.
+ */
+export type { MilestoneDivergenceScanPayload };
+
 /**
  * Union type for all job payloads
  */
@@ -81,7 +97,8 @@ export type JobPayload =
   | ContractProcessingPayload
   | ReputationUpdatePayload
   | ReputationRecomputePayload
-  | BlockchainSyncPayload;
+  | BlockchainSyncPayload
+  | MilestoneDivergenceScanPayload;
 
 export interface JobEnqueueOptions {
   priority?: number;
@@ -134,9 +151,18 @@ export interface JobResult {
  * When dedupeKey is provided, BullMQ will not create a new job if one with the
  * same key is already waiting, active, or delayed. Optionally, dedupeTtl keeps
  * the key alive after completion so re-enqueue is suppressed during that window.
+ *
+ * Fair scheduling options:
+ * - `priorityLevel` — explicit weighted-fairness level (see {@link PriorityLevel}).
+ *   When omitted it is derived from the numeric `priority` via `normalizePriority`.
+ * - `tenantId` — logical tenant for per-tenant isolation. When omitted jobs are
+ *   grouped under the `default` tenant. A single tenant flooding a queue cannot
+ *   starve other tenants.
  */
 export interface AddJobOptions {
   priority?: number;
+  priorityLevel?: PriorityLevel;
+  tenantId?: string;
   delay?: number;
   attempts?: number;
   dedupeKey?: string;

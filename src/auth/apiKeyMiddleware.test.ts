@@ -37,6 +37,16 @@ const mockedAuthenticateMiddleware = authenticateMiddleware as jest.MockedFuncti
   typeof authenticateMiddleware
 >;
 
+/**
+ * A canonical API key: 64 lowercase hex characters, exactly the shape
+ * `generateApiKey()` issues. The boundary rules in `apiKeyMiddleware`
+ * refuse anything else before it reaches `validateApiKey`, so fixtures that
+ * were previously accepted only because validation was mocked
+ * (`'valid-key-value'`, `'any-key'`) would now be rejected for a reason that
+ * has nothing to do with what each test is asserting.
+ */
+const VALID_KEY = '4f2b'.repeat(16);
+
 /** Builds a minimal API key info object for scope tests. */
 function mockApiKeyInfo(scope: string[]): ApiKeyInfo {
   return {
@@ -134,7 +144,7 @@ describe('authenticateApiKey', () => {
   it('populates req.apiKey and calls next for a valid key', async () => {
     const keyInfo = mockApiKeyInfo(['contracts:read']);
     mockedValidateApiKey.mockResolvedValue(keyInfo);
-    const req = mockReq({ 'x-api-key': 'valid-key-value' });
+    const req = mockReq({ 'x-api-key': VALID_KEY });
     const res = mockRes();
     const next = mockNext();
 
@@ -148,7 +158,7 @@ describe('authenticateApiKey', () => {
 
   it('returns 500 without leaking validation errors when validateApiKey throws', async () => {
     mockedValidateApiKey.mockRejectedValue(new Error('database connection lost'));
-    const req = mockReq({ 'x-api-key': 'any-key' });
+    const req = mockReq({ 'x-api-key': VALID_KEY });
     const res = mockRes();
     const next = mockNext();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -256,7 +266,7 @@ describe('authenticateEither', () => {
     const keyInfo = mockApiKeyInfo(['reputation:read']);
     mockedValidateApiKey.mockResolvedValue(keyInfo);
 
-    const req = mockReq({ 'x-api-key': 'service-key-abc' });
+    const req = mockReq({ 'x-api-key': VALID_KEY });
     const res = mockRes();
     const next = mockNext();
 
@@ -264,7 +274,7 @@ describe('authenticateEither', () => {
     await flushAsync();
 
     expect(mockedAuthenticateMiddleware).not.toHaveBeenCalled();
-    expect(mockedValidateApiKey).toHaveBeenCalledWith('service-key-abc');
+    expect(mockedValidateApiKey).toHaveBeenCalledWith(VALID_KEY);
     expect((req as ApiKeyAuthenticatedRequest).apiKey).toEqual(keyInfo);
     expect(next).toHaveBeenCalled();
   });
@@ -284,6 +294,247 @@ describe('authenticateEither', () => {
     expectNoInternalLeak(jsonBody(res));
     expect(mockedAuthenticateMiddleware).not.toHaveBeenCalled();
     expect(mockedValidateApiKey).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// State / authorization invariants (#1392)
+//
+// INV2 (identity provenance) and INV3/INV4 (fail closed, well-formed identity)
+// are the invariants this file can silently break, because a violated INV2 is
+// invisible until a downstream `requireApiKeyScope` authorizes something it was
+// never given a valid key for.
+// ---------------------------------------------------------------------------
+
+describe('authenticateApiKey — credential parsing invariants', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('rejects a repeated X-API-Key header as unauthenticated instead of 500', async () => {
+    // A repeated header arrives as string[]; it must not reach validateApiKey,
+    // where a non-string would raise and surface as an opaque 500.
+    const req = mockReq({ 'x-api-key': ['first-key', 'second-key'] } as unknown as Record<
+      string,
+      string
+    >);
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Missing X-API-Key header' });
+    expectNoInternalLeak(jsonBody(res));
+    expect(mockedValidateApiKey).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('treats an empty or whitespace-only header as unauthenticated', async () => {
+    for (const value of ['', '   ', '\t']) {
+      jest.clearAllMocks();
+      const req = mockReq({ 'x-api-key': value });
+      const res = mockRes();
+      const next = mockNext();
+
+      authenticateApiKey(req, res, next);
+      await flushAsync();
+
+      expect(res.status).toHaveBeenCalledWith(401);
+      expect(res.json).toHaveBeenCalledWith({ error: 'Missing X-API-Key header' });
+      expect(mockedValidateApiKey).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not silently trim a padded key into a different credential', async () => {
+    // API keys are opaque: padding must fail verification, not be normalised.
+    mockedValidateApiKey.mockResolvedValue(null);
+    const padded = '  deadbeefdeadbeef  ';
+    const req = mockReq({ 'x-api-key': padded });
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(mockedValidateApiKey).toHaveBeenCalledWith(padded);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('rejects a validation result that is missing the fields authorization needs', async () => {
+    mockedValidateApiKey.mockResolvedValue({ id: 'key-1' } as unknown as ApiKeyInfo);
+    const req = mockReq({ 'x-api-key': 'valid-shape-but-incomplete' });
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Invalid API key' });
+    expect(req.apiKey).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('rejects a deactivated identity even when verification succeeded', async () => {
+    mockedValidateApiKey.mockResolvedValue({
+      ...mockApiKeyInfo(['contracts:read']),
+      isActive: false,
+    });
+    const req = mockReq({ 'x-api-key': 'revoked-but-verifiable' });
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(req.apiKey).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('authenticateApiKey — identity provenance invariants', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('clears a previously attached identity when the presented key is invalid', async () => {
+    // Regression for the scope-bypass: without INV2 the stale identity survives
+    // the rejection and requireApiKeyScope authorizes the request.
+    mockedValidateApiKey.mockResolvedValue(null);
+    const req = mockReq({ 'x-api-key': 'wrong-key' });
+    req.apiKey = mockApiKeyInfo(['contracts:read']);
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(req.apiKey).toBeUndefined();
+
+    // The stale identity must no longer satisfy the scope gate.
+    const scopeRes = mockRes();
+    const scopeNext = mockNext();
+    requireApiKeyScope('contracts', 'read')(req, scopeRes, scopeNext);
+
+    expect(scopeRes.status).toHaveBeenCalledWith(401);
+    expect(scopeNext).not.toHaveBeenCalled();
+  });
+
+  it('clears a previously attached identity when validation throws', async () => {
+    mockedValidateApiKey.mockRejectedValue(new Error('database connection lost'));
+    const req = mockReq({ 'x-api-key': 'any-key' });
+    req.apiKey = mockApiKeyInfo(['contracts:read']);
+    const res = mockRes();
+    const next = mockNext();
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    authenticateApiKey(req, res, next);
+    await flushAsync();
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(req.apiKey).toBeUndefined();
+
+    const scopeRes = mockRes();
+    const scopeNext = mockNext();
+    requireApiKeyScope('contracts', 'read')(req, scopeRes, scopeNext);
+
+    expect(scopeRes.status).toHaveBeenCalledWith(401);
+    expect(scopeNext).not.toHaveBeenCalled();
+
+    consoleSpy.mockRestore();
+  });
+
+  it('clears a stale identity when authenticateEither finds no credentials', () => {
+    const req = mockReq();
+    req.apiKey = mockApiKeyInfo(['contracts:read']);
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateEither(req as Request, res, next);
+
+    expect(req.apiKey).toBeUndefined();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('classifies a repeated header as a rejected credential, not as absent credentials', () => {
+    const req = mockReq({ 'x-api-key': ['a', 'b'] } as unknown as Record<string, string>);
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateEither(req as Request, res, next);
+
+    expect(mockedAuthenticateMiddleware).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(jsonBody(res).error).toBe('Missing X-API-Key header');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('still prefers the Bearer path when both credentials are present', () => {
+    mockedAuthenticateMiddleware.mockImplementation((_req, _res, next) => next());
+    const req = mockReq({
+      authorization: 'Bearer some-jwt',
+      'x-api-key': ['a', 'b'],
+    } as unknown as Record<string, string>);
+    const res = mockRes();
+    const next = mockNext();
+
+    authenticateEither(req as Request, res, next);
+
+    expect(mockedAuthenticateMiddleware).toHaveBeenCalled();
+    expect(mockedValidateApiKey).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalled();
+  });
+});
+
+describe('requireApiKeyScope — well-formed identity invariants', () => {
+  it('rejects an identity without a scope list instead of throwing', () => {
+    const mw = requireApiKeyScope('contracts', 'read');
+    const req = mockReq();
+    req.apiKey = { id: 'key-without-scope' } as unknown as ApiKeyInfo;
+    const res = mockRes();
+    const next = mockNext();
+
+    expect(() => mw(req, res, next)).not.toThrow();
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Not authenticated with API key' });
+    expect(req.apiKey).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('rejects an identity whose scope is not an array of strings', () => {
+    const mw = requireApiKeyScope('contracts', 'read');
+    const req = mockReq();
+    req.apiKey = {
+      ...mockApiKeyInfo(['contracts:read']),
+      scope: 'contracts:read',
+    } as unknown as ApiKeyInfo;
+    const res = mockRes();
+    const next = mockNext();
+
+    expect(() => mw(req, res, next)).not.toThrow();
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('rejects an inactive identity', () => {
+    const mw = requireApiKeyScope('contracts', 'read');
+    const req = mockReq();
+    req.apiKey = { ...mockApiKeyInfo(['contracts:read']), isActive: false };
+    const res = mockRes();
+    const next = mockNext();
+
+    mw(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
   });
 });

@@ -5,9 +5,13 @@
  * and that no sensitive data leaks into info/warn records.
  */
 
-import { processBlockchainSync } from './blockchain-processor';
+import { processBlockchainSync, resetHeadTracker } from './blockchain-processor';
 import { BlockchainSyncPayload } from '../types';
 import { setWriteRecordImpl, LogRecord } from '../../logger';
+
+beforeEach(() => {
+  resetHeadTracker();
+});
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -149,6 +153,41 @@ describe('processBlockchainSync', () => {
 
       const warnRecords = records.filter((r) => r.level === 'warn');
       expect(warnRecords.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('finality promotion', () => {
+    it('runs the promotion sweep for the synced network after a successful sync', async () => {
+      const promoter = jest.fn(async (_network: string) => ({ promoted: 2, remaining: 0 }));
+      const result = await processBlockchainSync(
+        { network: 'stellar', startBlock: 0, endBlock: 10 },
+        promoter,
+      );
+
+      expect(result.success).toBe(true);
+      expect(promoter).toHaveBeenCalledWith('stellar');
+      expect((result.data as any).finalityPromotion).toEqual({ promoted: 2, remaining: 0 });
+    });
+
+    it('does not run the promotion sweep when validation fails', async () => {
+      const promoter = jest.fn();
+      await expect(
+        processBlockchainSync(
+          { network: 'ethereum' } as unknown as BlockchainSyncPayload,
+          promoter,
+        ),
+      ).rejects.toThrow('Invalid network');
+      expect(promoter).not.toHaveBeenCalled();
+    });
+
+    it('propagates promotion failures so the queue retries the job', async () => {
+      const promoter = jest.fn(async () => {
+        throw new Error('promotion failure');
+      });
+
+      await expect(
+        processBlockchainSync({ network: 'stellar', startBlock: 0, endBlock: 10 }, promoter),
+      ).rejects.toThrow('promotion failure');
     });
   });
 });

@@ -13,7 +13,7 @@
 
 import type { CursorPosition } from './cursor.types';
 import { CURSOR_MAX_LIMIT, CURSOR_DEFAULT_LIMIT, CURSOR_MAX_LENGTH } from './cursor.types';
-import { IndexerCursor, CursorUpdateResult, CursorResumeResult, CursorResumeRequest } from './cursor.types';
+import { IndexerCursor, CursorUpdateResult, CursorRewindResult } from './cursor.types';
 
 /**
  * Encodes a {@link CursorPosition} into an opaque base-64 string suitable for
@@ -99,7 +99,62 @@ export function parseLimit(raw: unknown): number {
   return n;
 }
 
-import { IndexerCursor, CursorUpdateResult, CursorResumeResult, CursorResumeRequest } from './cursor.types';
+/** Result of {@link resolveCursorQueryParam} when the raw value is well-formed (or absent). */
+export interface CursorQueryOk {
+  ok: true;
+  /** The validated cursor, or `undefined` when none was supplied. */
+  cursor: string | undefined;
+}
+
+/** Result of {@link resolveCursorQueryParam} when the raw value fails validation. */
+export interface CursorQueryError {
+  ok: false;
+  message: string;
+}
+
+/**
+ * Validates a raw `cursor` query-string value without throwing.
+ *
+ * Both contracts-listing handlers need to eagerly reject a garbage cursor
+ * with a 400 before calling the service layer. This centralizes that check
+ * so callers get a discriminated result instead of duplicating a
+ * decode-then-catch block.
+ *
+ * @param rawCursor - The raw `req.query['cursor']` value (usually `string | undefined`).
+ * @returns `{ ok: true, cursor }` when the value is absent or decodes successfully,
+ *   otherwise `{ ok: false, message }` with the same message `decodeCursor` throws.
+ */
+export function resolveCursorQueryParam(rawCursor: unknown): CursorQueryOk | CursorQueryError {
+  if (rawCursor !== undefined && rawCursor !== '' && typeof rawCursor === 'string') {
+    try {
+      decodeCursor(rawCursor);
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
+  }
+
+  const cursor =
+    typeof rawCursor === 'string' && rawCursor.length > 0 ? rawCursor : undefined;
+
+  return { ok: true, cursor };
+}
+
+/**
+ * Parses a source identifier into its structured network/contract/ledger parts.
+ *
+ * Source IDs are normally formatted as `network:contract:ledger`. For legacy
+ * identifiers that are not composite, we fall back to a default network/ledger
+ * and use the whole sourceId as the contract component. This keeps existing
+ * stored cursors readable while ensuring every checkpoint carries the
+ * structured fields required for isolation.
+ */
+export function parseSourceId(sourceId: string): Pick<IndexerCursor, 'network' | 'contract' | 'ledger'> {
+  const parts = sourceId.split(':');
+  if (parts.length === 3) {
+    return { network: parts[0], contract: parts[1], ledger: parts[2] };
+  }
+  return { network: 'default', contract: sourceId, ledger: 'default' };
+}
 
 /**
  * @notice Persistence interface for indexer cursors.
@@ -119,6 +174,18 @@ export interface CursorRepository {
   updateCursor(sourceId: string, newSequence: number, metadata?: Record<string, unknown>): Promise<CursorUpdateResult>;
 
   /**
+   * Rewind cursor to an earlier sequence number.
+   *
+   * Unlike `updateCursor`, this is explicitly allowed to move the
+   * cursor backwards and is used exclusively during chain reorg
+   * recovery.  Normal forward progression MUST use `updateCursor`.
+   *
+   * @param sourceId - The source whose cursor to rewind.
+   * @param toSequence - The target sequence (must be < current).
+   */
+  rewindCursor(sourceId: string, toSequence: number): Promise<CursorRewindResult>;
+
+  /**
    * List all cursors in storage.
    */
   listCursors(): Promise<IndexerCursor[]>;
@@ -135,6 +202,9 @@ export interface CursorRepository {
 export class InMemoryCursorRepository implements CursorRepository {
   private readonly cursorsBySourceId = new Map<string, IndexerCursor>();
 
+  // Checkpoint store keyed by "network:contract"
+  private readonly checkpoints = new Map<string, { network: string; contract: string; ledger: number; eventSequence: number }>();
+
   async getCursor(sourceId: string): Promise<IndexerCursor | null> {
     return this.cursorsBySourceId.get(sourceId) ?? null;
   }
@@ -145,9 +215,11 @@ export class InMemoryCursorRepository implements CursorRepository {
     metadata?: Record<string, unknown>,
   ): Promise<CursorUpdateResult> {
     const now = new Date().toISOString();
+    const parsed = parseSourceId(sourceId);
 
     const cursor: IndexerCursor = {
       sourceId,
+      ...parsed,
       lastSequence: newSequence,
       updatedAt: now,
       metadata,
@@ -155,10 +227,45 @@ export class InMemoryCursorRepository implements CursorRepository {
 
     this.cursorsBySourceId.set(sourceId, cursor);
 
-    return {
-      success: true,
-      cursor,
+    return { success: true, cursor };
+  }
+
+  async rewindCursor(
+    sourceId: string,
+    toSequence: number,
+  ): Promise<CursorRewindResult> {
+    const existing = this.cursorsBySourceId.get(sourceId);
+    if (existing === undefined) {
+      // No cursor to rewind — create one at the target sequence.
+      const now = new Date().toISOString();
+      const parsed = parseSourceId(sourceId);
+      const cursor: IndexerCursor = {
+        ...parseSourceId(sourceId),
+        sourceId,
+        ...parsed,
+        lastSequence: toSequence,
+        updatedAt: now,
+      };
+      this.cursorsBySourceId.set(sourceId, cursor);
+      return { success: true, cursor };
+    }
+
+    if (toSequence >= existing.lastSequence) {
+      return {
+        success: false,
+        cursor: existing,
+        reason: 'Cannot rewind cursor: target sequence is not before current',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const cursor: IndexerCursor = {
+      ...existing,
+      lastSequence: toSequence,
+      updatedAt: now,
     };
+    this.cursorsBySourceId.set(sourceId, cursor);
+    return { success: true, cursor };
   }
 
   async listCursors(): Promise<IndexerCursor[]> {
@@ -168,4 +275,17 @@ export class InMemoryCursorRepository implements CursorRepository {
   async deleteCursor(sourceId: string): Promise<boolean> {
     return this.cursorsBySourceId.delete(sourceId);
   }
+
+  async getCheckpoint(network: string, contract: string): Promise<{ network: string; contract: string; ledger: number; eventSequence: number } | null> {
+    return this.checkpoints.get(`${network}:${contract}`) ?? null;
+  }
+
+  async updateCheckpoint(network: string, contract: string, ledger: number, eventSequence: number): Promise<void> {
+    this.checkpoints.set(`${network}:${contract}`, { network, contract, ledger, eventSequence });
+  }
+
+  async listCheckpoints(): Promise<Array<{ network: string; contract: string; ledger: number; eventSequence: number }>> {
+    return Array.from(this.checkpoints.values());
+  }
 }
+

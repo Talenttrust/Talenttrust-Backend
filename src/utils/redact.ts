@@ -7,7 +7,20 @@
  */
 
 const REDACTED = '[REDACTED]';
-const SENSITIVE_KEY_PATTERN = /secret|signature|token|key|password|authorization|nonce|cookie/i;
+const SENSITIVE_KEYS = new Set([
+  'secret',
+  'signature',
+  'token',
+  'accesstoken',
+  'authtoken',
+  'apikey',
+  'privatekey',
+  'key',
+  'password',
+  'authorization',
+  'nonce',
+  'cookie',
+]);
 const SENSITIVE_HEADER_NAMES = new Set([
   'authorization',
   'cookie',
@@ -41,10 +54,21 @@ export function redactSecret(_value: unknown): string {
 export function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
-    if (SENSITIVE_KEY_PATTERN.test(k)) {
+    if (isSensitiveKey(k)) {
       out[k] = REDACTED;
-    } else if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-      out[k] = redactObject(v as Record<string, unknown>);
+    } else if (v !== null && typeof v === 'object') {
+      if (Array.isArray(v)) {
+        // Recursively process array elements
+        out[k] = v.map(item => {
+          if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+            return redactObject(item as Record<string, unknown>);
+          }
+          return item;
+        });
+      } else {
+        // Recursively process nested objects
+        out[k] = redactObject(v as Record<string, unknown>);
+      }
     } else {
       out[k] = v;
     }
@@ -103,6 +127,13 @@ export function redactPayload(payload: unknown): any {
     return payload.map(item => redactPayload(item));
   }
 
-  // Delegate safely to your pre-existing, robust object sanitisation rule
-  return redactObject(payload as Record<string, unknown>);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+    out[key] = isSensitiveKey(key) ? REDACTED : redactPayload(value);
+  }
+  return out;
+}
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEYS.has(key.toLowerCase().replace(/[-_]/g, ''));
 }
