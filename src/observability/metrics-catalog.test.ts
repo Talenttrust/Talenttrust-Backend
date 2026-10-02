@@ -147,6 +147,10 @@ describe('evaluateObjectives - SLO compliance', () => {
       // Mock high latency by manually observing duration
       service.trackHttpRequest(req, response, next);
 
+      // Simulate high latency (simulate by observing directly)
+      const histogram = (service as any).httpRequestDurationSeconds;
+      histogram.observe(
+        { method: 'GET', route: '/test', status_code: '200' },
       // Mock high latency by manually observing duration
       const histogram = (service as any).httpRequestDurationSeconds;
       histogram.observe(

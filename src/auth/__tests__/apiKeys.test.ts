@@ -7,6 +7,7 @@ import {
   rotateApiKey,
   deactivateApiKey,
   computeKeySelector,
+  ApiKeyError
   ApiKeyValidationError
 } from '../apiKeys';
 import { database } from '../../database';
@@ -599,6 +600,124 @@ describe('API Key Utilities', () => {
     });
   });
 
+  describe('validateApiKey - failure recovery and edge cases', () => {
+    const crypto = require('crypto');
+
+    // Test 1: Multiple legacy keys — correct non-first key validates
+    it('should validate the correct non-first legacy key when multiple legacy keys exist', async () => {
+      const db = await (database as any).loadDatabase();
+
+      // Insert first legacy key (no key_selector)
+      const key1Plain = generateApiKey();
+      const { salt: s1, hash: h1 } = hashApiKey(key1Plain);
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Legacy Key One',
+        key_hash: `${s1}:${h1}`,
+        scope: ['legacy:read'],
+        created_by: 'user1',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+        // no key_selector
+      });
+
+      // Insert second legacy key (no key_selector)
+      const key2Plain = generateApiKey();
+      const { salt: s2, hash: h2 } = hashApiKey(key2Plain);
+      db.api_keys.push({
+        id: crypto.randomUUID(),
+        name: 'Legacy Key Two',
+        key_hash: `${s2}:${h2}`,
+        scope: ['legacy:write'],
+        created_by: 'user2',
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_active: true
+        // no key_selector
+      });
+
+      await (database as any).saveDatabase();
+
+      // Present the SECOND key's plain value — must match 'Legacy Key Two'
+      const result = await validateApiKey(key2Plain);
+      expect(result).not.toBeNull();
+      expect(result!.name).toBe('Legacy Key Two');
+    });
+
+    // Test 2: validateApiKey with DB write failure returns null, does not throw
+    it('should return null and not throw when database.updateApiKey throws', async () => {
+      const { apiKey } = await createApiKey({
+        name: 'Write Fail Key',
+        scope: ['contracts:read'],
+        createdBy: 'user123'
+      });
+
+      const spy = jest.spyOn(database, 'updateApiKey').mockRejectedValue(new Error('DB failure'));
+
+      // Call directly without wrapping in expect().not.toThrow()
+      // validateApiKey must return null (not throw) on DB write failure
+      const result = await validateApiKey(apiKey);
+
+      expect(result).toBeNull();
+
+      spy.mockRestore();
+    });
+
+    // Test 3: createApiKey with DB write failure throws ApiKeyError
+    it('should throw ApiKeyError when database.createApiKey throws', async () => {
+      const spy = jest.spyOn(database, 'createApiKey').mockRejectedValue(new Error('DB failure'));
+
+      await expect(
+        createApiKey({ name: 'X', scope: [], createdBy: 'u' })
+      ).rejects.toBeInstanceOf(ApiKeyError);
+
+      spy.mockRestore();
+    });
+
+    // Test 4: rotateApiKey with DB write failure throws ApiKeyError
+    it('should throw ApiKeyError when database.rotateApiKey throws', async () => {
+      const { info } = await createApiKey({
+        name: 'Rotate Fail Key',
+        scope: ['contracts:read'],
+        createdBy: 'user123'
+      });
+
+      const spy = jest.spyOn(database, 'rotateApiKey').mockRejectedValue(new Error('DB failure'));
+
+      await expect(rotateApiKey(info.id)).rejects.toBeInstanceOf(ApiKeyError);
+
+      spy.mockRestore();
+    });
+
+    // Test 5: validateApiKey with empty string returns null
+    it('should return null for an empty string key', async () => {
+      const result = await validateApiKey('');
+      expect(result).toBeNull();
+    });
+
+    // Test 6: Expired key does NOT update last_used_at
+    it('should not call database.updateApiKey for an expired key', async () => {
+      const pastDate = new Date('2020-01-01T00:00:00Z');
+      const { apiKey } = await createApiKey({
+        name: 'Expired No Timestamp Key',
+        scope: ['contracts:read'],
+        createdBy: 'user123',
+        expiresAt: pastDate
+      });
+
+      const spy = jest.spyOn(database, 'updateApiKey');
+
+      const result = await validateApiKey(apiKey);
+      expect(result).toBeNull();
+
+      // updateApiKey should NOT have been called with last_used_at
+      const lastUsedCalls = spy.mock.calls.filter(
+        ([, updates]) => 'last_used_at' in updates
+      );
+      expect(lastUsedCalls).toHaveLength(0);
+
+      spy.mockRestore();
   describe('Input validation - compatibility contracts', () => {
     describe('createApiKey', () => {
       it('should throw ApiKeyValidationError for null request', async () => {

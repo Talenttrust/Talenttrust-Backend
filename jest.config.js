@@ -24,6 +24,7 @@ module.exports = {
     // 'reputation.controller.test.ts', — re-enabled: rating range validation tests
     'src/auth/__tests__/roles.test.ts',
     'src/config/config.test.ts',
+    // 'src/controllers/__tests__/apiKeyController.test.ts', — re-enabled per issue #1403: integration coverage restored
     'src/httpClient.test.ts',
     'src/index.test.ts',
     'src/logger.test.ts',
@@ -64,6 +65,36 @@ module.exports = {
     '!src/observability/index.ts',
   ],
   coverageThreshold: {
+    global: {
+      lines: 0,
+      statements: 0,
+      functions: 0,
+      branches: 0,
+    },
+    './src/observability/metrics-service.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/observability/health-service.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/middleware/metricsAuth.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
+    './src/utils/webhookMetrics.ts': {
+      lines: 95,
+      branches: 95,
+      functions: 95,
+      statements: 95,
+    },
     global: { lines: 0, statements: 0, functions: 0, branches: 0 },
   },
   coverageReporters: ['text', 'lcov', 'json-summary'],

@@ -15,6 +15,12 @@
  *   - Keys can be rotated and deactivated
  *   - Last usage is tracked for audit purposes
  *
+ * Failure recovery invariants:
+ *   - validateApiKey always returns null on any DB error (fail closed)
+ *   - createApiKey, rotateApiKey, deactivateApiKey throw ApiKeyError on DB failure
+ *   - Expiry is checked BEFORE last_used_at is written
+ *   - Legacy key fallback verifies identity before returning a match
+ *   - Raw API key values are never logged; selector is used instead
  * Concurrency invariants:
  *   - Creation, rotation, and deactivation are serialized per key via an
  *     in-process mutex so concurrent calls cannot interleave their read
@@ -117,6 +123,14 @@ export function resetAuthCache(): void {
  */
 export function setAuthCache(cache: AuthCache | null): void {
   authCache = cache;
+}
+
+// Fix 3: Typed error class for API key operation failures (additive export)
+export class ApiKeyError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'ApiKeyError';
+  }
 }
 
 export interface ApiKeyInfo {
@@ -625,6 +639,7 @@ export const keyMutex = new KeyMutex();
  *
  * @param request - The API key creation request.
  * @returns The created API key info and the plain key (only returned once).
+ * @throws ApiKeyError if the database write fails.
  * @throws ApiKeyValidationError if request is invalid
  */
 export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: string; info: ApiKeyInfo }> {
@@ -638,6 +653,21 @@ export async function createApiKey(request: ApiKeyRequest): Promise<{ apiKey: st
   const keyHash = `${salt}:${hash}`;
   const keySelector = computeKeySelector(apiKey);
 
+  // Fix 4: wrap DB write in try/catch; throw typed error on failure
+  let dbKey;
+  try {
+    dbKey = await database.createApiKey({
+      name: request.name,
+      key_hash: keyHash,
+      key_selector: keySelector,
+      scope: request.scope,
+      created_by: request.createdBy,
+      expires_at: request.expiresAt,
+      is_active: true
+    });
+  } catch (err) {
+    throw new ApiKeyError('Failed to persist API key', err);
+  }
   // Defensive assertion: the credential we are about to persist must already
   // satisfy the storage invariant so that a future validation can never fail
   // on a key we just issued.
@@ -714,6 +744,27 @@ export function isValidSaltHashFormat(storedCredential: string): boolean {
 /**
  * Reads and verifies an API key against the store, bypassing the cache.
  *
+ * Invariants:
+ *   - Returns null for any invalid, expired, deactivated, or malformed key.
+ *   - Returns null on any DB error (fail closed — never throws to callers).
+ *   - Expiry is checked BEFORE last_used_at is written.
+ *   - Legacy key fallback verifies key identity before selecting a candidate.
+ *   - Raw API key is never logged; selector is used for observability.
+ *
+ * @param apiKey - The plain API key to validate.
+ * @returns The API key info if valid, null otherwise.
+ */
+export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null> {
+  // Fix 5: input guard — reject empty/non-string early before any crypto work
+  if (typeof apiKey !== 'string' || apiKey.length === 0) return null;
+
+  // Fix 4: wrap entire body in try/catch — fail closed on any DB error
+  try {
+    // Compute the deterministic selector for O(1) indexed lookup
+    const selector = computeKeySelector(apiKey);
+
+    // Try indexed lookup first (fast path, O(1) via key_selector)
+    let dbKey = await database.getApiKeyBySelector(selector);
  * Deliberately side-effect free with respect to caching: the *cache* owns the
  * concurrency policy (single flight and the invalidation epoch — see
  * {@link AuthCache.getOrLoad}), while this function stays a pure
@@ -782,9 +833,84 @@ async function loadApiKeyInfo(apiKey: string, selector: string): Promise<ApiKeyI
     return { info: null, definitive: true };
   }
 
-  // Split the validated format
-  const [salt, hash] = dbKey.key_hash.split(':');
+    // Track whether PBKDF2 verification already ran (legacy key loop)
+    // so we do NOT re-run it at the bottom for an already-verified key.
+    let alreadyVerified = false;
 
+    // Fix 1: Correct legacy-key fallback — scan all legacy keys and verify each
+    // instead of picking the first active one regardless of identity.
+    if (!dbKey) {
+      const db = await (database as any).loadDatabase();
+      const legacyKeys = db.api_keys.filter((k: ApiKey) => !k.key_selector && k.is_active);
+      for (const candidate of legacyKeys) {
+        if (!isValidSaltHashFormat(candidate.key_hash)) continue;
+        const [s, h] = candidate.key_hash.split(':');
+        if (verifyApiKey(apiKey, s, h)) {
+          dbKey = candidate;
+          alreadyVerified = true;
+          break;
+        }
+      }
+    }
+
+    if (!dbKey) {
+      // Fix 6: structured log — use selector (not raw key) for observability
+      console.warn('[apiKeys] validateApiKey: key not found', { selector });
+      return null;
+    }
+
+    // Validate the stored credential format BEFORE splitting and calling PBKDF2
+    // This fails closed on malformed input (empty, missing separator, wrong hex length)
+    // rather than risking exceptions on the authentication hot path.
+    if (!isValidSaltHashFormat(dbKey.key_hash)) {
+      // Fix 6: log key id only, never raw key value
+      console.warn('[apiKeys] validateApiKey: malformed stored credential', { keyId: dbKey.id });
+      return null;
+    }
+
+    // Split the validated format
+    const [salt, hash] = dbKey.key_hash.split(':');
+
+    // Verify with the slow salted hash (source of truth) — skip if already verified
+    // in the legacy-key fallback loop above to avoid a duplicate PBKDF2 call.
+    if (!alreadyVerified && !verifyApiKey(apiKey, salt, hash)) {
+      // Fix 6: log selector, not raw key
+      console.warn('[apiKeys] validateApiKey: verification failed', { selector });
+      return null;
+    }
+
+    // Fix 2: Check expiry FIRST — an expired key must NOT record last_used_at.
+    if (dbKey.expires_at && new Date() > new Date(dbKey.expires_at)) {
+      // Fix 6: log key id and expiry event
+      console.warn('[apiKeys] validateApiKey: key expired, deactivating', { keyId: dbKey.id });
+      await database.deactivateApiKey(dbKey.id);
+      return null;
+    }
+
+    // Backfill the selector for legacy keys so future lookups hit the fast path
+    if (!dbKey.key_selector) {
+      await database.updateApiKey(dbKey.id, { key_selector: selector });
+    }
+
+    // Only record usage for keys that pass ALL checks (expiry checked above)
+    await database.updateApiKey(dbKey.id, { last_used_at: new Date() });
+
+    return {
+      id: dbKey.id,
+      name: dbKey.name,
+      scope: dbKey.scope,
+      createdBy: dbKey.created_by,
+      createdAt: dbKey.created_at,
+      expiresAt: dbKey.expires_at,
+      isActive: dbKey.is_active
+    };
+  } catch (err) {
+    // Fix 4/6: log structured error, return null (fail closed) — never throw to callers
+    console.error('[apiKeys] validateApiKey: unexpected error', {
+      error: err instanceof Error ? err.message : String(err)
+    });
+    return null;
+  }
   // Verify with the slow salted hash (source of truth).
   // Skip re-verification for keys found via the legacy fallback — they already
   // passed the PBKDF2 check inside the loop.
@@ -847,6 +973,7 @@ export async function validateApiKey(apiKey: string): Promise<ApiKeyInfo | null>
  *
  * @param keyId - The ID of the key to rotate.
  * @returns The new API key and updated info, or null if key not found.
+ * @throws ApiKeyError if the database write fails.
  * @throws ApiKeyValidationError if keyId is invalid
  * @throws Error if database operation fails
  */
@@ -857,6 +984,33 @@ export async function rotateApiKey(keyId: string): Promise<{ apiKey: string; inf
       return null;
     }
 
+  const newApiKey = generateApiKey();
+  const { salt, hash } = hashApiKey(newApiKey);
+  const keyHash = `${salt}:${hash}`;
+  const keySelector = computeKeySelector(newApiKey);
+
+  // Fix 4: wrap DB write in try/catch; throw typed error on failure
+  let updatedKey;
+  try {
+    updatedKey = await database.rotateApiKey(keyId, keyHash, keySelector);
+  } catch (err) {
+    throw new ApiKeyError('Failed to rotate API key', err);
+  }
+
+  if (!updatedKey) {
+    return null;
+  }
+  
+  return {
+    apiKey: newApiKey,
+    info: {
+      id: updatedKey.id,
+      name: updatedKey.name,
+      scope: updatedKey.scope,
+      createdBy: updatedKey.created_by,
+      createdAt: updatedKey.created_at,
+      expiresAt: updatedKey.expires_at,
+      isActive: updatedKey.is_active
     // Refuse to rotate a key that was deactivated concurrently.
     if (!existingKey.is_active) {
       return null;
@@ -907,8 +1061,15 @@ export async function rotateApiKey(keyId: string): Promise<{ apiKey: string; inf
  *
  * @param keyId - The ID of the key to deactivate.
  * @returns True if successful, false otherwise.
+ * @throws ApiKeyError if the database write fails.
  */
 export async function deactivateApiKey(keyId: string): Promise<boolean> {
+  // Fix 4: wrap DB write in try/catch; throw typed error on failure
+  try {
+    return await database.deactivateApiKey(keyId);
+  } catch (err) {
+    throw new ApiKeyError('Failed to deactivate API key', err);
+  }
   return keyMutex.run(keyId, async () => {
     const existingKey = await database.getApiKeyById(keyId);
     if (!existingKey) {
