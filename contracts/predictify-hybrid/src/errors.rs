@@ -50,7 +50,6 @@ pub enum Error {
     // ──────────────────────────────────────────────────────────────────────
     // Discriminants 1–2: original release — frozen, must not be renumbered.
     // ──────────────────────────────────────────────────────────────────────
-
     /// The supplied `idempotency_key` was already used in a previous
     /// `place_bets` call that completed successfully.  The original batch
     /// has already been applied; retrying within the retention window cannot

@@ -434,8 +434,10 @@ export class AuditCache {
       return null;
     }
 
-    // Check if entry has expired
-    if (now > entry.expiresAt) {
+    // Check if entry has expired. `>=` so the entry is treated as expired at
+    // exactly `expiresAt` — the TTL has elapsed by then, and matching the
+    // cleanup sweep's boundary keeps reads and eviction deterministic.
+    if (now >= entry.expiresAt) {
       this.cache.delete(key);
       this.recordMiss();
       return null;
@@ -596,7 +598,7 @@ export class AuditCache {
       const keysToDelete: string[] = [];
 
       this.cache.forEach((entry, key) => {
-        if (now > entry.expiresAt) {
+        if (now >= entry.expiresAt) {
           keysToDelete.push(key);
         }
       });
