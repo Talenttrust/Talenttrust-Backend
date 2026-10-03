@@ -30,7 +30,12 @@ use soroban_sdk::{
     Address, BytesN, Env, Vec,
 };
 
-use crate::{bets::Bet, errors::Error, storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE}, PredictifyHybridClient};
+use crate::{
+    bets::Bet,
+    errors::Error,
+    storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE},
+    PredictifyHybridClient,
+};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -283,7 +288,7 @@ mod idempotency_tests {
         // no panic → accepted
     }
 
-    /// A bet with `amount = 0` is rejected with `AmountMustBePositive`.
+    /// A bet with `amount = 0` is rejected with `InvalidBetAmount`.
     #[test]
     fn zero_amount_rejected() {
         let env = fresh_env();
@@ -300,12 +305,12 @@ mod idempotency_tests {
         let result = client.try_place_bets(&user, &bets, &key(&env, 0xC0));
         assert_eq!(
             result,
-            Err(Ok(Error::AmountMustBePositive)),
-            "amount=0 must return AmountMustBePositive"
+            Err(Ok(Error::InvalidBetAmount)),
+            "amount=0 must return InvalidBetAmount"
         );
     }
 
-    /// A bet with a negative `amount` is rejected with `AmountMustBePositive`.
+    /// A bet with a negative `amount` is rejected with `InvalidBetAmount`.
     #[test]
     fn negative_amount_rejected() {
         let env = fresh_env();
@@ -322,8 +327,8 @@ mod idempotency_tests {
         let result = client.try_place_bets(&user, &bets, &key(&env, 0xC1));
         assert_eq!(
             result,
-            Err(Ok(Error::AmountMustBePositive)),
-            "negative amount must return AmountMustBePositive"
+            Err(Ok(Error::InvalidBetAmount)),
+            "negative amount must return InvalidBetAmount"
         );
     }
 
@@ -387,7 +392,7 @@ mod idempotency_tests {
     }
 
     /// A multi-entry batch where the *second* bet has a zero amount is
-    /// rejected with `AmountMustBePositive`.  Confirms the entire vector
+    /// rejected with `InvalidBetAmount`.  Confirms the entire vector
     /// is scanned, not just the first element.
     #[test]
     fn invalid_amount_in_second_bet_rejected() {
@@ -409,7 +414,7 @@ mod idempotency_tests {
         let result = client.try_place_bets(&user, &bets, &key(&env, 0xE0));
         assert_eq!(
             result,
-            Err(Ok(Error::AmountMustBePositive)),
+            Err(Ok(Error::InvalidBetAmount)),
             "invalid amount in second bet must still be caught"
         );
     }
@@ -465,7 +470,7 @@ mod idempotency_tests {
     ///
     /// An over-sized batch that also contains a zero-amount bet should still
     /// return `BatchTooLarge` (cheaper structural check first), not
-    /// `AmountMustBePositive`.
+    /// `InvalidBetAmount`.
     #[test]
     fn batch_too_large_fires_before_amount_check() {
         let env = fresh_env();
@@ -486,14 +491,14 @@ mod idempotency_tests {
         assert_eq!(
             result,
             Err(Ok(Error::BatchTooLarge)),
-            "BatchTooLarge must fire before AmountMustBePositive"
+            "BatchTooLarge must fire before InvalidBetAmount"
         );
     }
 
     /// Validation order: per-element checks fire before idempotency storage read.
     ///
     /// A batch with an invalid amount must be rejected with
-    /// `AmountMustBePositive` even when the idempotency key has not been
+    /// `InvalidBetAmount` even when the idempotency key has not been
     /// seen before, confirming no storage reads happen for an invalid batch.
     #[test]
     fn amount_check_fires_before_idempotency_write() {
@@ -512,7 +517,7 @@ mod idempotency_tests {
 
         // First call: validation fails → no key should be written.
         let result = client.try_place_bets(&user, &bets, &idem);
-        assert_eq!(result, Err(Ok(Error::AmountMustBePositive)));
+        assert_eq!(result, Err(Ok(Error::InvalidBetAmount)));
 
         // Second call with the same key and now-valid bets must succeed,
         // proving the first call did not consume the idempotency key.

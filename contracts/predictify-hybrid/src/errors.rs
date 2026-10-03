@@ -8,9 +8,8 @@ use soroban_contracterror;
 /// |------|---------------------------------|----------------|----------------------|
 /// | 1    | `IdempotentBatchAlreadyApplied` | yes (earlier)  | no — query `get_batch_receipt` |
 /// | 2    | `EmptyBatch`                    | no             | yes, after fixing the batch |
-/// | 3    | `InvalidAmount`                 | no             | yes, after fixing the batch |
-/// | 4    | `BatchTooLarge`                 | no             | yes, after splitting (new keys) |
-/// | 5    | `AmountOverflow`                | no             | yes, after fixing the batch |
+/// | 3    | `IdempotencyRetentionUnavailable` | no           | yes, after fixing the ledger range |
+/// | 6    | `InvalidBetAmount`              | no             | yes, after fixing the batch |
 ///
 /// Every error is returned *before* any state is written, and Soroban
 /// rolls back all writes and events of a failed invocation, so an error
@@ -32,8 +31,8 @@ use soroban_contracterror;
 /// * **Document** every reserved slot if a variant is logically deprecated
 ///   so future authors know not to reclaim its number.
 ///
-/// Currently reserved discriminants: 1–5.
-/// The next available discriminant is: **6**.
+/// Discriminants 4–5 remain reserved.
+/// The next available discriminant is: **7**.
 ///
 /// # Retry guidance
 ///
@@ -42,7 +41,7 @@ use soroban_contracterror;
 /// | `IdempotentBatchAlreadyApplied` | No — generate a fresh key |
 /// | `EmptyBatch`                   | No — fix the request      |
 /// | `BatchTooLarge`                | No — split the batch      |
-/// | `AmountMustBePositive`         | No — fix the request      |
+/// | `InvalidBetAmount`         | No — fix the request      |
 /// | `MarketIdInvalid`              | No — fix the market_id    |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -50,7 +49,6 @@ pub enum Error {
     // ──────────────────────────────────────────────────────────────────────
     // Discriminants 1–2: original release — frozen, must not be renumbered.
     // ──────────────────────────────────────────────────────────────────────
-
     /// The supplied `idempotency_key` was already used in a previous
     /// `place_bets` call that completed successfully.  The original batch
     /// has already been applied; retrying within the retention window cannot
@@ -67,4 +65,9 @@ pub enum Error {
     /// The ledger range or network maximum TTL cannot preserve the full
     /// replay-protection window. No token or batch effects were committed.
     IdempotencyRetentionUnavailable = 3,
+
+    /// A bet amount was zero or negative. Validation fails before the
+    /// idempotency key is consumed, so correcting the amount can be retried
+    /// with the same key.
+    InvalidBetAmount = 6,
 }
