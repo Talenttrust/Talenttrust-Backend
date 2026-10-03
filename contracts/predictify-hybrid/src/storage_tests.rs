@@ -293,6 +293,102 @@ fn zero_key_does_not_create_reservation_or_start_migration() {
     assert_eq!(env.events().all().len(), 2);
 }
 
+#[test]
+fn malformed_temporary_receipt_fails_closed_and_other_tokens_remain_usable() {
+    let (env, id, user) = setup();
+    let bad = token(&env, 14);
+    let bad_key = DataKey::PlaceBetsIdem(user.clone(), bad.clone());
+    env.as_contract(&id, || env.storage().temporary().set(&bad_key, &false));
+    let client = PredictifyHybridClient::new(&env, &id);
+
+    assert_eq!(
+        client.try_place_bets(&user, &bets(&env), &bad),
+        Err(Ok(Error::InvalidIdempotencyState))
+    );
+    env.as_contract(&id, || {
+        assert_eq!(
+            env.storage().temporary().get::<_, bool>(&bad_key),
+            Some(false)
+        );
+        assert!(!env.storage().instance().has(&DataKey::LegacyIdemDeadline));
+    });
+    assert_eq!(committed_event_count(&env), 0);
+
+    let good = token(&env, 15);
+    client.place_bets(&user, &bets(&env), &good);
+    assert_eq!(committed_event_count(&env), 1);
+    env.as_contract(&id, || env.storage().temporary().remove(&bad_key));
+    client.place_bets(&user, &bets(&env), &bad);
+    assert_eq!(committed_event_count(&env), 2);
+}
+
+#[test]
+fn malformed_migration_deadline_preserves_legacy_marker_until_repaired() {
+    let (env, id, user) = setup();
+    let old = token(&env, 16);
+    let old_key = DataKey::PlaceBetsIdem(user.clone(), old.clone());
+    env.as_contract(&id, || {
+        env.storage().instance().set(&old_key, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::LegacyIdemDeadline, &false);
+    });
+    let client = PredictifyHybridClient::new(&env, &id);
+
+    assert_eq!(
+        client.try_place_bets(&user, &bets(&env), &old),
+        Err(Ok(Error::InvalidIdempotencyState))
+    );
+    env.as_contract(&id, || {
+        assert_eq!(
+            env.storage().instance().get::<_, bool>(&old_key),
+            Some(true)
+        );
+        assert_eq!(
+            env.storage()
+                .instance()
+                .get::<_, bool>(&DataKey::LegacyIdemDeadline),
+            Some(false)
+        );
+        env.storage()
+            .instance()
+            .remove(&DataKey::LegacyIdemDeadline);
+    });
+    assert_eq!(committed_event_count(&env), 0);
+    assert_eq!(
+        client.try_place_bets(&user, &bets(&env), &old),
+        Err(Ok(Error::IdempotentBatchAlreadyApplied))
+    );
+}
+
+#[test]
+fn malformed_legacy_marker_cannot_be_erased_after_migration_cutoff() {
+    let (env, id, user) = setup();
+    let old = token(&env, 17);
+    let old_key = DataKey::PlaceBetsIdem(user.clone(), old.clone());
+    env.as_contract(&id, || env.storage().instance().set(&old_key, &false));
+    let client = PredictifyHybridClient::new(&env, &id);
+
+    assert_eq!(
+        client.try_place_bets(&user, &bets(&env), &old),
+        Err(Ok(Error::InvalidIdempotencyState))
+    );
+    client.place_bets(&user, &bets(&env), &token(&env, 18));
+    advance(&env, IDEM_KEY_TTL_LEDGERS + 1);
+    assert_eq!(
+        client.try_place_bets(&user, &bets(&env), &old),
+        Err(Ok(Error::InvalidIdempotencyState))
+    );
+    env.as_contract(&id, || {
+        assert_eq!(
+            env.storage().instance().get::<_, bool>(&old_key),
+            Some(false)
+        );
+        assert!(!env.storage().temporary().has(&old_key));
+    });
+    assert_eq!(committed_event_count(&env), 1);
+}
+
 // Exercise rollback after reservation inside a real host transaction. The
 // production batch currently only emits an event; future effects must keep
 // this same commit/rollback boundary rather than catching and ignoring errors.

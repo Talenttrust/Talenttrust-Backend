@@ -1,4 +1,4 @@
-use soroban_contracterror;
+use soroban_sdk::contracterror;
 
 /// Contract-level error codes returned as `Err(Error::)`.
 ///
@@ -32,8 +32,8 @@ use soroban_contracterror;
 /// * **Document** every reserved slot if a variant is logically deprecated
 ///   so future authors know not to reclaim its number.
 ///
-/// Currently reserved discriminants: 1–5.
-/// The next available discriminant is: **6**.
+/// Currently reserved discriminants: 1–4.
+/// The next available discriminant is: **5**.
 ///
 /// # Retry guidance
 ///
@@ -50,7 +50,6 @@ pub enum Error {
     // ──────────────────────────────────────────────────────────────────────
     // Discriminants 1–2: original release — frozen, must not be renumbered.
     // ──────────────────────────────────────────────────────────────────────
-
     /// The supplied `idempotency_key` was already used in a previous
     /// `place_bets` call that completed successfully.  The original batch
     /// has already been applied; retrying within the retention window cannot
@@ -67,4 +66,9 @@ pub enum Error {
     /// The ledger range or network maximum TTL cannot preserve the full
     /// replay-protection window. No token or batch effects were committed.
     IdempotencyRetentionUnavailable = 3,
+
+    /// A saved idempotency marker or migration deadline has an unknown value
+    /// shape. The call wrote nothing. Use a fresh token and investigate the
+    /// preserved record before attempting to repair it through an upgrade.
+    InvalidIdempotencyState = 4,
 }

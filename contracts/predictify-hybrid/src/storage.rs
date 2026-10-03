@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env, TryFromVal, Val};
 
 use crate::errors::Error;
 
@@ -73,13 +73,26 @@ pub(crate) fn consume_idempotency_key(
 ) -> Result<(), Error> {
     let key = DataKey::PlaceBetsIdem(caller.clone(), token.clone());
     let now = env.ledger().sequence();
-    let legacy_deadline: Option<u32> = env.storage().instance().get(&DataKey::LegacyIdemDeadline);
+    // Read the raw value first. Storage::get::<_, u32> traps on a malformed
+    // value, leaving callers without a stable contract error or retry advice.
+    // An incompatible marker must remain untouched for an operator to inspect.
+    let legacy_deadline = env
+        .storage()
+        .instance()
+        .get::<_, Val>(&DataKey::LegacyIdemDeadline)
+        .map(|raw| u32::try_from_val(env, &raw).map_err(|_| Error::InvalidIdempotencyState))
+        .transpose()?;
 
-    if env.storage().instance().has(&key) && legacy_deadline.is_none_or(|deadline| now <= deadline)
-    {
-        return Err(Error::IdempotentBatchAlreadyApplied);
+    if let Some(raw) = env.storage().instance().get::<_, Val>(&key) {
+        if !matches!(bool::try_from_val(env, &raw), Ok(true)) {
+            return Err(Error::InvalidIdempotencyState);
+        }
+        if legacy_deadline.is_none_or(|deadline| now <= deadline) {
+            return Err(Error::IdempotentBatchAlreadyApplied);
+        }
     }
-    if let Some(deadline) = env.storage().temporary().get::<_, u32>(&key) {
+    if let Some(raw) = env.storage().temporary().get::<_, Val>(&key) {
+        let deadline = u32::try_from_val(env, &raw).map_err(|_| Error::InvalidIdempotencyState)?;
         if now <= deadline {
             return Err(Error::IdempotentBatchAlreadyApplied);
         }
