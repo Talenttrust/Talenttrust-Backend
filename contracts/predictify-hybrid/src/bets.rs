@@ -217,9 +217,7 @@ fn apply_batch(env: &Env, caller: &Address, bets: &Vec<Bet>) -> Result<(), Error
     // TODO: replace with real market-state mutations once the market
     //       storage module is added.  For now we emit a diagnostic event
     //       so the batch is observable on-chain.
-    env.events().publish(
-        (Symbol::new(env, "place_bets"), caller.clone()),
-        bets.len(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "place_bets"), caller.clone()), bets.len());
     Ok(())
 }

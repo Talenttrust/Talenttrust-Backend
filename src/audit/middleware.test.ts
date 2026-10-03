@@ -55,7 +55,7 @@ describe('auditMiddleware', () => {
     const app = express();
     app.use(auditMiddleware);
     app.get('/probe', (_req, res) => {
-      expect(typeof res.locals.audit.log).toBe(function);
+      expect(typeof res.locals.audit.log).toBe('function');
       res.status(204).send();
     });
 
@@ -78,7 +78,7 @@ describe('auditMiddleware', () => {
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     expect(logSpy).toHaveBeenCalledWith(
-      expect.objectContainig({
+      expect.objectContaining({
         correlationId,
         action: 'CONTRACT_CREATED',
         actor: 'user-test-1',
@@ -121,7 +121,7 @@ describe('auditMiddleware', () => {
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     expect(logSpy).toHaveBeenCalledWith(
-      expect.objectContainig({
+      expect.objectContaining({
         correlationId,
         action: 'AUTH_FAILED',
         severity: 'WARNING',
@@ -183,7 +183,7 @@ describe('auditMiddleware', () => {
     }
   });
 
-  it('does not break the response when the audit service throws during flush', async () => {
+  it('fails the request when the audit service cannot persist an event', async () => {
     logSpy.mockImplementation(() => {
       throw new Error('audit service unavailable');
     });
@@ -195,10 +195,10 @@ describe('auditMiddleware', () => {
       res.status(204).send();
     });
 
-    await request(app).get('/flush-failure').expect(204);
+    await request(app).get('/flush-failure').expect(500);
   });
 
-  it('returns a defensive entry when the audit service throws during log', async () => {
+  it('does not return a success response when the audit service throws during log', async () => {
     logSpy.mockImplementation(() => {
       throw new Error('audit service unavailable');
     });
@@ -210,16 +210,13 @@ describe('auditMiddleware', () => {
       res.json({ id: entry.id, correlationId: entry.correlationId });
     });
 
-    const response = await request(app)
+    await request(app)
       .get('/log-failure')
       .set('X-Correlation-ID', 'corr-log-failure-123')
-      .expect(200);
-
-    expect(response.body.id).toBeTruthy();
-    expect(response.body.correlationId).toBe('corr-log-failure-123');
+      .expect(500);
   });
 
-  it('preserves the response status and body when audit flushing fails', async () => {
+  it('does not send a successful response when the audit append fails', async () => {
     logSpy.mockImplementation(() => {
       throw new Error('audit service unavailable');
     });
@@ -231,8 +228,7 @@ describe('auditMiddleware', () => {
       res.status(201).json({ ok: true, value: 42 });
     });
 
-    const response = await request(app).get('/preserve-body').expect(201);
-    expect(response.body).toEqual({ ok: true, value: 42 });
+    await request(app).get('/preserve-body').expect(500);
   });
 
   it('attaches a fresh audit context per request', async () => {

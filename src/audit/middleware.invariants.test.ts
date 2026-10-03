@@ -1,6 +1,6 @@
 import express, { type Request, type Response, type ErrorRequestHandler } from 'express';
 import request from 'supertest';
-import { auditMiddleware } from './middleware';
+import { auditMiddleware, NOOP_ENTRY_HASH, NOOP_ENTRY_ID_PREFIX, NOOP_ENTRY_PREVIOUS_HASH } from './middleware';
 import { auditService } from './service';
 import { auditStore } from './store';
 import type { CreateAuditEntryInput } from './types';
@@ -200,8 +200,12 @@ describe('request audit invariants', () => {
     process.env.AUDIT_ENABLED = 'false';
     const metadata = { nested: { value: 'original' } };
     const entry = attach().helper.log(input({ metadata }));
+    const repeated = attach().helper.log(input({ metadata: { nested: { value: 'original' } } }));
     metadata.nested.value = 'changed';
-    expect(entry).toMatchObject({ id: '', hash: '', previousHash: '', metadata: { nested: { value: 'original' } } });
+    expect(entry).toMatchObject({ hash: NOOP_ENTRY_HASH, previousHash: NOOP_ENTRY_PREVIOUS_HASH, metadata: { nested: { value: 'original' } } });
+    expect(entry.id.startsWith(NOOP_ENTRY_ID_PREFIX)).toBe(true);
+    expect(entry.timestamp).toBe('1970-01-01T00:00:00.000Z');
+    expect(repeated.id).toBe(entry.id);
     expect(Object.isFrozen(entry)).toBe(true);
     expect(Object.isFrozen(entry.metadata.nested)).toBe(true);
     expect(auditStore.count()).toBe(0);
@@ -213,7 +217,7 @@ describe('request audit invariants', () => {
     const disabled = attach().helper;
     process.env.AUDIT_ENABLED = 'true';
     expect(enabled.log(input()).id).not.toBe('');
-    expect(disabled.log(input()).id).toBe('');
+    expect(disabled.log(input()).id.startsWith(NOOP_ENTRY_ID_PREFIX)).toBe(true);
     expect(auditStore.count()).toBe(1);
   });
 

@@ -12,7 +12,6 @@
 //! `Error::IdempotentBatchAlreadyApplied`.
 
 #[no_std]
-
 #[cfg(test)]
 mod batch_operations_tests;
 mod bets;
@@ -32,7 +31,7 @@ pub use bets::{BatchReceipt, Bet, MAX_BETS_PER_BATCH};
 pub use errors::Error;
 pub use storage::{DataKey, IDEM_KEY_TTL_LEDGERS, IDEM_KEY_TTL_THRESHOLD_LEDGERS};
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN<32>, Env, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
 
 /// Maximum number of bets accepted in a single ``place_bets``b call.
 ///

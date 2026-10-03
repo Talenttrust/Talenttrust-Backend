@@ -30,7 +30,12 @@ use soroban_sdk::{
     Address, BytesN, Env, Vec,
 };
 
-use crate::{bets::Bet, errors::Error, storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE}, PredictifyHybridClient};
+use crate::{
+    bets::Bet,
+    errors::Error,
+    storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE},
+    PredictifyHybridClient,
+};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

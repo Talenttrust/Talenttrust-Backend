@@ -36,6 +36,7 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
+import { createHash } from 'node:crypto';
 import { auditService } from './service';
 import type { AuditEntry, CreateAuditEntryInput, AuditAction, AuditSeverity } from './types';
 import { validateEnv } from '../config/env.schema';
@@ -244,23 +245,20 @@ export const NOOP_ENTRY_PREVIOUS_HASH = 'GENESIS';
 function buildNoopEntry(
   input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>,
 ): AuditEntry {
-  // Provide deterministic fallback values for every required field so the
-  // stub is safe to destructure even if the caller passes a partial object.
-  const action: AuditAction =
-    typeof input.action === 'string' ? (input.action as AuditAction) : 'ADMIN_ACTION';
-  const severity: AuditSeverity =
-    typeof input.severity === 'string' ? (input.severity as AuditSeverity) : 'INFO';
-  const actor = typeof input.actor === 'string' && input.actor.length > 0 ? input.actor : 'noop';
-  const resource =
-    typeof input.resource === 'string' && input.resource.length > 0 ? input.resource : 'noop';
-  const resourceId =
-    typeof input.resourceId === 'string' && input.resourceId.length > 0
-      ? input.resourceId
-      : 'noop';
+  const prepared = prepareInput(input);
+  const action: AuditAction = prepared.action;
+  const severity: AuditSeverity = prepared.severity;
+  const actor = prepared.actor;
+  const resource = prepared.resource;
+  const resourceId = prepared.resourceId;
+  const id = `${NOOP_ENTRY_ID_PREFIX}${createHash('sha256')
+    .update(JSON.stringify(prepared))
+    .digest('hex')
+    .slice(0, 24)}`;
 
   return Object.freeze({
-    id: `${NOOP_ENTRY_ID_PREFIX}${Date.now()}`,
-    timestamp: new Date().toISOString(),
+    id,
+    timestamp: '1970-01-01T00:00:00.000Z',
     hash: NOOP_ENTRY_HASH,
     previousHash: NOOP_ENTRY_PREVIOUS_HASH,
     action,
@@ -268,56 +266,11 @@ function buildNoopEntry(
     actor,
     resource,
     resourceId,
-    metadata:
-      typeof input.metadata === 'object' && input.metadata !== null && !Array.isArray(input.metadata)
-        ? (input.metadata as Record<string, unknown>)
-        : {},
+    metadata: prepared.metadata,
   });
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
-
-/**
- * Maximum length of a correlation ID accepted from the incoming request.
- * Longer values are truncated to avoid unbounded memory/storage use.
- */
-const MAX_CORRELATION_ID_LENGTH = 256;
-
-/**
- * Allowed characters for a correlation ID. Restricting this prevents
- * log-injection and header-smuggling vectors from being persisted into
- * audit metadata.
- */
-const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/]+$/;
-
-/**
- * Normalises a correlation ID header value.
- *
- * Headers may arrive as a string, an array of strings, or undefined.
- * Only the first value is considered; invalid or overly long values are
- * dropped (returning `undefined`) rather than being persisted.
- */
-function normaliseCorrelationId(raw: unknown): string | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_CORRELATION_ID_LENGTH) return undefined;
-  if (!CORRELATION_ID_PATTERN.test(trimmed)) return undefined;
-  return trimmed;
-}
-
-/**
- * Extracts the client IP address from the request, falling back to the
- * raw socket address when `req.ip` is not available. Returns `undefined`
- * when no valid string address can be derived.
- */
-function extractIpAddress(req: Request): string | undefined {
-  const candidate = req.ip ?? req.socket?.remoteAddress;
-  if (typeof candidate !== 'string') return undefined;
-  const trimmed = candidate.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
 
 /**
  * Attaches `res.locals.audit` to every request.
@@ -376,7 +329,11 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   // the service's hash-chain / serialisation invariants.
   res.locals.audit = {
     log(input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>): AuditEntry {
-      return auditService.log({ ...input, ...requestContext });
+      // Validate and detach caller-owned fields before the synchronous append.
+      // A storage failure remains visible to Express so a route cannot report
+      // success after losing a required audit record.
+      const prepared = prepareInput(input);
+      return auditService.log({ ...prepared, ...requestContext });
     },
   } satisfies RequestAuditHelper;
 
