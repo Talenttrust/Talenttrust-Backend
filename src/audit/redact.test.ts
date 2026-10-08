@@ -3,6 +3,9 @@
   redactHeaders,
   redactBody,
   buildAuditMetadata,
+  redactObject,
+  redactPayload,
+  redactSecret,
   REDACTED,
   MAX_REDACTION_DEPTH,
 } from './redact';
@@ -402,5 +405,26 @@ describe('redact edge cases and non-mutation', () => {
     const result = redactBody(original);
     // Strings are immutable, so this is acceptable
     expect(result).toBe(original);
+  });
+
+  // ─── Compatibility contract tests ──────────────────────────────────────────
+
+  it('redactObject alias preserves identical behaviour to redactBody', () => {
+    const input = { password: 'secret', name: 'alice' };
+    const res = redactObject(input) as Record<string, unknown>;
+    expect(res.password).toBe(REDACTED);
+    expect(res.name).toBe('alice');
+  });
+
+  it('redactPayload alias preserves identical behaviour to redactBody', () => {
+    const input = { token: 'xyz', amount: 100 };
+    const res = redactPayload(input) as Record<string, unknown>;
+    expect(res.token).toBe(REDACTED);
+    expect(res.amount).toBe(100);
+  });
+
+  it('redactSecret returns REDACTED unconditionally', () => {
+    expect(redactSecret('any-sensitive-string')).toBe(REDACTED);
+    expect(redactSecret()).toBe(REDACTED);
   });
 });

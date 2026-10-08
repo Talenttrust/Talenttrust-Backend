@@ -373,3 +373,13 @@ export function buildAuditMetadata(
     query: Object.keys(safeQuery).length > 0 ? redactBody(safeQuery) : null,
   };
 }
+
+// --- Compatibility aliases for legacy audit/redaction consumers ---
+/** Alias for redactBody preserving legacy interface contract. */
+export const redactObject = redactBody;
+/** Alias for redactBody preserving legacy interface contract. */
+export const redactPayload = redactBody;
+/** Redacts any secret string unconditionally preserving legacy interface contract. */
+export function redactSecret(_value?: unknown): string {
+  return REDACTED;
+}
