@@ -394,7 +394,7 @@ export function toAuditEntryResponseDto(entry: AuditEntry): AuditEntryResponseDt
     actor: entry.actor,
     resource: entry.resource,
     resourceId: entry.resourceId,
-    metadata: cloneMetadata(entry.metadata as Record<string, unknown>),
+    metadata: { ...entry.metadata },
     ...(entry.ipAddress !== undefined && { ipAddress: entry.ipAddress }),
     ...(entry.correlationId !== undefined && { correlationId: entry.correlationId }),
     hash: entry.hash,
@@ -459,8 +459,6 @@ export function toIntegrityReportResponseDto(
       firstCorruptedId: report.firstCorruptedId,
     }),
     checkedAt: report.checkedAt,
-  };
-}ckedAt,
   };
 }
 
