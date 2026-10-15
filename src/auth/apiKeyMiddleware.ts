@@ -140,31 +140,8 @@ export interface ApiKeyAuthenticatedRequest extends Request {
   _apiKeyValidationPromise?: Promise<ApiKeyInfo | null>;
 }
 
-/** Maximum accepted length of an `X-API-Key` header value. */
-const MAX_API_KEY_LENGTH = 512;
-
 /** Regex describing a single scope token accepted by this module. */
 const SCOPE_TOKEN_RE = /^[A-Za-z0-9_.*-]+$/;
-
-/**
- * Normalize the raw `x-api-key` header value into a single trimmed
- * string, or ``null`` when no usable credential is present.
- *
- * Express may give us `string`, `string[]`, or `undefined`. A multi-value
- * header is ambiguous and must not be silently collapsed into one of its
- * values, so we reject it as missing. This is deterministic and avoids a
- * class of header-smuggling bugs.
- */
-function extractApiKeyHeader(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_API_KEY_LENGTH) {
-    return null;
-  }
-  return trimmed;
-}
 
 /**
  * Default number of attempts for transient validation failures.
@@ -274,26 +251,6 @@ async function validateWithRetry(
 
 /** Canonical header carrying the API key credential. */
 const API_KEY_HEADER = 'x-api-key';
-
-/**
- * Reads the API key credential from the request.
- *
- * INV3: the header must be present exactly once as a single non-empty string. A
- * repeated header arrives as `string[]`, and an absent, empty or whitespace-only
- * value is indistinguishable from "no credential", so all of those return
- * `null` and are rejected as unauthenticated. A malformed header is therefore
- * classified as missing credentials rather than being handed to
- * `validateApiKey`, where a non-string value would raise and surface as a 500.
- *
- * The value is returned untouched: API keys are opaque, so surrounding
- * whitespace must never be silently trimmed into a different key.
- */
-function readApiKeyHeader(req: ApiKeyAuthenticatedRequest): string | null {
-  const raw = req.headers?.[API_KEY_HEADER];
-  if (typeof raw !== 'string') return null;
-  if (raw.trim().length === 0) return null;
-  return raw;
-}
 
 /**
  * Drops any API key identity from the request.
@@ -586,83 +543,6 @@ function denyApiKey(
   res.status(401).json(body);
 }
 
-/** Canonical header carrying the API key credential. */
-const API_KEY_HEADER = 'x-api-key';
-
-/**
- * Reads the API key credential from the request.
- *
- * A repeated header is delivered by Node as `string[]`, and any absent,
- * non-string, empty or whitespace-only value is indistinguishable from "no
- * credential". All of those return `null`, so a malformed header is classified
- * as *missing credentials* rather than being handed to `validateApiKey`, where
- * a non-string value would raise and surface as an internal 500.
- *
- * The value itself is returned untouched: API keys are opaque, so surrounding
- * whitespace must never be silently trimmed into a different key.
- */
-function readApiKeyHeader(req: ApiKeyAuthenticatedRequest): string | null {
-  const raw = req.headers?.[API_KEY_HEADER];
-  if (typeof raw !== 'string') return null;
-  if (raw.trim().length === 0) return null;
-  return raw;
-}
-
-/**
- * Drops any API key identity already attached to the request.
- *
- * Called at the start of every authentication attempt and on every rejection
- * path, so an attempt that fails can never leave a usable identity behind for a
- * later authorization check.
- */
-function clearApiKeyIdentity(req: ApiKeyAuthenticatedRequest): void {
-  delete req.apiKey;
-}
-
-/**
- * Writes a response at most once.
- *
- * This middleware can run after an earlier layer that already committed a
- * response (streaming handlers, error paths, client disconnect). Calling
- * `res.status().json()` again throws `ERR_HTTP_HEADERS_SENT`, turning a handled
- * failure into an unhandled crash; once headers are sent, the failure is
- * reported through the log line only.
- */
-function sendJsonOnce(res: Response, status: number, body: Record<string, unknown>): void {
-  if (res.headersSent) return;
-  res.status(status).json(body);
-}
-
-/**
- * Deterministic fail-closed path shared by synchronous throws and async
- * rejections from the validation dependency.
- */
-function failClosed(res: Response, err: unknown): void {
-  // eslint-disable-next-line no-console
-  console.error('API key validation error:', err);
-  sendJsonOnce(res, 500, { error: 'Internal server error' });
-}
-
-/**
- * Narrows a validation result to a usable identity.
- *
- * Authorization is only decided from an identity that actually carries the
- * fields `requireApiKeyScope` reads, so a malformed or partially populated
- * object is treated as "not authenticated" instead of throwing from inside the
- * scope scan.
- */
-function isWellFormedApiKeyInfo(value: unknown): value is ApiKeyInfo {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<ApiKeyInfo>;
-  return (
-    typeof candidate.id === 'string' &&
-    candidate.id.length > 0 &&
-    Array.isArray(candidate.scope) &&
-    candidate.scope.every((scope) => typeof scope === 'string' && scope.length > 0) &&
-    candidate.isActive === true
-  );
-}
-
 /**
  * Express middleware that extracts and validates the API key from the
  * `X-API-Key` request header.
@@ -696,55 +576,40 @@ export function authenticateApiKey(
   next: NextFunction,
   ctx?: ApiKeyValidatorContext,
 ): void {
-  // A fresh attempt starts from no identity, so a rejection below can never be
-  // shadowed by an identity attached earlier in the request lifecycle.
-  clearApiKeyIdentity(req);
+  const result = readApiKeyHeader(req.headers['x-api-key']);
 
-  const apiKey = readApiKeyHeader(req);
-
-  if (apiKey === null) {
-    sendJsonOnce(res, 401, { error: 'Missing X-API-Key header' });
+  if (result.status === 'absent') {
+    denyApiKey(req, res, { error: 'Missing X-API-Key header' }, result.reason);
     return;
   }
 
-  let validation: Promise<ApiKeyInfo | null>;
-  try {
-    // `Promise.resolve` normalises a non-promise return and funnels a
-    // synchronous throw out of `validateApiKey` into the same `.catch` path as
-    // an async rejection, so a dependency failure is always exactly one
-    // deterministic 500 — never an escaped exception handled by Express.
-    validation = Promise.resolve(validateApiKey(apiKey));
-  } catch (err) {
-    failClosed(res, err);
+  if (result.status === 'invalid') {
+    denyApiKey(req, res, { error: 'Invalid API key' }, result.reason);
     return;
   }
 
-  validation
+  validateApiKey(result.key)
     .then(keyInfo => {
-      if (!keyInfo || !isWellFormedApiKeyInfo(keyInfo)) {
-        // Never attach a half-formed identity.
-        clearApiKeyIdentity(req);
-        sendJsonOnce(res, 401, { error: 'Invalid API key' });
+      if (!keyInfo) {
+        denyApiKey(req, res, { error: 'Invalid API key' }, 'key_rejected');
         return;
       }
 
-  req._apiKeyValidationPromise
-    .then(keyInfo => {
-      if (!req.apiKey) {
-        if (!keyInfo) {
-          req._apiKeyValidationPromise = undefined;
-          res.status(401).json({ error: 'Invalid API key' });
-          return;
-        }
-        req.apiKey = keyInfo;
-      }
+      // VB-4: never merge into a pre-existing identity — a request that
+      // presents a credential gets exactly the identity that credential
+      // resolves to, or none at all.
+      req.apiKey = keyInfo;
       next();
     })
     .catch(err => {
-      // An internal failure must not leave a previously attached identity in
-      // place for downstream authorization.
+      // Pre-existing operator-facing signal; message text is part of the
+      // documented alert in docs/runbook-auth.md §5.2. Do not change it.
+      // eslint-disable-next-line no-console
+      console.error('API key validation error:', err);
+      // VB-4 applies to this path too: a failed validation must not leave a
+      // previously attached identity in place for a downstream scope gate.
       clearApiKeyIdentity(req);
-      failClosed(res, err);
+      res.status(500).json({ error: 'Internal server error' });
     });
 }
 
@@ -836,38 +701,40 @@ export function requireApiKeyScope(resource: string, action: string) {
   }
 
   return (req: ApiKeyAuthenticatedRequest, res: Response, next: NextFunction): void => {
-    // Authorize only against a well-formed identity. A malformed one is
+    // INV4: authorize only against a well-formed identity. A malformed one is
     // discarded and reported as unauthenticated rather than throwing a
     // TypeError out of the scope scan.
     const keyInfo = req.apiKey;
     if (!isWellFormedApiKeyInfo(keyInfo)) {
-      clearApiKeyIdentity(req);
-      sendJsonOnce(res, 401, { error: 'Not authenticated with API key' });
+      clearApiKey(req);
+      res.status(401).json({ error: 'Not authenticated with API key' });
       return;
     }
 
     const requiredScope = `${resource}:${action}`;
-    const hasScope = keyInfo.scope.some(scope => {
-      // Exact match
-      if (scope === requiredScope) return true;
-      
-      // Wildcard action (e.g., "contracts:*")
-      if (scope.endsWith(':*') && scope.startsWith(`${resource}:`)) return true;
-      
-      // Wildcard resource (e.g., "*:read")
-      if (scope.startsWith('*:') && scope.endsWith(`:${action}`)) return true;
-      
-      // Full wildcard
-      if (scope === '*') return true;
-      
-      return false;
-    });
+    const scopes = readScopes(req.apiKey.scope);
 
-    if (!hasScope) {
-      sendJsonOnce(res, 403, {
+    // An unreadable `scope` denies. Previously a non-array `scope` reached
+    // `.some()` and threw synchronously inside the middleware, which Express
+    // surfaces as a 500 on an authenticated request.
+    if (scopes === null) {
+      logScopeDenial('scope_unreadable', requiredScope, req.path);
+      res.status(403).json({
         error: 'Forbidden: insufficient API key scope',
         required: requiredScope,
-        provided: keyInfo.scope,
+        provided: [],
+      });
+      return;
+    }
+
+    const hasScope = scopes.some(scope => scopeSatisfies(scope, resource, action));
+
+    if (!hasScope) {
+      logScopeDenial('scope_mismatch', requiredScope, req.path);
+      res.status(403).json({
+        error: 'Forbidden: insufficient API key scope',
+        required: requiredScope,
+        provided: scopes.slice(0, MAX_REFLECTED_SCOPES),
       });
       return;
     }
@@ -919,9 +786,9 @@ export function authenticateEither(
   res: Response,
   next: NextFunction,
 ): void {
-  // Every request starts from a clean identity slate, whichever credential it
-  // ends up presenting.
-  clearApiKeyIdentity(req as ApiKeyAuthenticatedRequest);
+  // INV2: every request starts from a clean identity slate, whichever
+  // credential it ends up presenting.
+  clearApiKey(req as ApiKeyAuthenticatedRequest);
 
   // Check for JWT token first
   const authHeader = req.headers.authorization;
@@ -930,15 +797,14 @@ export function authenticateEither(
     return authenticateMiddleware(req, res, next);
   }
 
-  // Delegate whenever the header is present at all so the API-key path owns the
-  // classification: a repeated, empty or whitespace-only header is a rejected
-  // credential, not "no credentials".
-  if (req.headers?.[API_KEY_HEADER] !== undefined) {
+  // Check for API key. A missing or empty header is "no credential"; every
+  // other outcome is a credential decision and belongs to authenticateApiKey.
+  if (readApiKeyHeader(req.headers['x-api-key']).status !== 'absent') {
     return authenticateApiKey(req as ApiKeyAuthenticatedRequest, res, next);
   }
 
   // Neither authentication method found
-  sendJsonOnce(res, 401, {
-    error: 'Authentication required. Provide either Authorization: Bearer <token> or X-API-Key header' 
+  res.status(401).json({
+    error: 'Authentication required. Provide either Authorization: Bearer <token> or X-API-Key header'
   });
 }

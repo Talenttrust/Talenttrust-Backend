@@ -104,27 +104,9 @@ export const auditSeveritySchema = boundedAuditSeveritySchema;
  */
 export const auditDomainActionSchema = z.enum(AUDIT_DOMAIN_ACTIONS);
 
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Request schemas
-// ----------------------------------------------------------------------------
-
-/**
- * Upper bounds for free-form string fields. These are the validation
- * boundaries for the audit DTO: they cap payload size so a single request
- * cannot exhaust memory or bloat the append-only audit log, while remaining
- * generous enough for legitimate identifiers and correlation IDs.
- *
- * Invariants enforced by these bounds:
- *   - actor/resource/resourceId are non-empty and bounded.
- *   - ipAddress/correlationId are bounded when present.
- *   - metadata is a flat-ish record with a bounded number of keys and
- *     bounded key/value sizes, so a hostile payload cannot smuggle an
- *     unbounded blob through the `unknown` value type.
- */
-export const AUDIT_FIELD_MAX_LENGTH = 256;
-export const AUDIT_METADATA_MAX_KEYS = 64;
-export const AUDIT_METADATA_KEY_MAX_LENGTH = 128;
-export const AUDIT_METADATA_VALUE_MAX_LENGTH = 4096;
+// ---------------------------------------------------------------------------
 
 /**
  * `POST /api/v1/audit` request body.
@@ -178,8 +160,6 @@ const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
  */
 const isoDateStringSchema = (fieldName: string) =>
   z
-    // Accept ISO calendar dates or zoned datetimes only, avoiding host-timezone
-    // parsing and permissive Date.parse rollover rules.
     .string()
     .refine(
       (value) => {
@@ -300,22 +280,13 @@ const cursorSchema = z.string().superRefine((value, ctx) => {
 });
 
 /**
- * The legacy ad hoc parser used truthy checks (`if (action && ...)`) for
+ * The old ad hoc parser used truthy checks (`if (action && ...)`) for
  * action/severity/actor/resource/resourceId/cursor, so `?cursor=` (an empty
  * string) was silently treated as "not provided" for those fields — but NOT
  * for limit/offset/from/to, which used explicit `=== undefined` checks and
  * so rejected an empty string as invalid input. Preserving that exact split
  * (rather than "helpfully" making every field consistent) keeps this
  * refactor behaviour-neutral for existing callers relying on the old quirk.
- *
- * Boundary handling:
- *   - `limit` is clamped to `[1, maxLimit]`; `0` and negatives are rejected.
- *   - `offset` is clamped to `[0, MAX_OFFSET]`; negatives are rejected.
- *   - `from`/`to` must parse as ISO-8601 timestamps; `from > to` is rejected
- *     as a cross-field invariant.
- *   - Duplicate query keys are collapsed by the underlying parser before
- *     reaching this schema; the schema itself is deterministic for a given
- *     scalar value.
  */
 const emptyStringToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema.optional());
@@ -363,9 +334,9 @@ export function buildAuditQuerySchema(options: { maxLimit: number; defaultLimit?
   const baseSchema = z.object({
     action: emptyStringToUndefined(auditActionSchema),
     severity: emptyStringToUndefined(auditSeveritySchema),
-    actor: emptyStringToUndefined(z.string().min(1).max(AUDIT_FIELD_MAX_LENGTH)),
-    resource: emptyStringToUndefined(z.string().min(1).max(AUDIT_FIELD_MAX_LENGTH)),
-    resourceId: emptyStringToUndefined(z.string().min(1).max(AUDIT_FIELD_MAX_LENGTH)),
+    actor: emptyStringToUndefined(z.string().min(1)),
+    resource: emptyStringToUndefined(z.string().min(1)),
+    resourceId: emptyStringToUndefined(z.string().min(1)),
     from: isoDateStringSchema('from').optional(),
     to: isoDateStringSchema('to').optional(),
     limit: positiveIntStringSchema('Invalid limit')
@@ -375,13 +346,7 @@ export function buildAuditQuerySchema(options: { maxLimit: number; defaultLimit?
       ),
     offset: nonNegativeIntStringSchema('Invalid offset')
       .optional()
-      .transform((value) => {
-        const resolved = value ?? 0;
-        if (resolved > MAX_PAGE_OFFSET) {
-          throw new Error(`Invalid offset: must be at most ${MAX_PAGE_OFFSET}`);
-        }
-        return resolved;
-      }),
+      .transform((value) => value ?? 0),
     cursor: emptyStringToUndefined(cursorSchema),
   });
 
@@ -504,30 +469,7 @@ function sameFilters(
 
 // ---------------------------------------------------------------------------
 // Response schemas
-// ----------------------------------------------------------------------------
-
-/** An ISO-8601 timestamp produced by `new Date(...).toISOString()`. */
-const isoTimestampSchema = z
-  .string()
-  .refine((value) => !Number.isNaN(Date.parse(value)), {
-    message: 'must be an ISO-8601 timestamp',
-  });
-
-/** A SHA-256 hex digest as produced by `computeEntryHash()`. */
-const sha256HexSchema = z
-  .string()
-  .regex(/^[0-9a-f]{64}$/, 'must be a 64-character lowercase hex SHA-256 digest');
-
-/** The genesis sentinel (`'GENESIS'`) or a SHA-256 hex digest. */
-const previousHashSchema = z
-  .string()
-  .regex(
-    /^(GENESIS|[0-9a-f]{64})$/,
-    'must be GENESIS or a 64-character lowercase hex SHA-256 digest',
-  );
-
-/** A non-negative integer (counts, indexes and limits). */
-const nonNegativeIntSchema = z.number().int().nonnegative();
+// ---------------------------------------------------------------------------
 
 /**
  * Sentinel `previousHash` of the first entry in a chain.

@@ -1,14 +1,14 @@
 /**
  * @module auditCache
- * @description Response caching for audit reads with TTP and LRU eviction.
+ * @description Response caching for audit reads with TTL and LRU eviction.
  *
  * Provides a bounded cache for audit query results to reduce database load.
- * Cache entries expire after a configurable TTP and are evicted when the cache
+ * Cache entries expire after a configurable TTL and are evicted when the cache
  * reaches its max entry bound.
  *
  * Cache invalidation:
  *   - Explicit invalidation on write operations (log/append)
- *   - TTP-based expiration
+ *   - TTL-based expiration
  *   - LRU eviction when capacity is reached
  *
  * Metrics:
@@ -37,17 +37,6 @@ import type { AuditEntry, AuditQuery, AuditQueryResult } from './types';
 export interface AuditCacheOptions {
   ttlMs: number;
   maxEntries: number;
-  /**
-   * Optional hook for observing internal failures. Receives no sensitive
-   * data, only the operation name and an error message. Defaults to a noop
-   * so existing callers remain compatible.
-   */
-  onFailure?: (operation: string, error: Error) => void;
-  /**
-   * Optional logger. When omitted, failures are still counted and forwarded
-   * to `onFailure` if provided.
-   */
-  logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
 }
 
 export interface CacheEntry {
@@ -64,169 +53,16 @@ export interface CacheEntry {
 export type AuditCacheQueryType = 'query' | 'queryWithCursor' | 'getById';
 
 /**
- * Validate the constructor options for the cache.
- *
- * Both `ttlMs` and `maxEntries` must be positive finite integers. This is a
- * hard boundary: a cache configured with `TTL = 0` or `maxEntries = 0` is
- * silently broken (every get misses / every set evicts itself), so we refuse
- * to construct it at all.
- */
-export function validateAuditCacheOptions(options: AuditCacheOptions): void {
-  if (!isPlainObject(options)) {
-    throw new AuditCacheValidationError('AuditCache options must be an object');
-  }
-
-  const { ttlMs, maxEntries } = options;
-
-  if (
-    typeof ttlMs !== 'number' ||
-    !Number.isFinite(ttlMs) ||
-    !Number.isInteger(ttlMs) ||
-    ttlMs <= 0
-  ) {
-    throw new AuditCacheValidationError('AuditCache ttlMs must be a positive finite integer');
-  }
-
-  if (
-    typeof maxEntries !== 'number' ||
-    !Number.isFinite(maxEntries) ||
-    !Number.isInteger(maxEntries) ||
-    maxEntries <= 0
-  ) {
-    throw new AuditCacheValidationError('AuditCache maxEntries must be a positive finite integer');
-  }
-}
-
-/**
- * Validate the cache discriminator and optional `id`.
- *
- * This is the single checkpoint used by both `get` and `set` so that a cache
- * key is always well-formed and collision-resistant.
- */
-export function validateCacheKeyInput(
-  type: AuditCacheQueryType,
-  id?: string,
-): void {
-  if (typeof type !== 'string' || !(ALLOWED_QUERY_TYPES as readonly string[]).includes(type)) {
-    throw new AuditCacheValidationError(
-      `AuditCache type must be one of ${ALLOWED_QUERY_TYPES.join(', ')}`,
-    );
-  }
-
-  if (type === 'getById') {
-    if (typeof id !== 'string' || id.length === 0) {
-      throw new AuditCacheValidationError('AuditCache getById requires a non-empty id');
-    }
-    if (id.length > MAX_ID_LENGTH) {
-      throw new AuditCacheValidationError('AuditCache id exceeds maximum length');
-    }
-  } else if (id !== undefined) {
-    throw new AuditCacheValidationError('AuditCache id is only valid for getById');
-  }
-}
-
-/**
- * Produce a deterministic canonical string for a query.
- *
- * JSON.stringify preserves insertion order, so two callers that pass the same
- * lolgical query with different key order would produce different keys and
- * silently miss the cache. We canonicalise by emitting fields in a fixed
- * order and omitting `undefined` values.
- */
-export function canonicalizeAuditQuery(query: AuditQuery): string {
-  if (!isPlainObject(query)) {
-    throw new AuditCacheValidationError('AuditCache query must be an object');
-  }
-
-  const ordered: Record<string, unknown> = {};
-  for (const key of QUERY_KEY_ORDER) {
-    const value = (query as Record<string, unknown>)[key];
-    if (value !== undefined) {
-      ordered[key] = value;
-    }
-  }
-
-  const serialised = JSON.stringify(ordered);
-  if (serialised.length > MAX_KEY_LENGTH) {
-    throw new AuditCacheValidationError('AuditCache query key exceeds maximum length');
-  }
-
-  return serialised;
-}
-
-/**
- * Validate the shape of a value before it is stored in the cache.
- *
- * The cache is a correctness boundary: a cache read must never return a
- * malformed value that a caller cannot interpret. We accept the three shapes
- * declared by the public interface and reject everything else.
- */
-export function validateCachePayload(data: unknown): void {
-  if (Array.isArray(data)) {
-    return;
-  }
-
-  if (!isPlainObject(data)) {
-    throw new AuditCacheValidationError('AuditCache data must be an array or object');
-  }
-
-  // AuditQueryResult has an `entries` array and numeric `count`/`limit`.
-  // AuditEntry has an `id` string and a `hash` string.
-  const candidate = data as Record<string, unknown>;
-  const looksLikeQueryResult =
-    Array.isArray(candidate.entries) &&
-    typeof candidate.count === 'number' &&
-    typeof candidate.limit === 'number';
-  const looksLikeEntry =
-    typeof candidate.id === 'string' && typeof candidate.hash === 'string';
-
-  if (!looksLikeQueryResult && !looksLikeEntry) {
-    throw new AuditCacheValidationError('AuditCache data is not a recognised audit payload');
-  }
-}
-
-/**
- * Simple async mutex used to serialize mutating operations on the cache.
- * This keeps eviction + insertion atomic and prevents concurrent calls from
- * observing a partially applied state.
- */
-class Mutex {
-  private tail: Promise<void> = Promise.resolve();
-
-  async run<T>(fn(): () => Promise<T> | T: Promise<T>): Promise<T> {
-    const prev = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>(resolve => {
-      release = resolve;
-    });
-    await prev;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
-  }
-}
-
-/**
- * LRU cache with TLL for audit read responses.
+ * LRU cache with TTL for audit read responses.
  */
 export class AuditCache {
   private cache: Map<string, CacheEntry>;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
-  private hits: Counter<string> | null;
-  private misses: Counter<string> | null;
-  private failures: Counter<string> | null;
+  private hits: Counter<string>;
+  private misses: Counter<string>;
   private hitCount: number;
   private missCount: number;
-  private failureCount: number;
-  private readonly onFailure?: (operation: string, error: Error) => void;
-  private readonly logger?: AuditCacheOptions['logger'];
-  private readonly mutex = new Mutex();
-
-  constructor(options: AuditCacheOptions, register?: Registry) {
-    validateAuditCacheOptions(options);
 
   constructor(options: AuditCacheOptions, register?: any) {
     this.ttlMs = AuditCache.normalizeTtl(options == null ? undefined : options.ttlMs);
@@ -234,9 +70,6 @@ export class AuditCache {
     this.cache = new Map();
     this.hitCount = 0;
     this.missCount = 0;
-    this.failureCount = 0;
-    this.onFailure = options.onFailure;
-    this.logger = options.logger;
 
     // Initialize metrics. Prefer the caller-supplied registry (so metrics are
     // actually exported) and reuse any counters that are already registered to
@@ -454,7 +287,6 @@ export class AuditCache {
    * @param data - The data to cache
    * @param type - The type of query (query, queryWithCursor, or getById)
    * @param id - Optional ID for getById queries
-   * @throws {@tlink AuditCacheValidationError} when the input or payload is malformed.
    */
   set(
     query: AuditQuery,
@@ -503,24 +335,19 @@ export class AuditCache {
         }
       }
     }
+
+    this.cache.set(key, entry);
   }
 
   /**
    * Invalidate all cache entries (called on write operations).
    */
   invalidate(): void {
-    try {
-      this.cache.clear();
-    } catch (error) {
-      this.recordFailure('invalidate', error as Error);
-    }
+    this.cache.clear();
   }
 
   /**
    * Invalidate cache entries for a specific resource ID.
-   *
-   * Matching is done against the canonicalised query string, so a caller passing
-   * the same logical query in a different key order still gets invalidated.
    *
    * @param resourceId - The resource ID whose cache entries should be invalidated
    */
@@ -543,22 +370,17 @@ export class AuditCache {
    * Clear all cache entries.
    */
   clear(): void {
-    try {
-      this.cache.clear();
-    } catch (error) {
-      this.recordFailure('clear', error as Error);
-    }
+    this.cache.clear();
   }
 
   /**
    * Get current cache statistics.
    */
-  getStats(): AuditCacheStats {
+  getStats(): { size: number; hits: number; misses: number } {
     return {
       size: this.cache.size,
       hits: this.hitCount,
       misses: this.missCount,
-      failures: this.failureCount,
     };
   }
 
@@ -590,110 +412,21 @@ export class AuditCache {
    * Clean up expired entries (called periodically).
    */
   cleanupExpired(): number {
-    try {
-      const now = Date.now();
-      let cleaned = 0;
-      const keysToDelete: string[] = [];
+    const now = Date.now();
+    let cleaned = 0;
+    const keysToDelete: string[] = [];
 
-      this.cache.forEach((entry, key) => {
-        if (now > entry.expiresAt) {
-          keysToDelete.push(key);
-        }
-      });
-
-      keysToDelete.forEach(key => {
-        this.cache.delete(key);
-        cleaned++;
-      });
-
-      return cleaned;
-    } catch (error) {
-      this.recordFailure('cleanupExpired', error as Error);
-      return 0;
-    }
-  }
-
-  /**
-   * Async variant of `set` that serializes concurrent mutations through an
-   * internal mutex. Use this when callers may race on the same key or when
-   * eviction must be atomic with insertion.
-   */
-  async setAtomic(query: AuditQuery, data: AuditEntry[] | AuditEntry | AuditQueryResult, type: 'query' | 'queryWithCursor' | 'getById', id?: string): Promise<void> {
-    await this.mutex.run(() => {
-      this.set(query, data, type, id);
-    });
-  }
-
-  /**
-   * Async variant of `get` that serializes concurrent reads with mutations.
-   */
-  async getAtomic(t
-    query: AuditQuery,
-    type: 'query' | 'queryWithCursor' | 'getById',
-    id?: string,
-  ): Promise<AuditEntry[] | AuditEntry | AuditQueryResult | null> {
-    return this.mutex.run(() => this.get(query, type, id));
-  }
-
-  /**
-   * Async variant of `invalidate` that serializes with other mutations.
-   */
-  async invalidateAtomic(): Promise<void> {
-    await this.mutex.run(() => {
-      this.invalidate();
-    });
-  }
-
-  /**
-   * Async variant of `cleanupExpired` that serializes with other mutations.
-   */
-  async cleanupExpiredAtomic(): Promise<number> {
-    return this.mutex.run(() => this.cleanupExpired());
-  }
-
-  /**
-   * Retry a operation with exponential backoff. The operation is expected
-   * to be idempotent (such as a cache mutation). Failures are recorded and
-   * the last error is returned to the caller via the returned promise.
-   */
-  async withRetry<T>(
-    operation: string,
-    fn: () => Promise<T> | T,
-    options: { retries?: number; baseDelayMs?: number } = {},
-  ): Promise<T> {
-    const retries = options.retries ?? 3;
-    const baseDelayMs = options.baseDelayMs ?? 10;
-    let lastError: Error | undefined;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        return await fn();
-      } catch (error) {
-        lastError = error as Error;
-        this.recordFailure(`${operation}:attempt${attempt}`, lastError);
-        if (attempt < retries) {
-          const delay = baseDelayMs * Math.pow(2, attempt);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
+    this.cache.forEach((entry, key) => {
+      if (now > entry.expiresAt) {
+        keysToDelete.push(key);
       }
-    }
-    throw lastError ?? new Error(`${operation} failed after ${retries + 1} attempts`);
-  }
+    });
 
-  private recordHit(): void {
-    this.hitCount++;
-    try {
-      this.hits?.inc();
-    } catch (error) {
-      this.recordFailure('hitMetric', error as Error);
-    }
-  }
+    keysToDelete.forEach(key => {
+      this.cache.delete(key);
+      cleaned++;
+    });
 
-  private recordMiss(): void {
-    this.missCount++;
-    try {
-      this.misses?.inc();
-    } catch (error) {
-      this.recordFailure('missMetric', error as Error);
-    }
+    return cleaned;
   }
 }

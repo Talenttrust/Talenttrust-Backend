@@ -672,16 +672,24 @@ MIGRATIONS.push({
     "ALTER TABLE api_keys ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0",
   ].join("\n"),
   up: (db) => {
-    // Create api_keys table if it doesn't exist
+    // Bootstrap api_keys if it does not exist yet, using the same column set
+    // that `SqliteMetadataStore` (which owns this table) creates. Creating it
+    // here with a narrower schema would win the IF NOT EXISTS race on a fresh
+    // database and leave the store's own bootstrap a no-op, so the indexes it
+    // builds on `created_by` / `key_selector` would fail to apply.
     db.exec(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id              TEXT    PRIMARY KEY,
         name            TEXT    NOT NULL,
         key_hash        TEXT    NOT NULL,
-        role            TEXT    NOT NULL,
-        expires_at      TEXT,
+        key_selector    TEXT,
+        scope           TEXT    NOT NULL,
+        created_by      TEXT    NOT NULL,
         created_at      TEXT    NOT NULL,
-        last_used_at    TEXT
+        updated_at      TEXT    NOT NULL,
+        expires_at      TEXT,
+        last_used_at    TEXT,
+        is_active       INTEGER NOT NULL DEFAULT 1
       );
       CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
     `);

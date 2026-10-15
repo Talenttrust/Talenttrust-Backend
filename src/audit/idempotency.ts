@@ -167,41 +167,6 @@ function hashBody(input: CreateAuditEntryInput): string {
 
 export class IdempotencyStore {
   private readonly store = new Map<string, IdempotencyRecord>();
-  private readonly maxSize: number;
-  private readonly ttlMs: number;
-  private lastNow = 0;
-
-  constructor(options: IdempotencyStoreOptions = {}) {
-    this.maxSize = options.maxSize ?? DEFAULT_MAX_SIZE;
-    this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-    if (!Number.isSafeInteger(this.maxSize) || this.maxSize <= 0
-      || !Number.isSafeInteger(this.ttlMs) || this.ttlMs <= 0) {
-      throw new RangeError('Audit idempotency maxSize and ttlMs must be positive safe integers');
-    }
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((nested) => normaliseMetadata(nested));
-  }
-
-  const entries = Object.entries(value as Record<string, unknown>);
-  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-
-  const out: Record<string, unknown> = {};
-  for (const [key, nested] of entries) {
-    out[key] = normaliseMetadata(nested);
-  }
-  return out;
-}
-
-function assertValidKey(key: unknown): asserts key is string {
-  if (typeof key !== 'string' || key.length === 0) {
-    throw new TypeError('IdempotencyStore key must be a non-empty string');
-  }
-}
-
-export class IdempotencyStore {
-  private readonly store = new Map<string, IdempotencyRecord>();
   /**
    * Keys that have been claimed but not yet committed or released.
    * Value is the body hash recorded at claim time, so commit can verify

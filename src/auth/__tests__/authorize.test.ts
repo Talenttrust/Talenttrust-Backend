@@ -192,7 +192,7 @@ describe('isAllowed – validation boundaries', () => {
     ];
 
     for (const [label, value] of cases) {
-      it(`denies a ${label} without throwing', () => {
+      it(`denies a ${label} without throwing`, () => {
         expect(() => isAllowed(value as Role, 'contracts', 'read')).not.toThrow();
         expect(isAllowed(value as Role, 'contracts', 'read')).toBe(false);
       });

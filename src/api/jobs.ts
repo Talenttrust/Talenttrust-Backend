@@ -130,6 +130,125 @@ export interface DeliveryResult {
 }
 
 // ---------------------------------------------------------------------------
+// Validation boundaries
+// ---------------------------------------------------------------------------
+
+/**
+ * Validation boundaries for the DLQ replay endpoints.
+ *
+ * These constants are the single source of truth for what constitutes a valid
+ * replay request. They are exported so tests and callers can refer to them
+ * without duplicating magic numbers.
+ */
+export const MIN_REASON_LENGTH = 5;
+export const MAX_REASON_LENGTH = 500;
+export const MAX_DLQ_ID_LENGTH = 256;
+export const MAX_DLQ_BATCH_SIZE = 100;
+
+/** Result of validating an untrusted request field. */
+export interface ValidationResult<T> {
+  ok: boolean;
+  value?: T;
+  error?: string;
+}
+
+/** Returns true when the string contains no control characters. */
+function hasNoControlCharacters(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+/**
+ * Validate and normalize a single DLQ record ID.
+ *
+ * Accepts a non-empty string up to {@link MAX_DLQ_ID_LENGTH} characters
+ * (after trimming) with no control characters. Returns the trimmed value on
+ * success so callers cannot accidentally use the untrimmed input as a key.
+ */
+export function validateDlqId(id: unknown): ValidationResult<string> {
+  if (typeof id !== 'string') {
+    return { ok: false, error: 'Invalid DLQ record ID' };
+  }
+  const trimmed = id.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: 'Invalid DLQ record ID' };
+  }
+  if (trimmed.length > MAX_DLQ_ID_LENGTH) {
+    return {
+      ok: false,
+      error: `Invalid DLQ record ID: must be at most ${MAX_DLQ_ID_LENGTH} characters`,
+    };
+  }
+  if (!hasNoControlCharacters(trimmed)) {
+    return { ok: false, error: 'Invalid DLQ record ID' };
+  }
+  return { ok: true, value: trimmed };
+}
+
+/**
+ * Validate and normalize the audit trail reason.
+ *
+ * The reason is required for every replay operation and is stored as an audit
+ * trail entry. It must be a trimmed string of at least
+ * {@link MIN_REASON_LENGTH} and at most {@link MAX_REASON_LENGTH} characters
+ * with no control characters.
+ */
+export function validateReason(reason: unknown): ValidationResult<string> {
+  if (typeof reason !== 'string') {
+    return { ok: false, error: 'Audit trail reason must be at least 5 characters long' };
+  }
+  const trimmed = reason.trim();
+  if (trimmed.length < MIN_REASON_LENGTH) {
+    return { ok: false, error: 'Audit trail reason must be at least 5 characters long' };
+  }
+  if (trimmed.length > MAX_REASON_LENGTH) {
+    return {
+      ok: false,
+      error: `Audit trail reason must be at most ${MAX_REASON_LENGTH} characters long`,
+    };
+  }
+  if (!hasNoControlCharacters(trimmed)) {
+    return { ok: false, error: 'Audit trail reason contains invalid characters' };
+  }
+  return { ok: true, value: trimmed };
+}
+
+/**
+ * Validate and normalize a batch of DLQ record IDs.
+ *
+ * Ensures the input is an array of between 1 and {@link MAX_DLQ_BATCH_SIZE}
+ * unique, valid IDs. Duplicate IDs are rejected to keep batch replay
+ * deterministic and to prevent double delivery of the same record.
+ */
+export function validateBatchIds(ids: unknown): ValidationResult<string[]> {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { ok: false, error: 'An array of valid IDs is required' };
+  }
+  if (ids.length > MAX_DLQ_BATCH_SIZE) {
+    return {
+      ok: false,
+      error: `At most ${MAX_DLQ_BATCH_SIZE} IDs may be replayed per request`,
+    };
+  }
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of ids) {
+    const result = validateDlqId(candidate);
+    if (!result.ok || result.value === undefined) {
+      return { ok: false, error: 'An array of valid IDs is required' };
+    }
+    if (seen.has(result.value)) {
+      return { ok: false, error: 'Duplicate IDs are not allowed in a batch replay request' };
+    }
+    seen.add(result.value);
+    normalized.push(result.value);
+  }
+
+  return { ok: true, value: normalized };
+}
+
+// ---------------------------------------------------------------------------
 // Module-level state
 // -----------------------------------------------------------------------------
 
@@ -280,7 +399,7 @@ export function initializeJobs(customDlqStore: ReplayableDlqStore): ReplayableDl
   // unexpected throw from startDlqMetricsSampling — the process must stay up
   // even if sampling cannot start (replay endpoints remain fully operational).
   try {
-    const intervalMs = loadDlqMetricsInterval();
+    const intervalMs = loadDLQMetricsInterval();
     stopSampling = startDlqMetricsSampling(dlqStore, intervalMs);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

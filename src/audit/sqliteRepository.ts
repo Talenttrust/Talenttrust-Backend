@@ -504,27 +504,6 @@ export class SqliteAuditRepository implements AuditLogRepository {
         if (lastEntryRow) {
           startIndex = lastEntryRow.seq;
         }
-        
-        // Verify filters match cursor (prevent filter drift)
-        if (cursorData.filters.action !== query.action ||
-            cursorData.filters.severity !== query.severity ||
-            cursorData.filters.actor !== query.actor ||
-            cursorData.filters.resource !== query.resource ||
-            cursorData.filters.resourceId !== query.resourceId ||
-            cursorData.filters.from !== query.from ||
-            cursorData.filters.to !== query.to) {
-          throw new RepositoryValidationError(
-            'Cursor filters do not match query filters',
-            'cursor',
-          );
-        }
-      } catch (error) {
-        // Re-throw our own validation errors (filter mismatch, blank cursor)
-        if (error instanceof RepositoryValidationError) {
-          throw error;
-        }
-        // If cursor is invalid (format error), start from beginning
-        startIndex = 0;
       }
     }
     

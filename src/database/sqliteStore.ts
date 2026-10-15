@@ -20,7 +20,7 @@
  */
 
 import { getDb } from '../db/database';
-import { logger } from '../utils/logger';
+import { logger } from '../logger';
 import type { ContractMetadata, ApiKey } from './schema';
 
 /** better-sqlite3 stores booleans as INTEGER. */

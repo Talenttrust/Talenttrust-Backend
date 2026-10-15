@@ -1,18 +1,28 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 
-use crate::{errors::Error, storage::consume_idempotency_key};
+use crate::{
+    errors::Error,
+    storage::{
+        consume_idempotency_key, CONTRACT_TTL_LEDGERS, CONTRACT_TTL_THRESHOLD_LEDGERS,
+        IDEM_KEY_TTL_LEDGERS, INSTANCE_TTL_LEDGERS, MAX_BATCH_SIZE,
+    },
+};
 
 /// Maximum number of bets accepted in a single [`place_bets`] call.
 ///
 /// This bound exists so that one invocation always fits inside the Soroban
 /// CPU/instruction budget: the contract iterates the whole vector, and an
 /// unbounded vector would let a caller construct a batch that can never be
-/// applied.  Callers with more than `MAX_BATCH_SIZE` bets must split them
+/// applied.  Callers with more than `MAX_BETS_PER_BATCH` bets must split them
 /// into several submissions, each carrying its own idempotency key.
+///
+/// It is an alias of [`crate::storage::MAX_BATCH_SIZE`], which stays the single
+/// source of truth: a mismatch between the two would make `place_bets` accept
+/// a batch that the storage layer rejects (or vice versa).
 ///
 /// Raising this constant is a backwards-compatible change; lowering it is
 /// not, because it would start rejecting payloads that used to be accepted.
-pub const MAX_BATCH_SIZE: u32 = 100;
+pub const MAX_BETS_PER_BATCH: u32 = MAX_BATCH_SIZE;
 
 /// A single bet submitted inside a batch.
 ///
@@ -38,20 +48,19 @@ pub struct Bet {
 ///
 /// # Invariants
 ///
-/// * `market_id` must be non-zero (zero is reserved as an invalid sentinel).
-/// * `amount` must satisfy `MIN_BET_AMOUNT <= amount <= MAX_BET_AMOUNT`.
+/// * `amount` must be strictly positive (> 0).  A zero or negative stake is
+///   never meaningful and is rejected with [`Error::AmountMustBePositive`].
+/// * `market_id` must be non-zero (zero is reserved as an invalid sentinel)
+///   and is rejected with [`Error::MarketIdInvalid`].
 ///
 /// The function is pure and deterministic: identical inputs always yield
 /// identical results, and it performs no storage reads or writes.
 fn validate_bet(bet: &Bet) -> Result<(), Error> {
+    if bet.amount <= 0 {
+        return Err(Error::AmountMustBePositive);
+    }
     if bet.market_id == 0 {
-        return Err(Error::InvalidMarketId);
-    }
-    if bet.amount < MIN_BET_AMOUNT {
-        return Err(Error::BetAmountTooSmall);
-    }
-    if bet.amount > MAX_BET_AMOUNT {
-        return Err(Error::BetAmountTooLarge);
+        return Err(Error::MarketIdInvalid);
     }
     Ok(())
 }
@@ -60,17 +69,19 @@ fn validate_bet(bet: &Bet) -> Result<(), Error> {
 ///
 /// # Invariants
 ///
-/// * The batch is non-empty.
-/// * The batch size does not exceed [`MAX_BATCH_SIZE`].
+/// * The batch is non-empty (checked first, so an empty batch is reported as
+///   [`Error::EmptyBatch`] regardless of any other defect).
+/// * The batch size does not exceed [`MAX_BETS_PER_BATCH`] (checked before the
+///   per-element scan, so an oversized batch is rejected without walking it).
 /// * Every entry passes [`validate_bet`].
 ///
-/// Validation is performed in a single pass up-front so that a rejected
-/// batch never partially mutates storage (all-or-nothing semantics).
+/// Validation is performed in a single pass up-front so that a rejected batch
+/// never partially mutates storage (all-or-nothing semantics).
 fn validate_batch(bets: &Vec<Bet>) -> Result<(), Error> {
     if bets.is_empty() {
         return Err(Error::EmptyBatch);
     }
-    if bets.len() > MAX_BATCH_SIZE {
+    if bets.len() > MAX_BETS_PER_BATCH {
         return Err(Error::BatchTooLarge);
     }
     for bet in bets.iter() {
@@ -95,9 +106,8 @@ fn validate_batch(bets: &Vec<Bet>) -> Result<(), Error> {
 ///
 /// * [`Error::EmptyBatch`]                  – `bets` is empty.
 /// * [`Error::BatchTooLarge`]               – `bets.len() > MAX_BETS_PER_BATCH`.
-/// * [`Error::InvalidMarketId`]             – a bet referenced `market_id == 0`.
-/// * [`Error::InvalidBetAmount`]            – a bet had `amount <= 0`.
-/// * [`Error::BatchAmountOverflow`]         – the batch total does not fit in an `i128`.
+/// * [`Error::MarketIdInvalid`]             – a bet referenced `market_id == 0`.
+/// * [`Error::AmountMustBePositive`]        – a bet had `amount <= 0`.
 /// * [`Error::IdempotentBatchAlreadyApplied`] – the `(caller, idempotency_key)`
 ///   pair has already been consumed.
 /// * [`Error::IdempotencyRetentionUnavailable`] – the full retention window
@@ -143,33 +153,12 @@ pub fn place_bets(
     caller.require_auth();
 
     // ------------------------------------------------------------------
-    // Structural validation — cheapest checks first, no storage reads.
+    // Structural + per-element validation — no storage reads or writes.
     // ------------------------------------------------------------------
-
-    // Reject empty batches.
-    if bets.is_empty() {
-        return Err(Error::EmptyBatch);
-    }
-
-    // Reject over-sized batches before iterating over the entries.
-    if bets.len() > MAX_BATCH_SIZE {
-        return Err(Error::BatchTooLarge);
-    }
-
-    // ------------------------------------------------------------------
-    // Per-element validation — O(n) scan; still before any storage write.
-    // ------------------------------------------------------------------
-    for bet in bets.iter() {
-        // A non-positive amount is never a valid stake.
-        if bet.amount <= 0 {
-            return Err(Error::AmountMustBePositive);
-        }
-
-        // market_id == 0 is the reserved null sentinel; always invalid.
-        if bet.market_id == 0 {
-            return Err(Error::MarketIdInvalid);
-        }
-    }
+    // Ordering is part of the contract: empty batch, then batch size, then a
+    // single O(n) scan of the entries.  Every check happens before the first
+    // storage write so a rejected batch consumes no idempotency key.
+    validate_batch(&bets)?;
 
     // ------------------------------------------------------------------
     // Idempotency check — one storage read, after all validation passes.
@@ -217,9 +206,7 @@ fn apply_batch(env: &Env, caller: &Address, bets: &Vec<Bet>) -> Result<(), Error
     // TODO: replace with real market-state mutations once the market
     //       storage module is added.  For now we emit a diagnostic event
     //       so the batch is observable on-chain.
-    env.events().publish(
-        (Symbol::new(env, "place_bets"), caller.clone()),
-        bets.len(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "place_bets"), caller.clone()), bets.len());
     Ok(())
 }

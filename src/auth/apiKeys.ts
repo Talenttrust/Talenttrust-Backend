@@ -32,7 +32,7 @@ import { ApiKey } from '../database/schema';
 import { database } from '../database';
 import { AuthCache } from './authCache';
 import { validateEnv } from '../config/env.schema';
-import { logger } from '../utils/logger';
+import { logger } from '../logger';
 
 /**
  * Validation error class for API key operations.
@@ -418,13 +418,6 @@ export function validateApiKeyRequest(request: unknown): asserts request is ApiK
  *
  * @returns A 32-byte hex-encoded API key.
  */
-export class ApiKeyValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ApiKeyValidationError';
-  }
-}
-
 export class ApiKeyNotFoundError extends Error {
   constructor(message: string) {
     super(message);

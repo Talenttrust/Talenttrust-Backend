@@ -30,7 +30,12 @@ use soroban_sdk::{
     Address, BytesN, Env, Vec,
 };
 
-use crate::{bets::Bet, errors::Error, storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE}, PredictifyHybridClient};
+use crate::{
+    bets::Bet,
+    errors::Error,
+    storage::{IDEM_KEY_TTL_LEDGERS, MAX_BATCH_SIZE},
+    PredictifyHybridClient,
+};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -219,7 +224,7 @@ mod idempotency_tests {
         let env = fresh_env();
         let (_id, client) = register(&env);
         let user = caller(&env);
-        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let zero = zero_key(&env);
 
         env.mock_all_auths();
         client.place_bets(&user, &one_bet(&env), &zero);

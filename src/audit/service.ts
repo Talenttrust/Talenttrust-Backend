@@ -406,7 +406,7 @@ export class AuditService {
    * AUTH_FAILED is WARNING; others are INFO.
    */
   logAuthEvent(
-    action: Extract<AuditAction, `AUTH_${string|`>,
+    action: Extract<AuditAction, `AUTH_${string}`>,
     actor: string,
     metadata: Record<string, unknown> = {},
     context: { ipAddress?: string; correlationId?: string } = {},

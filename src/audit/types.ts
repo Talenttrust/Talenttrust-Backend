@@ -43,7 +43,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'CONTRACT_DELETED',
   'PAYMENT_INITIATED',
   'PAYMENT_RELEASED',
-  'PAYMENT_DISPUED',
+  'PAYMENT_DISPUTED',
   'REPUTATION_UPDATED',
   'REPUTATION_CORRECTED',
   'USER_CREATED',
@@ -129,41 +129,13 @@ export const AUDIT_DOMAIN_ACTIONS_ARE_EXHAUSTIVE: AuditDomainActionsAreExhaustiv
 
 export const AUDIT_SEVERITIES = ['INFO', 'WARNING', 'CRITICAL'] as const;
 
-/** Array of all valid AuditAction values for validation. */
-export const AUDIT_ACTIONS: readonly AuditAction[] = [
-  'CONTRACT_CREATED',
-  'CONTRACT_UPDATED',
-  'CONTRACT_CANCELLED',
-  'CONTRACT_COMPLETED',
-  'PAYMENT_INITIATED',
-  'PAYMENT_RELEASED',
-  'PAYMENT_DISPUTED',
-  'REPUTATION_UPDATED',
-  'USER_CREATED',
-  'USER_UPDATED',
-  'USER_DELETED',
-  'AUTH_LOGIN',
-  'AUTH_LOGOUT',
-  'AUTH_FAILED',
-  'ADMIN_ACTION',
-  'ENDPOINT_ACCESS',
-  'ENDPOINT_MUTATION',
-  'DEPLOYMENT_PROMOTED',
-  'DEPLOYMENT_ROLLED_BACK',
-] as const;
-
 /** Severity level of the audit event. */
 export type AuditSeverity = (typeof AUDIT_SEVERITIES)[number];
-
-/** Runtime membership check for audit severities. */
-export function isAuditSeverity(value: unknown): value is AuditSeverity {
-  return typeof value === 'string' && (AUDIT_SEVERITIES as readonly string[]).includes(value);
-}
 
 /**
  * Runtime lookup set for {@link AUDIT_SEVERITIES}.
  */
-export const AUDIT_SEVERITY_SET: Readonly<Set<string> = new Set(AUDIT_SEVERITIES);
+export const AUDIT_SEVERITY_SET: Readonly<Set<string>> = new Set(AUDIT_SEVERITIES);
 
 /**
  * Type guard for {@link AuditSeverity}.
@@ -195,7 +167,7 @@ export interface AuditEntry {
    * Structured metadata about the change.
    * Must NOT contain raw PII — callers are responsible for sanitisation.
    */
-  readonly metadata: Readonly<Record<string, unknown>;
+  readonly metadata: Readonly<Record<string, unknown>>;
   /** IP address of the request origin, if available. */
   readonly ipAddress?: string;
   /** Correlation ID for tracing across services. */

@@ -20,6 +20,37 @@ use crate::errors::Error;
 /// plan, because that would allow a replay of an already-applied batch.
 pub const IDEM_KEY_TTL_LEDGERS: u32 = 17_280; // ~24 h at 5 s/ledger
 
+/// TTL at which a consumed idempotency key is renewed, expressed in ledgers.
+///
+/// Renewal is deliberately separated from the window itself: a submission
+/// only bumps the entry when its remaining lifetime has fallen below this
+/// threshold, so the common case performs no TTL write at all. The threshold
+/// is strictly smaller than [`IDEM_KEY_TTL_LEDGERS`] so that a live entry is
+/// never allowed to expire while it is still within its retention window.
+pub const IDEM_KEY_TTL_THRESHOLD_LEDGERS: u32 = 12_960; // ~18 h at 5 s/ledger
+
+/// Instance (contract state) TTL, expressed in ledgers.
+///
+/// The instance entry holds the legacy sentinel cutoff, so it must outlive
+/// every individual idempotency key; otherwise replay protection could lapse
+/// simply because the contract went idle. An accepted batch renews the
+/// instance at half this value and extends it to the full value.
+pub const INSTANCE_TTL_LEDGERS: u32 = 100_000; // ~5.8 days at 5 s/ledger
+
+/// TTL of the contract's own instance/code entry, expressed in ledgers.
+///
+/// Unlike per-key entries, nothing else refreshes this entry, so an idle
+/// contract would eventually become unreachable (its code archived) even
+/// though its keys had expired long before. Every accepted batch — including
+/// the deprecated zero-key path, which writes no receipt — renews it.
+pub const CONTRACT_TTL_LEDGERS: u32 = 500_000; // ~29 days at 5 s/ledger
+
+/// Threshold at which an accepted batch renews the contract entry.
+///
+/// Kept strictly below [`CONTRACT_TTL_LEDGERS`] so that renewal happens well
+/// before the entry could be archived.
+pub const CONTRACT_TTL_THRESHOLD_LEDGERS: u32 = 400_000; // ~23 days at 5 s/ledger
+
 /// Maximum number of [`Bet`] entries allowed in a single `place_bets` call.
 ///
 /// This bound protects the contract against accidental or adversarial

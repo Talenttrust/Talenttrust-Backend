@@ -113,56 +113,6 @@ export function deepFreeze<T>(obj: T): Readonly<T> {
   return obj as Readonly<T>;
 }
 
-/**
- * Validation boundaries for environment-driven configuration.
- *
- * Invariants enforced by `loadConfig`:
- *  - Numeric fields are parsed with `Number`; non-finite or missing values
- *    fall back to the documented default (never `NaN`/`Infinity`).
- *  - Numeric fields are clamped to the inclusive `[min, max]` range below.
- *  - Enum-like fields (`chaosMode`) reject unknown values and fall back to
- *    the safe default (`off`).
- *  - Boolean fields accept only the case-insensitive literal `true`; any
- *    other value (including `false`, `1`, `yes`) resolves to `false`.
- *  - List fields are split on `,`, trimmed, case-normalized, and empty
- *    entries are dropped. Duplicate entries are preserved as-is so callers
- *    can detect them; ordering is preserved for determinism.
- *  - `upstreamContractsUrl` must pass SSRF validation or `loadConfig` throws.
- *
- * These boundaries are the single source of truth for accepted input; any
- * change here is a behavior change and must be covered by tests.
- */
-export const CONFIG_BOUNDS = {
-  port: { min: 1, max: 65535 },
-  upstreamTimeoutMs: { min: MIN_TIMEOUT_MS, max: MAX_TIMEOUT_MS },
-  chaosProbability: { min: 0, max: 1 },
-  idempotencyTtlMs: { min: 0, max: 7 * 24 * 60 * 60 * 1000 },
-  circuitBreaker: {
-    failureThreshold: { min: 1, max: 100 },
-    successThreshold: { min: 1, max: 20 },
-    timeoutMs: { min: 1_000, max: 300_000 },
-  },
-  webhookRetry: {
-    maxAttempts: { min: 1, max: 20 },
-    initialDelayMs: { min: 100, max: 60_000 },
-    maxDelayMs: { min: 1_000, max: 600_000 },
-    multiplier: { min: 1, max: 10 },
-    jitterFactor: { min: 0, max: 1 },
-  },
-  webhookCircuitBreaker: {
-    failureThreshold: { min: 1, max: 100 },
-    successThreshold: { min: 1, max: 20 },
-    timeoutMs: { min: 1_000, max: 300_000 },
-  },
-  healthProbes: {
-    queueFailedThreshold: { min: 0, max: 10_000 },
-    queueBacklogThreshold: { min: 0, max: 1_000_000 },
-    queueProbeTimeoutMs: { min: 100, max: 30_000 },
-  },
-} as const;
-
-const DEFAULT_ALLOWED_ASSETS = ['USDC', 'XLM', 'BTC', 'ETH'] as const;
-
 function toNumber(value: string | undefined, fallback: number): number {
   if (value === undefined || value === null) {
     return fallback;
@@ -204,25 +154,6 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 
   const trimmed = String(value).trim().toLowerCase();
   return trimmed === 'true';
-}
-
-/**
- * Parse a numeric env var with an explicit inclusive boundary.
- *
- * - Missing/empty values use `fallback`.
- * - Non-finite values (e.g. `NaN`, `Infinity`) use `fallback`.
- * - Finite values are clamped into `[min, max]`.
- *
- * This is the only sanctioned way to read numeric config so that every
- * field shares identical boundary semantics.
- */
-function parseBoundedNumber(
-  value: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  return clamp(toNumber(value, fallback), min, max);
 }
 
 function parseTargets(value: string | undefined): string[] {

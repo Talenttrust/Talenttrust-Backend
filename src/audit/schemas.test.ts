@@ -196,7 +196,7 @@ describe('createAuditEntryBodySchema', () => {
     }
   });
 
-  it('does not mutate the caller's input object', () => {
+  it("does not mutate the caller's input object", () => {
     const input = { ...valid, metadata: { foo: 'bar' } };
     const snapshot = JSON.parse(JSON.stringify(input));
     createAuditEntryBodySchema.safeParse(input);
@@ -378,7 +378,7 @@ describe('buildAuditQuerySchema', () => {
     }
   });
 
-  it('does not mutate the caller's query object', () => {
+  it("does not mutate the caller's query object", () => {
     const query = { limit: '25', offset: '5' };
     const snapshot = { ...query };
     schema.safeParse(query);

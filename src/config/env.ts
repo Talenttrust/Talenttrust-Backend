@@ -126,7 +126,7 @@ export function parseIntEnv(key: string, defaultValue: number): number {
   const parsed = Number(raw);
   if (!Number.finite(parsed) || !Number.isInteger(parsed)) {
     throw new Error(
-      `Environment variable ${key} must be a valid integer, got: ${describeRaw(key, raw)}",
+      `Environment variable ${key} must be a valid integer, got: ${describeRaw(key, raw)}`,
     );
   }
   return parsed;

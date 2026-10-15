@@ -457,7 +457,7 @@ export function classifySorobanRpcError(error: unknown): SorobanRpcError {
 
   // Quasi RPC application error (e.g., contract execution failure).
   if (looksLikeRpcError(error)) {
-    return new SorobanRpcApplicationError(
+    return new SorobanRpcApplicationError({
       providerCode: extractProviderCode(error),
       providerMessage: safeErrorMessage(error),
     });

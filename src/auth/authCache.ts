@@ -45,6 +45,44 @@
  */
 
 import { Counter, Registry } from 'prom-client';
+
+/** True when `value` is a non-empty string. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/** Rejects a malformed identity before it is stored in the cache. */
+function assertValidApiKeyInfo(info: unknown): asserts info is ApiKeyInfo {
+  if (info === null || typeof info !== 'object') {
+    throw new TypeError('AuthCache.set: info must be an ApiKeyInfo object');
+  }
+
+  const candidate = info as Record<string, unknown>;
+
+  if (!isNonEmptyString(candidate.id)) {
+    throw new TypeError('AuthCache.set: info.id must be a non-empty string');
+  }
+
+  if (!isNonEmptyString(candidate.createdBy)) {
+    throw new TypeError('AuthCache.set: info.createdBy is required for invalidation-by-user');
+  }
+
+  if (!Array.isArray(candidate.scope)) {
+    throw new TypeError('AuthCache.set: info.scope must be an array');
+  }
+
+  if (typeof candidate.isActive !== 'boolean') {
+    throw new TypeError('AuthCache.set: info.isActive must be a boolean');
+  }
+
+  if (!(candidate.createdAt instanceof Date)) {
+    throw new TypeError('AuthCache.set: info.createdAt must be a Date');
+  }
+
+  if (candidate.expiresAt !== null && candidate.expiresAt !== undefined && !(candidate.expiresAt instanceof Date)) {
+    throw new TypeError('AuthCache.set: info.expiresAt must be a Date or null');
+  }
+}
 import { ApiKeyInfo } from './apiKeys';
 
 export interface AuthCacheOptions {
@@ -56,6 +94,15 @@ export interface CacheEntry {
   info: ApiKeyInfo;
   expiresAt: number;
   lastAccessed: number;
+}
+
+/**
+ * LRU-ordered doubly-linked list node for deterministic O(1) eviction.
+ */
+interface LruNode {
+  key: string;
+  prev: LruNode | null;
+  next: LruNode | null;
 }
 
 export interface AuthCacheStats {
@@ -105,6 +152,12 @@ export class AuthCache {
    */
   private epoch: number;
 
+  // LRU list metadata. head = MRU, tail = LRU.
+  private lruHead: LruNode | null;
+  private lruTail: LruNode | null;
+  private lruNodes: Map<string, LruNode>;
+
+  constructor(options: AuthCacheOptions, register?: Registry) {
     this.ttlMs = options.ttlMs;
     this.maxEntries = options.maxEntries;
     this.cache = new Map();
@@ -151,7 +204,9 @@ export class AuthCache {
 
     const entry = this.cache.get(selector);
     const now = Date.now();
+    const startTime = now;
 
+    try {
       if (!entry) {
         this.misses.inc();
         this.missCount++;
@@ -159,17 +214,19 @@ export class AuthCache {
         return null;
       }
 
-      // Check if entry has expired
+      // Check if entry has expired. Expired entries are removed from both the
+      // map and the LRU list so the two can never diverge.
       if (now > entry.expiresAt) {
-        this.cache.delete(selector);
+        this.removeEntry(selector);
         this.misses.inc();
         this.missCount++;
         this.recordTiming('get_expired', startTime);
         return null;
       }
 
-      // Update last accessed time for LRU eviction
+      // Update last accessed time for LRU eviction and move to the MRU tail.
       entry.lastAccessed = now;
+      this.touchLru(selector);
       this.hits.inc();
       this.hitCount++;
       this.recordTiming('get_hit', startTime);
@@ -195,28 +252,9 @@ export class AuthCache {
     selector: string,
     fetchFn: () => Promise<ApiKeyInfo | null>
   ): Promise<ApiKeyInfo | null> {
-    const startTime = Date.now();
-
-    // Check cache first (synchronous)
-    const cached = this.get(selector);
-    if (cached !== null) {
-      return cached;
-    }
-
-    // Check if entry has expired
-    if (now >= entry.expiresAt) {
-      this.cache.delete(selector);
-      this.misses.inc();
-      this.missCount++;
-      return null;
-    }
-
-    // Update last accessed time for LRU eviction and move to tail.
-    entry.lastAccessed = now;
-    this.touchLru(selector);
-    this.hits.inc();
-    this.hitCount++;
-    return cloneApiKeyInfo(entry.info);
+    // In-flight deduplication: concurrent callers for the same selector share a
+    // single loader invocation and a single published result (INV-C1).
+    return this.getOrLoad(selector, fetchFn);
   }
 
   /**
@@ -498,7 +536,7 @@ export class AuthCache {
       throw new Error('AuthCache: evictOldest called on an empty cache');
     }
 
-    this.cache.delete(oldestSelector);
+    this.removeEntry(oldestSelector);
   }
 
   /**
@@ -584,21 +622,4 @@ export class AuthCache {
     }
     this.lruTail = node;
   }
-}
-
-/**
- * Returns a defensive copy of an ApiKeyInfo object.
- *
- * The cache must not expose internal references to callers and must not
- * store caller-owned references. Otherwise a mutation to a returned object
- * could change authorization decisions for future requests, and a mutation to
- * an input object could silently corrupt cached state.
- */
-function cloneApiKeyInfo(info: ApiKeyInfo): ApiKeyInfo {
-  return {
-    ...info,
-    scope: Array.isArray(info.scope) ? [...info.scope] : info.scope,
-    createdAt: info.createdAt instanceof Date ? new Date(info.createdAt.getTime()) : info.createdAt,
-    expiresAt: info.expiresAt instanceof Date ? new Date(info.expiresAt.getTime()) : info.expiresAt,
-  };
 }

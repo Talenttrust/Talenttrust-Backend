@@ -55,7 +55,7 @@ describe('auditMiddleware', () => {
     const app = express();
     app.use(auditMiddleware);
     app.get('/probe', (_req, res) => {
-      expect(typeof res.locals.audit.log).toBe(function);
+      expect(typeof res.locals.audit.log).toBe('function');
       res.status(204).send();
     });
 

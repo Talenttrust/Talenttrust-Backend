@@ -115,7 +115,8 @@ describe('IdempotencyStore', () => {
     });
 
     it('hash is independent of metadata key insertion order', () => {
-      const input1 = makeInput({\n        metadata: { b: 2, a: 1, c: { y: true, x: false } },
+      const input1 = makeInput({
+        metadata: { b: 2, a: 1, c: { y: true, x: false } },
       });
       const input2 = makeInput({
         metadata: { c: { x: false, y: true }, a: 1, b: 2 },

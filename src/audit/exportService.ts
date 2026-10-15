@@ -8,7 +8,7 @@ import type { ReadStream } from 'fs';
 import { AuditService, auditService } from './service';
 import { redactBody } from './redact';
 import type { AuditEntry, AuditQuery } from './types';
-import { logger } from '../utils/logger';
+import { logger } from '../logger';
 
 export const AUDIT_EXPORT_SCHEMA_VERSION = 1 as const;
 
@@ -425,6 +425,7 @@ export class AuditExportService {
       }
       throw error;
     }
+    });
   }
 
   // ─── CSV export ────────────────────────────────────────────────────────────

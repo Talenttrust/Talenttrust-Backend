@@ -20,7 +20,6 @@
  *    `protectedEndpointAuditMiddleware`) can detect and handle it
  *    instead of silently dropping the entry.
  * 4. Each convenience wrapper (`logContractEvent`, `logPaymentEvent`,
- * 4. Each convenience wrapper (`logContractEvent`, `logPaymentEvent`,
  *    `logAuthEvent`, `logUserEvent`) sets the correct `resource`,
  *    `resourceId`, and per-action `severity` rule.
  * 5. Compatibility contracts are pinned at the service boundary:
@@ -35,7 +34,6 @@
  * The SQLite backend behaviour is covered separately in
  * `src/audit/sqliteRepository.test.ts`.
  *
- *
  * Note: there is intentionally a divergence between the `makeInput` here
  * (which includes `ipAddress` and `correlationId` so routing can be
  * asserted) and the one in `sqliteRepository.test.ts` (which omits them —
@@ -47,7 +45,6 @@
 import { AuditService, auditService } from './service';
 import { redactBody, REDACTED } from './redact';
 import type { AuditLogRepository } from './repository';
-import type { AuditExportService, AuditExportResult } from './exportService';
 import type { AuditExportService, AuditExportResult } from './exportService';
 import type {
   AuditAction,
@@ -65,7 +62,6 @@ import type { AuditExportService, AuditExportResult } from './exportService';
  *  does not depend on the wall clock.
  */
 const FROZEN_TIMESTAMP = '2026-01-15T10:00:00.000Z';
-const FROZEN_TIMESTAMP = '2026-01-15T10:00:00.000Z';
 
 /**
  * Mock repository that records every appended input and supports a one-shot
@@ -75,13 +71,11 @@ const FROZEN_TIMESTAMP = '2026-01-15T10:00:00.000Z';
  */
 type MockRepository = AuditLogRepository & {
   appendedInputs: CreateAuditEntryInput[];
-  appendedInputs: CreateAuditEntryInput[];
   failNextAppend: Error | null;
 };
 
 function makeMockRepository(): MockRepository {
   const repo: MockRepository = {
-    appendedInputs: [],
     appendedInputs: [],
     failNextAppend: null,
     append(input: CreateAuditEntryInput): AuditEntry {
@@ -89,7 +83,6 @@ function makeMockRepository(): MockRepository {
         const err = repo.failNextAppend;
         // One-shot failure — clearing it matches the real semantics in
         // better-sqlite3 where each call gets a fresh transaction.
-        repo.failNextAppend = null;
         repo.failNextAppend = null;
         throw err;
       }
@@ -105,7 +98,6 @@ function makeMockRepository(): MockRepository {
         resourceId: input.resourceId,
         metadata: Object.freeze({ ...input.metadata }),
         ipAddress: input.ipAddress,
-        ipAddress: input.ipAddress,
         correlationId: input.correlationId,
         previousHash: 'GENESIS',
         hash: `mock-hash-${index}`,
@@ -116,14 +108,12 @@ function makeMockRepository(): MockRepository {
       return undefined;
     },
     query(_query?: AuditQuery): AuditEntry[] {
-    query(_query?: AuditQuery): AuditEntry[] {
       return [];
     },
     *stream(_query?: AuditQuery) {
       // Empty generator — read-side delegation is asserted via jest.spyOn
       // elsewhere; the iterator mechanics themselves are not the focus.
     },
-    count(): number {
     count(): number {
       return repo.appendedInputs.length;
     },
@@ -134,7 +124,6 @@ function makeMockRepository(): MockRepository {
         checkedAt: FROZEN_TIMESTAMP,
       };
     },
-    queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
     queryWithCursor(query: AuditQuery = {}): AuditQueryResult {
       const entries = repo.query(query);
       return {
@@ -149,7 +138,6 @@ function makeMockRepository(): MockRepository {
 
 /** Minimal valid input — spread+override to drop optional fields cleanly. */
 function makeInput(overrides: Partial<CreateAuditEntryInput> = {}): CreateAuditEntryInput {
-  return {
   return {
     action: 'CONTRACT_CREATED',
     severity: 'INFO',
@@ -167,7 +155,6 @@ function makeInput(overrides: Partial<CreateAuditEntryInput> = {}): CreateAuditE
 
 describe('AuditService — repository routing contract', () => {
   let repo: MockRepository;
-  let repo: MockRepository;
   let service: AuditService;
 
   beforeEach(() => {
@@ -182,7 +169,6 @@ describe('AuditService — repository routing contract', () => {
 
   it('returns the entry that the repository returned', () => {
     const returned = service.log(makeInput());
-    const returned = service.log(makeInput());
     expect(returned.id).toBe('mock-id-1');
     expect(returned.hash).toBe('mock-hash-1');
   });
@@ -190,7 +176,6 @@ describe('AuditService — repository routing contract', () => {
   // Keep in sync with `AuditAction` in types.ts. If a new variant is added,
   // append it here so this assertion pins the routing layer's accept-set.
   it('preserves the action field without coercion across every AuditAction', () => {
-    const actions: AuditAction[] = [
     const actions: AuditAction[] = [
       'CONTRACT_CREATED',
       'CONTRACT_UPDATED',
@@ -215,7 +200,6 @@ describe('AuditService — repository routing contract', () => {
     actions.forEach((action) => service.log(makeInput({ action })));
     expect(repo.appendedInputs.map((i) => i.action)).toEqual(actions);
   });
-  });
 
   it('preserves the actor field (does not default to "anonymous")', () => {
     service.log(makeInput({ actor: 'user-xyz' }));
@@ -223,7 +207,6 @@ describe('AuditService — repository routing contract', () => {
   });
 
   it('propagates correlationId into the repository call', () => {
-    service.log(makeInput({ correlationId: 'trace-abc-123' }));
     service.log(makeInput({ correlationId: 'trace-abc-123' }));
     expect(repo.appendedInputs[0].correlationId).toBe('trace-abc-123');
   });
@@ -234,7 +217,6 @@ describe('AuditService — repository routing contract', () => {
   });
 
   it('passes caller-supplied metadata through as the SAME REFERENCE (no clone/re-wrap)', () => {
-    const metadata = { clientId: 'c-1', note: 'plain text' };
     const metadata = { clientId: 'c-1', note: 'plain text' };
     service.log(makeInput({ metadata }));
     // Reference identity — the service must NOT clone or re-wrap the
@@ -253,7 +235,6 @@ describe('AuditService — repository routing contract', () => {
  */
 describe('AuditService — redaction contract', () => {
   const CANARY = 'CANARY-PASSWORD-VALUE-DO-NOT-LEAK-XYZ';
-  const CANARY = 'CANARY-PASSWORD-VALUE-DO-NOT-LEAK-XYZ';
 
   let repo: MockRepository;
   let service: AuditService;
@@ -264,7 +245,6 @@ describe('AuditService — redaction contract', () => {
   });
 
   it('does NOT redact caller-supplied metadata — sensitive keys remain unless pre-redacted', () => {
-    const unredacted = { username: 'alice', password: 'hunter2' };
     const unredacted = { username: 'alice', password: 'hunter2' };
     service.log(makeInput({ metadata: unredacted }));
     expect(repo.appendedInputs[0].metadata).toEqual(unredacted);
@@ -279,7 +259,6 @@ describe('AuditService — redaction contract', () => {
     };
     const redacted = redactBody(sensitive) as Record<string, unknown>;
     service.log(makeInput({ metadata: redacted }));
-    service.log(makeInput({ metadata: redacted }));
 
     const stored = repo.appendedInputs[0].metadata;
     expect(stored.username).toBe('ali***@example.com');
@@ -291,7 +270,6 @@ describe('AuditService — redaction contract', () => {
 
   it('does NOT mutate non-sensitive metadata when redactBody is applied', () => {
     const payload = { clientId: 'c-1', amount: 1000, currency: 'XLM' };
-    const redacted = redactBody(payload) as Record<string, unknown>;
     const redacted = redactBody(payload) as Record<string, unknown>;
     service.log(makeInput({ metadata: redacted }));
     expect(repo.appendedInputs[0].metadata).toEqual(redacted);
@@ -305,7 +283,6 @@ describe('AuditService — redaction contract', () => {
       note: 'plaintext',
     };
     const redacted = redactBody(sensitive) as Record<string, unknown>;
-    service.log(makeInput({ metadata: redacted }));
     service.log(makeInput({ metadata: redacted }));
 
     const serialised = JSON.stringify(repo.appendedInputs[0].metadata);
@@ -332,7 +309,6 @@ describe('AuditService — redaction contract', () => {
     };
     const redacted = redactBody(sensitive) as Record<string, unknown>;
     service.log(makeInput({ metadata: redacted }));
-    service.log(makeInput({ metadata: redacted }));
 
     const serialised = JSON.stringify(repo.appendedInputs[0].metadata);
     expect(serialised).not.toContain(CANARY);
@@ -353,7 +329,6 @@ describe('AuditService — redaction contract', () => {
   it('SECURITY (teeth): without redaction, the same canary value WOULD leak into the persisted record', () => {
     const sensitive = { username: 'safe-name', password: CANARY };
     service.log(makeInput({ metadata: sensitive }));
-    service.log(makeInput({ metadata: sensitive }));
 
     const serialised = JSON.stringify(repo.appendedInputs[0].metadata);
     // This test ensures the prior SECURITY assertion is meaningful — a
@@ -372,7 +347,6 @@ describe('AuditService — redaction contract', () => {
  */
 describe('AuditService — repository write failures surface', () => {
   let repo: MockRepository;
-  let repo: MockRepository;
   let service: AuditService;
 
   beforeEach(() => {
@@ -386,7 +360,6 @@ describe('AuditService — repository write failures surface', () => {
   });
 
   it('a failed append does not corrupt subsequent calls', () => {
-    repo.failNextAppend = new Error('transient');
     repo.failNextAppend = new Error('transient');
     expect(() => service.log(makeInput())).toThrow('transient');
     service.log(makeInput({ actor: 'user-after-failure' }));
@@ -406,7 +379,6 @@ describe('AuditService — repository write failures surface', () => {
 
   it('convenience wrappers also propagate repository write failures', () => {
     const failingRepo = makeMockRepository();
-    const failingRepo = makeMockRepository();
     failingRepo.failNextAppend = new Error('store-down');
     const failingService = new AuditService(failingRepo);
     expect(() =>
@@ -418,7 +390,6 @@ describe('AuditService — repository write failures surface', () => {
     // Simulate the request path: the caller wraps the audit call in
     // try/catch and continues serving the response.
     repo.failNextAppend = new Error('kernel-panic');
-    let requestContinued = false;
     let requestContinued = false;
     let caughtError: unknown = null;
     try {
@@ -437,7 +408,6 @@ describe('AuditService — repository write failures surface', () => {
 // ─── 4. Convenience wrappers ────────────────────────────────────────────────
 
 describe('AuditService — convenience wrappers', () => {
-  let repo: MockRepository;
   let repo: MockRepository;
   let service: AuditService;
 
@@ -458,7 +428,6 @@ describe('AuditService — convenience wrappers', () => {
   });
 
   it('logPaymentEvent sets severity="CRITICAL" and resource="payment"', () => {
-    service.logPaymentEvent('PAYMENT_RELEASED', 'u-2', 'p-7', { amount: 250 });
     service.logPaymentEvent('PAYMENT_RELEASED', 'u-2', 'p-7', { amount: 250 });
     expect(repo.appendedInputs[0]).toMatchObject({
       action: 'PAYMENT_RELEASED',
@@ -483,7 +452,6 @@ describe('AuditService — convenience wrappers', () => {
 
   it('logAuthEvent: AUTH_LOGIN / AUTH_LOGOUT set severity="INFO", resource="auth", resourceId=actor', () => {
     service.logAuthEvent('AUTH_LOGIN', 'u-3');
-    service.logAuthEvent('AUTH_LOGIN', 'u-3');
     service.logAuthEvent('AUTH_LOGOUT', 'u-3');
     expect(
       repo.appendedInputs.map((i) => ({
@@ -499,7 +467,6 @@ describe('AuditService — convenience wrappers', () => {
   });
 
   it('logUserEvent: USER_CREATED/UPDATED use "INFO"; USER_DELETED uses "WARNING"', () => {
-    service.logUserEvent('USER_CREATED', 'admin-1', 'user-2');
     service.logUserEvent('USER_CREATED', 'admin-1', 'user-2');
     service.logUserEvent('USER_UPDATED', 'admin-1', 'user-2');
     service.logUserEvent('USER_DELETED', 'admin-1', 'user-2');
@@ -526,7 +493,6 @@ describe('AuditService — convenience wrappers', () => {
 
   it('logDisputeEvent: DISPUTE_CREATED uses INFO severity, resource="dispute"', () => {
     service.logDisputeEvent('DISPUTE_CREATED', 'user-1', 'dispute-1', { reason: 'Test' });
-    service.logDisputeEvent('DISPUTE_CREATED', 'user-1', 'dispute-1', { reason: 'Test' });
     expect(repo.appendedInputs[0]).toMatchObject({
       action: 'DISPUTE_CREATED',
       severity: 'INFO',
@@ -539,7 +505,6 @@ describe('AuditService — convenience wrappers', () => {
 
   it('logDisputeEvent: DISPUTE_UPDATED uses WARNING severity', () => {
     service.logDisputeEvent('DISPUTE_UPDATED', 'admin-1', 'dispute-2', {});
-    service.logDisputeEvent('DISPUTE_UPDATED', 'admin-1', 'dispute-2', {});
     expect(repo.appendedInputs[0].severity).toBe('WARNING');
   });
 
@@ -549,7 +514,6 @@ describe('AuditService — convenience wrappers', () => {
   });
 
   it('logDisputeEvent propagates context (ipAddress, correlationId)', () => {
-    service.logDisputeEvent(
     service.logDisputeEvent(
       'DISPUTE_CREATED',
       'user-1',
@@ -569,7 +533,6 @@ describe('AuditService — convenience wrappers', () => {
 describe('AuditService — read-side delegation to repository', () => {
   it('query() forwards the filter object verbatim', () => {
     const repo = makeMockRepository();
-    const repo = makeMockRepository();
     const spy = jest.spyOn(repo, 'query');
     new AuditService(repo).query({ action: 'CONTRACT_CREATED', limit: 10 });
     expect(spy).toHaveBeenCalledWith({ action: 'CONTRACT_CREATED', limit: 10 });
@@ -577,14 +540,12 @@ describe('AuditService — read-side delegation to repository', () => {
 
   it('getById() forwards the id verbatim', () => {
     const repo = makeMockRepository();
-    const repo = makeMockRepository();
     const spy = jest.spyOn(repo, 'getById');
     new AuditService(repo).getById('id-1');
     expect(spy).toHaveBeenCalledWith('id-1');
   });
 
   it('count() and verifyIntegrity() delegate to the repository', () => {
-    const repo = makeMockRepository();
     const repo = makeMockRepository();
     const countSpy = jest.spyOn(repo, 'count');
     const verifySpy = jest.spyOn(repo, 'verifyIntegrity');
@@ -596,7 +557,6 @@ describe('AuditService — read-side delegation to repository', () => {
   });
 
   it('stream() returns the exact iterator from the repository (not a re-wrap)', () => {
-    const repo = makeMockRepository();
     const repo = makeMockRepository();
     const sentinel = (function* () {
       yield Object.freeze({} as AuditEntry);
@@ -613,7 +573,6 @@ describe('AuditService — read-side delegation to repository', () => {
 // ─── 6. Singleton sanity ────────────────────────────────────────────────────
 
 describe('auditService singleton', () => {
-  it('is a functional AuditService instance with the documented surface area', () => {
   it('is a functional AuditService instance with the documented surface area', () => {
     expect(auditService).toBeInstanceOf(AuditService);
     // Behavioural sanity — these methods must exist on the singleton.
@@ -637,7 +596,6 @@ describe('auditService singleton', () => {
 describe('AuditService — extracted business logic & query parsing', () => {
   describe('createEntry', () => {
     it('throws error when required fields are missing', () => {
-    it('throws error when required fields are missing', () => {
       const repo = makeMockRepository();
       const service = new AuditService(repo);
 
@@ -658,7 +616,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
 
     it('persists and returns entry when all required fields are present', () => {
       const repo = makeMockRepository();
-      const repo = makeMockRepository();
       const service = new AuditService(repo);
 
       const input: CreateAuditEntryInput = {
@@ -678,7 +635,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
 
   describe('validateAndParseQuery', () => {
     const service = new AuditService(makeMockRepository());
-    const service = new AuditService(makeMockRepository());
 
     it('validates action field', () => {
       expect(() =>
@@ -690,7 +646,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
     });
 
     it('validates severity field', () => {
-    it('validates severity field', () => {
       expect(() =>
         service.validateAndParseQuery({ severity: 'SUPER_CRITICAL' }, { maxLimit: 100 }),
       ).toThrow('Invalid severity: SUPER_CRITICAL');
@@ -699,7 +654,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
       expect(parsed.query.severity).toBe('CRITICAL');
     });
 
-    it('parses limit and clamps to maxLimit', () => {
     it('parses limit and clamps to maxLimit', () => {
       expect(() =>
         service.validateAndParseQuery({ limit: '0' }, { maxLimit: 100 }),
@@ -721,7 +675,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
     });
 
     it('parses offset', () => {
-    it('parses offset', () => {
       expect(() =>
         service.validateAndParseQuery({ offset: '-1' }, { maxLimit: 100 }),
       ).toThrow('Invalid offset');
@@ -734,7 +687,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
       expect(parsed.offset).toBe(25);
     });
 
-    it('parses optional ISO date timestamps', () => {
     it('parses optional ISO date timestamps', () => {
       expect(() =>
         service.validateAndParseQuery({ from: 'invalid-date' }, { maxLimit: 100 }),
@@ -753,7 +705,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
     });
 
     it('validates cursor format', () => {
-    it('validates cursor format', () => {
       expect(() =>
         service.validateAndParseQuery({ cursor: 'not-a-valid-cursor' }, { maxLimit: 100 }),
       ).toThrow('Invalid cursor format');
@@ -762,7 +713,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
 
   describe('queryLogs', () => {
     it('returns offset-based result when cursor is not provided', () => {
-      const repo = makeMockRepository();
       const repo = makeMockRepository();
       const service = new AuditService(repo);
 
@@ -787,7 +737,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
     });
 
     it('returns cursor-based result when cursor is provided', () => {
-      const repo = makeMockRepository();
       const repo = makeMockRepository();
       const service = new AuditService(repo);
 
@@ -815,7 +764,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
 
   describe('exportAuditLogs', () => {
     it('orchestrates NDJSON export and logs compliance ADMIN_ACTION entry', async () => {
-      const repo = makeMockRepository();
       const repo = makeMockRepository();
       const service = new AuditService(repo);
 
@@ -866,7 +814,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
   describe('checkIntegrity and getEntry', () => {
     it('checkIntegrity maps valid:true to 200 and valid:false to 409', () => {
       const repo = makeMockRepository();
-      const repo = makeMockRepository();
       const service = new AuditService(repo);
 
       const reportValid: IntegrityReport = { valid: true, totalEntries: 10, checkedAt: '2026-01-15T10:00:00.000Z' };
@@ -887,7 +834,6 @@ describe('AuditService — extracted business logic & query parsing', () => {
 
     it('getEntry delegates to getById', () => {
       const repo = makeMockRepository();
-      const repo = makeMockRepository();
       const service = new AuditService(repo);
       const spy = jest.spyOn(repo, 'getById').mockReturnValue(undefined);
 
@@ -896,4 +842,3 @@ describe('AuditService — extracted business logic & query parsing', () => {
     });
   });
 });
-

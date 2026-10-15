@@ -103,13 +103,6 @@ export const MAX_RESOURCE_LENGTH = 128;
  */
 export const MAX_RESOURCE_ID_LENGTH = 256;
 
-// A response can pass through the same protected router more than once. Keep
-// the guard on that response, rather than in process-wide state, so each HTTP
-// request has at most one audit write attempt.
-const auditListenerRegistered = Symbol('protectedEndpointAuditListenerRegistered');
-
-type AuditedResponse = Response & { [auditListenerRegistered]?: boolean };
-
 function resolveActor(req: Request): string {
   const user = (req as Request & { user?: { userId?: unknown; id?: unknown } }).user;
   // The simple bearer middleware uses userId; the production JWT middleware
@@ -196,8 +189,6 @@ function deriveResourceId(path: string): string {
  * @param service - AuditService instance to write entries to (defaults to
  *                  the application singleton).
  */
-const AUDIT_FINISH_FLAG = Symbol('protectedEndpointAudit.finishRegistered');
-
 export function createProtectedEndpointAuditMiddleware(
   service: AuditService = auditService,
 ): RequestHandler {
@@ -247,7 +238,10 @@ export function createProtectedEndpointAuditMiddleware(
       // Even an exotic request getter must not interrupt authentication.
     }
 
-    res.once('finish', () => {
+    let writeAttempted = false;
+    const writeAuditEntry = (): void => {
+      if (writeAttempted) return;
+      writeAttempted = true;
       try {
         // Authentication and the final status are resolved after next().
         const rawActor = (req as AuthenticatedRequest).user?.userId;
@@ -292,17 +286,8 @@ export function createProtectedEndpointAuditMiddleware(
       }
     };
 
-    res.once('finish', () => writeAuditEntry(false));
-    res.once('close', () => {
-      if (!res.writableFinished) writeAuditEntry(true);
-    });
-
-    // Ensure the flag is cleared if the response is closed without finishing
-    // (e.g. client abort) so that a subsequent request on a reused Response
-    // object (unlikely in Express, but defensive) is not silently skipped.
-    res.on('close', () => {
-      resWithFlag[AUDIT_FINISH_FLAG] = false;
-    });
+    res.once('finish', writeAuditEntry);
+    res.once('close', writeAuditEntry);
 
     next();
   };
