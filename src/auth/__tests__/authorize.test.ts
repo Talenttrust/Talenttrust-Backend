@@ -11,7 +11,15 @@
  */
 
 import { isAllowed, evaluateAuthorization, AuthorizationReason } from '../authorize';
-import { Role, Resource, Action, ACCESS_CONTROL_MATRIX, VALID_ROLES } from '../roles';
+import {
+  Role,
+  Resource,
+  Action,
+  ACCESS_CONTROL_MATRIX,
+  VALID_ROLES,
+  VALID_RESOURCES,
+  VALID_ACTIONS,
+} from '../roles';
 import * as loggerModule from '../../logger';
 
 const ALL_RESOURCES: Resource[] = ['contracts', 'users', 'reputation', 'disputes', 'health', 'api-keys'];

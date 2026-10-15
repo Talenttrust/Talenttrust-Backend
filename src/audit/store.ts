@@ -196,7 +196,6 @@ export class AuditStore implements AuditLogRepository {
       }
 
       this.log.push(entry);
-      Object.freeze(this.log);
       return entry;
     } catch (err) {
       this._lastAppendError = err instanceof Error ? err : new Error(String(err));

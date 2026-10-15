@@ -25,7 +25,7 @@ export type Action = 'create' | 'read' | 'update' | 'delete';
  * Access control matrix.
  * Maps each role to the set of allowed actions per resource.
  */
-export const ACCESS_CONTROL_MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
+const accessControlMatrix: Record<Role, Partial<Record<Resource, Action[]>>> = {
   admin: {
     contracts: ['create', 'read', 'update', 'delete'],
     users: ['create', 'read', 'update', 'delete'],
@@ -58,5 +58,30 @@ export const ACCESS_CONTROL_MATRIX: Record<Role, Partial<Record<Resource, Action
   },
 };
 
+for (const permissions of Object.values(accessControlMatrix)) {
+  for (const actions of Object.values(permissions)) {
+    if (actions) Object.freeze(actions);
+  }
+  Object.freeze(permissions);
+}
+
+export const ACCESS_CONTROL_MATRIX = Object.freeze(accessControlMatrix);
+
 /** All valid roles in the system. */
 export const VALID_ROLES: readonly Role[] = ['admin', 'auditor', 'freelancer', 'client', 'guest'] as const;
+
+export const VALID_RESOURCES: readonly Resource[] = Object.freeze([
+  'contracts',
+  'users',
+  'reputation',
+  'disputes',
+  'health',
+  'api-keys',
+]);
+
+export const VALID_ACTIONS: readonly Action[] = Object.freeze([
+  'create',
+  'read',
+  'update',
+  'delete',
+]);

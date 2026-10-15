@@ -78,7 +78,7 @@ describe('auditMiddleware', () => {
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     expect(logSpy).toHaveBeenCalledWith(
-      expect.objectContainig({
+      expect.objectContaining({
         correlationId,
         action: 'CONTRACT_CREATED',
         actor: 'user-test-1',
@@ -121,7 +121,7 @@ describe('auditMiddleware', () => {
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     expect(logSpy).toHaveBeenCalledWith(
-      expect.objectContainig({
+      expect.objectContaining({
         correlationId,
         action: 'AUTH_FAILED',
         severity: 'WARNING',

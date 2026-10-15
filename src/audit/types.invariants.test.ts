@@ -1,19 +1,17 @@
 /**
  * @file types.invariants.test.ts
  * @description Pins the audit *vocabulary* invariant owned by `./types.ts`:
- * `AUDIT_ACTIONS` and the `AuditAction` type must describe the same set, and
- * every validator in the module (`schemas`, `service`, `inputValidation`) must
- * consume that one set rather than a hand-mirrored copy.
+ * `AUDIT_DOMAIN_ACTIONS` and the `AuditAction` type describe all stored values,
+ * while `AUDIT_ACTIONS` is the narrower public write contract.
  *
  * The failure this guards against is silent drift: before this change the
- * runtime array, the `AuditAction` union, and the copies in `schemas.ts` /
- * `service.ts` had already diverged, so an action such as `MILESTONES_DELETED`
- * (which the service itself emits) was legal in TypeScript but rejected by the
- * HTTP write/query validators.
+ * internal-only events must remain valid in storage and responses without
+ * becoming accepted public writes.
  */
 
 import {
   AUDIT_ACTIONS,
+  AUDIT_DOMAIN_ACTIONS,
   AUDIT_SEVERITIES,
   isAuditAction,
   isAuditSeverity,
@@ -24,10 +22,7 @@ import { auditActionSchema, auditSeveritySchema } from './schemas';
 import { VALID_ACTIONS } from './service';
 
 /**
- * Compile-time completeness pin: `Record<AuditAction, true>` requires a key for
- * every member of the union (and forbids unknown keys). If a future change
- * removes an action from `AUDIT_ACTIONS` (and therefore from `AuditAction`) or
- * renames one, this object stops type-checking.
+ * Compile-time completeness pin for the full stored event vocabulary.
  */
 const AUDIT_ACTION_TABLE: Record<AuditAction, true> = {
   CONTRACT_CREATED: true,
@@ -60,7 +55,7 @@ const AUDIT_ACTION_TABLE: Record<AuditAction, true> = {
 
 const sorted = (values: readonly string[]): string[] => [...values].sort();
 
-describe('audit vocabulary — AUDIT_ACTIONS is the single source of truth', () => {
+describe('audit vocabulary — public and domain action registries', () => {
   it('contains no duplicate actions', () => {
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
   });
@@ -68,14 +63,12 @@ describe('audit vocabulary — AUDIT_ACTIONS is the single source of truth', () 
   it('matches the AuditAction union exactly (no extra or missing members)', () => {
     // `AuditAction` is derived from AUDIT_ACTIONS, so this asserts the derived
     // type has not been re-declared by hand anywhere in the future.
-    expect(sorted(Object.keys(AUDIT_ACTION_TABLE))).toEqual(sorted(AUDIT_ACTIONS));
+    expect(sorted(Object.keys(AUDIT_ACTION_TABLE))).toEqual(sorted(AUDIT_DOMAIN_ACTIONS));
   });
 
   it('retains the actions that the union allowed but the runtime list omitted', () => {
-    // Regression: these four were legal `AuditAction`s but absent from the
-    // runtime array consumed by the validators, so they were unreachable
-    // through every ingest path even though the service emits them.
-    expect(AUDIT_ACTIONS).toEqual(
+    // These domain events are emitted internally, not accepted from public writes.
+    expect(AUDIT_DOMAIN_ACTIONS).toEqual(
       expect.arrayContaining([
         'CONTRACT_DELETED',
         'MILESTONES_CREATED',

@@ -113,6 +113,35 @@ export function deepFreeze<T>(obj: T): Readonly<T> {
   return obj as Readonly<T>;
 }
 
+export const CONFIG_BOUNDS = {
+  port: { min: 1, max: 65535 },
+  upstreamTimeoutMs: { min: MIN_TIMEOUT_MS, max: MAX_TIMEOUT_MS },
+  chaosProbability: { min: 0, max: 1 },
+  idempotencyTtlMs: { min: 0, max: 7 * 24 * 60 * 60 * 1000 },
+  circuitBreaker: {
+    failureThreshold: { min: 1, max: 100 },
+    successThreshold: { min: 1, max: 20 },
+    timeoutMs: { min: 1_000, max: 300_000 },
+  },
+  webhookRetry: {
+    maxAttempts: { min: 1, max: 20 },
+    initialDelayMs: { min: 100, max: 60_000 },
+    maxDelayMs: { min: 1_000, max: 600_000 },
+    multiplier: { min: 1, max: 10 },
+    jitterFactor: { min: 0, max: 1 },
+  },
+  webhookCircuitBreaker: {
+    failureThreshold: { min: 1, max: 100 },
+    successThreshold: { min: 1, max: 20 },
+    timeoutMs: { min: 1_000, max: 300_000 },
+  },
+  healthProbes: {
+    queueFailedThreshold: { min: 0, max: 10_000 },
+    queueBacklogThreshold: { min: 0, max: 1_000_000 },
+    queueProbeTimeoutMs: { min: 100, max: 30_000 },
+  },
+} as const;
+
 function toNumber(value: string | undefined, fallback: number): number {
   if (value === undefined || value === null) {
     return fallback;

@@ -15,7 +15,7 @@ describe('audit idempotency state invariants', () => {
   it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid maxSize %s', maxSize => {
     expect(() => new IdempotencyStore({ maxSize })).toThrow(RangeError);
   });
-  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid ttlMs %s', ttlMs => {
+  it.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid ttlMs %s', ttlMs => {
     expect(() => new IdempotencyStore({ ttlMs })).toThrow(RangeError);
   });
   it.each(['', ' ', '\n', 'x'.repeat(257)])('rejects invalid keys without touching a full store', key => {

@@ -27,11 +27,13 @@ import {
   auditQueryResultResponseSchema,
   auditLegacyQueryResponseSchema,
   integrityReportResponseSchema,
+  auditDomainActionSchema,
   AUDIT_ACTIONS as SCHEMA_ACTIONS,
 } from './schemas';
 import {
   encodeCursor,
-  AUDIT_ACTIONS as DOMAIN_ACTIONS,
+  AUDIT_ACTIONS as TYPES_AUDIT_ACTIONS,
+  AUDIT_DOMAIN_ACTIONS as DOMAIN_ACTIONS,
   AUDIT_SEVERITIES as DOMAIN_SEVERITIES,
 } from './types';
 import {
@@ -512,19 +514,27 @@ function nest(depth: number): Record<string, unknown> {
 }
 
 describe('enum parity with the domain (drift regression)', () => {
-  it('re-exports exactly the domain action list', () => {
-    expect(SCHEMA_ACTIONS).toEqual(DOMAIN_ACTIONS);
+  it('re-exports exactly the public write action list', () => {
+    expect(SCHEMA_ACTIONS).toEqual(TYPES_AUDIT_ACTIONS);
   });
 
-  it('exposes exactly the domain values through the zod enums', () => {
-    expect(auditActionSchema.options).toEqual([...DOMAIN_ACTIONS]);
+  it('exposes exactly the public write values through the write zod enum', () => {
+    expect(auditActionSchema.options).toEqual([...TYPES_AUDIT_ACTIONS]);
     expect(auditSeveritySchema.options).toEqual([...DOMAIN_SEVERITIES]);
   });
 
-  it('accepts every domain action on the write path', () => {
-    for (const action of DOMAIN_ACTIONS) {
+  it('accepts every public action on the write path', () => {
+    for (const action of TYPES_AUDIT_ACTIONS) {
       expect(createAuditEntryBodySchema.safeParse(makeBody({ action })).success).toBe(true);
     }
+  });
+
+  it('accepts internal domain actions on response paths, not public writes or queries', () => {
+    const internalAction = 'MILESTONES_CREATED';
+    expect(auditDomainActionSchema.safeParse(internalAction).success).toBe(true);
+    expect(auditActionSchema.safeParse(internalAction).success).toBe(false);
+    expect(createAuditEntryBodySchema.safeParse(makeBody({ action: internalAction })).success).toBe(false);
+    expect(buildAuditQuerySchema({ maxLimit: 100 }).safeParse({ action: internalAction }).success).toBe(false);
   });
 
   it('accepts every domain severity on the write path', () => {
@@ -692,10 +702,11 @@ describe('createAuditEntryBodySchema — metadata data-integrity invariants', ()
 describe('buildAuditQuerySchema — invariants and legacy quirk', () => {
   const schema = buildAuditQuerySchema({ defaultLimit: 50, maxLimit: 100 });
 
-  it('accepts every domain action as a filter (enum parity)', () => {
-    for (const action of DOMAIN_ACTIONS) {
+  it('accepts every public action as a filter', () => {
+    for (const action of TYPES_AUDIT_ACTIONS) {
       expect(schema.safeParse({ action }).success).toBe(true);
     }
+    expect(schema.safeParse({ action: 'MILESTONES_CREATED' }).success).toBe(false);
   });
 
   it('keeps a limit exactly at maxLimit and clamps one above it', () => {

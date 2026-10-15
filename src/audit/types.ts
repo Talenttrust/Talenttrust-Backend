@@ -40,7 +40,6 @@ export const AUDIT_ACTIONS = Object.freeze([
   'CONTRACT_UPDATED',
   'CONTRACT_CANCELLED',
   'CONTRACT_COMPLETED',
-  'CONTRACT_DELETED',
   'PAYMENT_INITIATED',
   'PAYMENT_RELEASED',
   'PAYMENT_DISPUTED',
@@ -59,13 +58,10 @@ export const AUDIT_ACTIONS = Object.freeze([
   'ENDPOINT_MUTATION',
   'DEPLOYMENT_PROMOTED',
   'DEPLOYMENT_ROLLED_BACK',
-  'MILESTONES_CREATED',
-  'MILESTONES_UPDATED',
-  'MILESTONES_DELETED',
 ] as const);
 
 /** Categories of sensitive state changes that must be audited. */
-export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+export type AuditAction = (typeof AUDIT_DOMAIN_ACTIONS)[number];
 
 /**
  * Every member of the {@link AuditAction} union, as a runtime value list.
@@ -111,7 +107,7 @@ export const AUDIT_DOMAIN_ACTIONS = [
   'MILESTONES_CREATED',
   'MILESTONES_UPDATED',
   'MILESTONES_DELETED',
-] as const satisfies readonly AuditAction[];
+] as const;
 
 /**
  * Compile-time exhaustiveness guard for {@link AUDIT_DOMAIN_ACTIONS}.
@@ -243,11 +239,16 @@ export interface CursorData {
 /** Maximum accepted encoded audit cursor size (8 KiB). */
 export const MAX_AUDIT_CURSOR_LENGTH = 8_192;
 
-const AUDIT_ACTION_SET: ReadonlySet<string> = new Set(AUDIT_ACTIONS);
+const AUDIT_ACTION_SET: ReadonlySet<string> = new Set(AUDIT_DOMAIN_ACTIONS);
 const AUDIT_SEVERITY_SET: ReadonlySet<string> = new Set(AUDIT_SEVERITIES);
+const AUDIT_DOMAIN_ACTION_SET: ReadonlySet<string> = AUDIT_ACTION_SET;
 const CURSOR_FILTER_KEYS = new Set([
   'action', 'severity', 'actor', 'resource', 'resourceId', 'from', 'to',
 ]);
+
+export function isAuditAction(value: unknown): value is AuditAction {
+  return typeof value === 'string' && AUDIT_DOMAIN_ACTION_SET.has(value);
+}
 
 function isCanonicalIsoTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -277,7 +278,7 @@ function isCursorData(value: unknown): value is CursorData {
   for (const [key, filter] of Object.entries(filters)) {
     if (filter === undefined) continue;
     if (key === 'action') {
-      if (typeof filter !== 'string' || !AUDIT_ACTION_SET.has(filter)) return false;
+      if (!isAuditAction(filter)) return false;
     } else if (key === 'severity') {
       if (typeof filter !== 'string' || !AUDIT_SEVERITY_SET.has(filter)) return false;
     } else if (key === 'from' || key === 'to') {

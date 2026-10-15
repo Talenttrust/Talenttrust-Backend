@@ -137,7 +137,10 @@ export const createAuditEntryBodySchema = z.object({
   metadata: auditMetadataSchema,
   ipAddress: auditIpAddressSchema,
   correlationId: auditCorrelationIdSchema,
-});
+}).transform((value) => ({
+  ...value,
+  metadata: structuredClone(value.metadata),
+}));
 
 export type CreateAuditEntryBody = z.infer<typeof createAuditEntryBodySchema>;
 
@@ -148,6 +151,8 @@ export type CreateAuditEntryBody = z.infer<typeof createAuditEntryBodySchema>;
  * rejection while leaving every other accepted spelling untouched.
  */
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const ZONED_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * A parseable timestamp, normalised to canonical ISO-8601 UTC.
@@ -163,6 +168,7 @@ const isoDateStringSchema = (fieldName: string) =>
     .string()
     .refine(
       (value) => {
+        if (!DATE_ONLY_PATTERN.test(value) && !ZONED_TIMESTAMP_PATTERN.test(value)) return false;
         const parsed = Date.parse(value);
         if (Number.isNaN(parsed)) return false;
         if (!DATE_ONLY_PATTERN.test(value)) return true;
@@ -186,7 +192,7 @@ const canonicalIntStringSchema = (message: string, minimum: number) =>
     .string()
     .refine((value) => {
       const parsed = Number.parseInt(value, 10);
-      return Number.isFinite(parsed) && String(parsed) === value.trim() && parsed >= minimum;
+      return Number.isSafeInteger(parsed) && String(parsed) === value.trim() && parsed >= minimum;
     }, { message })
     .transform((value) => Number.parseInt(value, 10));
 
@@ -523,7 +529,7 @@ export const auditEntryResponseSchema = z.object({
 export const auditQueryResultResponseSchema = z.object({
   entries: z.array(auditEntryResponseSchema),
   count: nonNegativeInt().max(Number.MAX_SAFE_INTEGER),
-  limit: nonNegativeInt(),
+  limit: nonNegativeInt().positive(),
   nextCursor: z.string().min(1).optional(),
 });
 

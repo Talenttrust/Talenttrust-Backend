@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { isSafeUrl } from '../utils/ssrf';
 import { parseFinalityDepths } from '../finality/policy';
-import { appConfigSchema } from '../appConfiguration';
 
 
 /**
@@ -10,10 +9,8 @@ import { appConfigSchema } from '../appConfiguration';
  * This schema defines the structure and validation rules for all 
  * required and optional environment variables used by the application.
  * 
- * Validation boundaries for `src/appConfiguration.ts` are enforced here:
- * the `APP_CONFIG` variable is parsed through `appConfigSchema`, which
- * defines the accepted shape, rejects unknown keys, and applies
- * deterministic defaults for boundary/duplicate inputs.
+ * Runtime environment variables are parsed here. Application configuration
+ * is loaded separately by `src/appConfiguration.ts`.
  *
  * @security
  *  - Do not log secret values in error messages.
@@ -305,17 +302,6 @@ export const envObjectSchema = z.object({
     .default('100')
     .transform((val) => parseInt(val, 10))
     .pipe(z.number().int().min(VALIDATION_BOUNDS.DISPUTES_CACHE_MAX_ENTRIES_MIN, 'DISPUTES_CACHE_MAX_ENTRIES must be a positive integer').max(VALIDATION_BOUNDS.DISPUTES_CACHE_MAX_ENTRIES_MAX)),
-
-  // Auth Cache Configuration
-  AUTH_CACHE_TTL_MS: z.string()
-    .default('5000')
-    .transform((val) => parseInt(val, 10))
-    .pipe(z.number().int().positive('AUTH_CACHE_TTL_MS must be a positive integer').max(300_000)),
-
-  AUTH_CACHE_MAX_ENTRIES: z.string()
-    .default('100')
-    .transform((val) => parseInt(val, 10))
-    .pipe(z.number().int().positive('AUTH_CACHE_MAX_ENTRIES must be a positive integer').max(10000)),
 
   // API-key auth cache configuration.
   //

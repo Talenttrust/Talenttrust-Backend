@@ -77,7 +77,7 @@ const DEFAULT_TTL_MS = 86_400_000;
 // the published runtime list; this store must accept existing typed producers.
 const actions = new Set<string>([...AUDIT_ACTIONS, 'CONTRACT_DELETED', 'MILESTONES_CREATED', 'MILESTONES_UPDATED', 'MILESTONES_DELETED']);
 
-export class AuditIdempotencyError extends Error {
+export class AuditIdempotencyError extends TypeError {
   constructor(readonly code: 'audit_idempotency_invalid_input' | 'audit_idempotency_conflict') {
     super(code === 'audit_idempotency_conflict'
       ? 'Audit idempotency key is already bound to a different payload'
@@ -176,20 +176,22 @@ export class IdempotencyStore {
   private readonly maxSize: number;
   private readonly ttlMs: number;
   private readonly clock: () => number;
+  private lastNow = 0;
 
   constructor(options: IdempotencyStoreOptions = {}) {
     const maxSize = options.maxSize ?? DEFAULT_MAX_SIZE;
     const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
 
-    if (!Number.isFinite(maxSize) || maxSize < 1) {
+    if (!Number.isSafeInteger(maxSize) || maxSize < 1) {
       throw new RangeError('IdempotencyStore maxSize must be a positive integer');
     }
-    if (!Number.isFinite(ttlMs) || ttlMs < 0) {
-      throw new RangeError('IdempotencyStore ttlMs must be a non-negative number');
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 0) {
+      throw new RangeError('IdempotencyStore ttlMs must be a non-negative safe integer');
     }
 
-    this.maxSize = Math.floor(maxSize);
+    this.maxSize = maxSize;
     this.ttlMs = ttlMs;
+    this.clock = options.clock ?? (() => Date.now());
   }
 
   /**
@@ -236,12 +238,7 @@ export class IdempotencyStore {
     const record = Object.freeze({ bodyHash, response: responseSnapshot, createdAt: now });
     this.evictExpired(now);
 
-    if (this.store.size >= this.maxSize) {
-      const oldestKey = this.store.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.store.delete(oldestKey);
-      }
-    }
+    if (!this.store.has(key)) this.ensureCapacity();
 
     // No await or caller callbacks between inspecting and publishing the state.
     this.store.set(key, record);
@@ -269,20 +266,9 @@ export class IdempotencyStore {
   }
 
   private ensureCapacity(): void {
-    if (this.store.size < this.maxSize) {
-      return;
-    }
-
     // Evict the oldest committed record. We never evict in-flight keys
     // because that would allow a concurrent caller to claim the same key
     // and produce a duplicate audit entry.
-    const oldestKey = this.store.keys().next().value;
-    if (oldestKey !== undefined) {
-      this.store.delete(oldestKey);
-    }
-  }
-
-  private ensureCapacity(): void {
     while (this.store.size >= this.maxSize) {
       const oldestKey = this.store.keys().next().value;
       if (oldestKey === undefined) {
@@ -292,40 +278,43 @@ export class IdempotencyStore {
     }
   }
 
-  private write(
-    key: string,
-    input: CreateAuditEntryInput,
-    response: AuditEntry,
-  ): IdempotencyRecord {
-    this.evictExpired();
-
-    // Ensure the key being written is accounted for in the capacity check.
-    if (!this.store.has(key) && this.store.size >= this.maxSize) {
-      const oldestKey = this.store.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.store.delete(oldestKey);
-      }
-    }
-
-    const record: IdempotencyRecord = {
-      bodyHash: hashBody(input),
-      response,
-      createdAt: Date.now(),
-    };
-    this.store.set(key, record);
-    return record;
-  }
-
-  private isExpired(record: IdempotencyRecord, now: number): boolean {
-    return now - record.createdAt > this.ttlMs;
-  }
-
   private now(): number {
-    const now = Date.now();
+    const now = this.clock();
     if (!Number.isSafeInteger(now) || now < 0) throw new AuditIdempotencyError('audit_idempotency_invalid_input');
     // A wall-clock rollback must not make an already-aged record young again.
     this.lastNow = Math.max(this.lastNow, now);
     return this.lastNow;
+  }
+
+  resolve(key: string, input: CreateAuditEntryInput): IdempotencyOutcome {
+    validateKey(key);
+    const record = this.get(key);
+    if (!record) return { kind: 'miss' };
+    const incomingBodyHash = hashBody(input);
+    if (record.bodyHash !== incomingBodyHash) {
+      return {
+        kind: 'conflict',
+        existingBodyHash: record.bodyHash,
+        incomingBodyHash,
+      };
+    }
+    return { kind: 'replay', record };
+  }
+
+  setIfAbsent(
+    key: string,
+    input: CreateAuditEntryInput,
+    response: AuditEntry,
+  ): IdempotencySetResult {
+    validateKey(key);
+    const existing = this.get(key);
+    if (existing) {
+      return { written: false, existing: true, record: existing };
+    }
+    this.set(key, input, response);
+    const record = this.get(key);
+    if (!record) throw new AuditIdempotencyError('audit_idempotency_invalid_input');
+    return { written: true, existing: false, record };
   }
 
   private evictExpired(now = this.now()): void {

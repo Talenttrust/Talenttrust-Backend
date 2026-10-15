@@ -132,7 +132,7 @@ describe('IdempotencyStore', () => {
 
     it('handles empty metadata deterministically', () => {
       const input1 = makeInput({ metadata: {} });
-      const input2 = makeInput();
+      const input2 = makeInput({ metadata: {} });
       expect(hashIdempotencyInput(input1)).toBe(hashIdempotencyInput(input2));
     });
   });
@@ -160,8 +160,8 @@ describe('IdempotencyStore', () => {
       const outcome = store.resolve('key-1', makeInput({ actor: 'other' }));
       expect(outcome.kind).toBe('conflict');
       if (outcome.kind === 'conflict') {
-        expect(outcome.existingBodyHash).toBe(outcome.incomingBodyHash);
-        expect(outcome.existingBodyHash).not.toBe(hashIdempotencyInput(makeInput()));
+        expect(outcome.existingBodyHash).not.toBe(outcome.incomingBodyHash);
+        expect(outcome.existingBodyHash).toBe(hashIdempotencyInput(makeInput()));
       }
     });
 
@@ -270,7 +270,7 @@ describe('IdempotencyStore', () => {
       expect(bounded.size()).toBe(2);
     });
 
-    it('replacing an existing key does not evict another entry', () => {
+    it('replaying an existing key does not evict or replace another entry', () => {
       const bounded = new IdempotencyStore({ maxSize: 2, ttlMs: 60_000 });
       const input = makeInput();
 
@@ -279,7 +279,7 @@ describe('IdempotencyStore', () => {
       bounded.set('key-2', input, makeEntry('e2-updated', input));
 
       expect(bounded.get('key-1')).toBeDefined();
-      expect(bounded.get('key-2')!.response.id).toBe('e2-updated');
+      expect(bounded.get('key-2')!.response.id).toBe('e2');
       expect(bounded.size()).toBe(2);
     });
   });

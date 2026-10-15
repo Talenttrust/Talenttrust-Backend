@@ -178,12 +178,12 @@ describe('Environment Configuration', () => {
       expect(() => loadEnvironmentConfig()).toThrow();
     });
 
-    it('should use empty array when CORS_ALLOWED_ORIGINS is set to empty string', () => {
+    it('should use development defaults when CORS_ALLOWED_ORIGINS is empty', () => {
       process.env.NODE_ENV = 'development';
       process.env.CORS_ALLOWED_ORIGINS = '';
       const config = loadEnvironmentConfig();
 
-      expect(config.corsOrigins).toEqual([]);
+      expect(config.corsOrigins).toEqual(['http://localhost:3000']);
     });
 
     it('should handle DEBUG=false', () => {

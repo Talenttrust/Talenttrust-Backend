@@ -45,6 +45,7 @@ import { CreateAuditEntrySchema } from './inputValidation';
 import { redactBody } from './redact';
 import { sanitizeCorrelationId } from '../utils/correlationId';
 import { AppError } from '../errors/appError';
+import { randomUUID } from 'crypto';
 
 type RequestAuditInput = Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>;
 
@@ -82,8 +83,6 @@ function prepareInput(input: RequestAuditInput): RequestAuditInput {
     throw new AppError(400, 'validation_error', 'Invalid audit event');
   }
 }
-
-import { auditCache } from './auditCache';
 
 // ── Validation constants ──────────────────────────────────────────────────────
 
@@ -242,7 +241,7 @@ export const NOOP_ENTRY_PREVIOUS_HASH = 'GENESIS';
  * @returns A frozen, structurally complete `AuditEntry` stub.
  */
 function buildNoopEntry(
-  input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>,
+  input: CreateAuditEntryInput,
 ): AuditEntry {
   // Provide deterministic fallback values for every required field so the
   // stub is safe to destructure even if the caller passes a partial object.
@@ -272,6 +271,8 @@ function buildNoopEntry(
       typeof input.metadata === 'object' && input.metadata !== null && !Array.isArray(input.metadata)
         ? (input.metadata as Record<string, unknown>)
         : {},
+    ipAddress: input.ipAddress,
+    correlationId: input.correlationId,
   });
 }
 
@@ -363,7 +364,10 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   // is attached to res.locals, so every audit entry emitted by the same
   // request gets the same validated values.
   const ipAddress = sanitizeIpAddress(req.ip ?? req.socket?.remoteAddress);
-  const correlationId = sanitizeCorrelationId(req.headers['x-correlation-id']);
+  const rawCorrelationId = req.headers['x-correlation-id'];
+  const correlationId =
+    sanitizeCorrelationId(rawCorrelationId) ??
+    (rawCorrelationId === undefined || rawCorrelationId === '' ? randomUUID() : undefined);
 
   // Cache the normalised request context once so every log() call from this
   // request uses the same validated ipAddress/correlationId pair, even if
@@ -376,16 +380,15 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   // the service's hash-chain / serialisation invariants.
   res.locals.audit = {
     log(input: Omit<CreateAuditEntryInput, 'ipAddress' | 'correlationId'>): AuditEntry {
-      return auditService.log({ ...input, ...requestContext });
+      const completeInput = { ...input, ...requestContext };
+      try {
+        return auditService.log(completeInput);
+      } catch {
+        console.error('[AuditMiddleware] Failed to persist audit entry');
+        return buildNoopEntry(completeInput);
+      }
     },
   } satisfies RequestAuditHelper;
-
-  // Ensure the audit cache is bounded for this request lifecycle. This is
-  // idempotent and safe to call concurrently; it only evicts expired or
-  // over-capacity entries and never throws.
-  if (typeof auditCache.prune === 'function') {
-    auditCache.prune();
-  }
 
   next();
 }

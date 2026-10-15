@@ -54,7 +54,7 @@ import type {
   IntegrityReport,
   AuditQueryResult,
 } from './types';
-import type { AuditExportService, AuditExportResult } from './exportService';
+import { encodeCursor } from './types';
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
 
