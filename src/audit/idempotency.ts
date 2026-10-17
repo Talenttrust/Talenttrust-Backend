@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { AuditEntry, CreateAuditEntryInput } from './types';
+import { validateCreateAuditEntryInput } from './inputValidation';
 
 export interface IdempotencyRecord {
   bodyHash: string;
@@ -14,15 +15,79 @@ export interface IdempotencyStoreOptions {
 
 const DEFAULT_MAX_SIZE = 1000;
 const DEFAULT_TTL_MS = 86_400_000;
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+
+export class IdempotencyConflictError extends Error {
+  constructor() {
+    super('Idempotency key is already associated with different audit input');
+    this.name = 'IdempotencyConflictError';
+  }
+}
+
+function validateKey(key: string): void {
+  if (
+    typeof key !== 'string' ||
+    key.length === 0 ||
+    key.length > MAX_IDEMPOTENCY_KEY_LENGTH ||
+    /^\s+$/.test(key) ||
+    /[\u0000-\u001F\u007F-\u009F]/.test(key)
+  ) {
+    throw new TypeError(`Idempotency key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} non-control characters`);
+  }
+}
+
+function validateInput(input: CreateAuditEntryInput): CreateAuditEntryInput {
+  const result = validateCreateAuditEntryInput(input);
+  if (!result.ok) {
+    throw new TypeError('Invalid audit idempotency input');
+  }
+  return result.data;
+}
+
+function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      throw new TypeError('Audit idempotency input is not serializable');
+    }
+    return serialized;
+  }
+
+  if (Array.isArray(value)) {
+    if (
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Object.getOwnPropertySymbols(value).length > 0 ||
+      Array.from({ length: value.length }, (_, index) => index).some(
+        (index) => !Object.prototype.hasOwnProperty.call(value, index),
+      )
+    ) {
+      throw new TypeError('Audit idempotency input is not serializable');
+    }
+    return `[${value.map(canonicalize).join(',')}]`;
+  }
+
+  // Class instances can serialize differently while exposing no enumerable keys.
+  const object = value as Record<string, unknown>;
+  const prototype = Object.getPrototypeOf(object);
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    Object.getOwnPropertySymbols(object).length > 0
+  ) {
+    throw new TypeError('Audit idempotency input is not serializable');
+  }
+  const keys = Object.keys(object).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(object[key])}`).join(',')}}`;
+}
 
 function hashBody(input: CreateAuditEntryInput): string {
-  const payload = JSON.stringify({
-    action: input.action,
-    severity: input.severity,
-    actor: input.actor,
-    resource: input.resource,
-    resourceId: input.resourceId,
-    metadata: input.metadata,
+  const validated = validateInput(input);
+  const payload = canonicalize({
+    action: validated.action,
+    severity: validated.severity,
+    actor: validated.actor,
+    resource: validated.resource,
+    resourceId: validated.resourceId,
+    metadata: validated.metadata,
   });
   return createHash('sha256').update(payload, 'utf8').digest('hex');
 }
@@ -35,15 +100,23 @@ export class IdempotencyStore {
   constructor(options: IdempotencyStoreOptions = {}) {
     this.maxSize = options.maxSize ?? DEFAULT_MAX_SIZE;
     this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+
+    if (!Number.isSafeInteger(this.maxSize) || this.maxSize <= 0) {
+      throw new RangeError('maxSize must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(this.ttlMs) || this.ttlMs <= 0) {
+      throw new RangeError('ttlMs must be a positive safe integer');
+    }
   }
 
   get(key: string): IdempotencyRecord | undefined {
+    validateKey(key);
     const record = this.store.get(key);
     if (!record) {
       return undefined;
     }
 
-    if (Date.now() - record.createdAt > this.ttlMs) {
+    if (Date.now() - record.createdAt >= this.ttlMs) {
       this.store.delete(key);
       return undefined;
     }
@@ -52,7 +125,18 @@ export class IdempotencyStore {
   }
 
   set(key: string, input: CreateAuditEntryInput, response: AuditEntry): void {
+    validateKey(key);
+    const bodyHash = hashBody(input);
     this.evictExpired();
+
+    // A live key is write-once: matching retries preserve the first response.
+    const existing = this.store.get(key);
+    if (existing) {
+      if (existing.bodyHash !== bodyHash) {
+        throw new IdempotencyConflictError();
+      }
+      return;
+    }
 
     if (this.store.size >= this.maxSize) {
       const oldestKey = this.store.keys().next().value;
@@ -62,13 +146,14 @@ export class IdempotencyStore {
     }
 
     this.store.set(key, {
-      bodyHash: hashBody(input),
+      bodyHash,
       response,
       createdAt: Date.now(),
     });
   }
 
   delete(key: string): void {
+    validateKey(key);
     this.store.delete(key);
   }
 
@@ -84,7 +169,7 @@ export class IdempotencyStore {
   private evictExpired(): void {
     const now = Date.now();
     for (const [key, record] of this.store) {
-      if (now - record.createdAt > this.ttlMs) {
+      if (now - record.createdAt >= this.ttlMs) {
         this.store.delete(key);
       }
     }

@@ -1,4 +1,4 @@
-import { IdempotencyStore, hashIdempotencyInput } from './idempotency';
+import { IdempotencyConflictError, IdempotencyStore, hashIdempotencyInput } from './idempotency';
 import type { CreateAuditEntryInput, AuditEntry } from './types';
 
 function makeInput(overrides: Partial<CreateAuditEntryInput> = {}): CreateAuditEntryInput {
@@ -74,16 +74,60 @@ describe('IdempotencyStore', () => {
       expect(store.get('key-2')!.response.actor).toBe('bob');
     });
 
-    it('overwrites an existing key on re-set', () => {
+    it('keeps the original response for an identical duplicate', () => {
+      const input = makeInput();
+      const firstEntry = makeEntry('entry-1', input);
+      const duplicateEntry = makeEntry('entry-2', input);
+
+      store.set('key-1', input, firstEntry);
+      store.set('key-1', input, duplicateEntry);
+
+      expect(store.get('key-1')!.response.id).toBe('entry-1');
+    });
+
+    it('rejects reuse of a key for different input without replacing the record', () => {
       const input1 = makeInput({ actor: 'alice' });
       const input2 = makeInput({ actor: 'bob' });
       const entry1 = makeEntry('entry-1', input1);
       const entry2 = makeEntry('entry-2', input2);
 
       store.set('key-1', input1, entry1);
-      store.set('key-1', input2, entry2);
+      expect(() => store.set('key-1', input2, entry2)).toThrow(IdempotencyConflictError);
 
-      expect(store.get('key-1')!.response.actor).toBe('bob');
+      expect(store.get('key-1')!.response.actor).toBe('alice');
+    });
+
+    it.each(['', '   ', 'bad\nkey', 'x'.repeat(256)])('rejects invalid keys: %j', (key) => {
+      expect(() => store.get(key)).toThrow(TypeError);
+      expect(() => store.set(key, makeInput(), makeEntry('entry-1', makeInput()))).toThrow(TypeError);
+      expect(() => store.delete(key)).toThrow(TypeError);
+    });
+
+    it('accepts a key at the maximum supported length', () => {
+      const input = makeInput();
+      const key = 'x'.repeat(255);
+      store.set(key, input, makeEntry('entry-1', input));
+
+      expect(store.get(key)?.response.id).toBe('entry-1');
+    });
+
+    it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid maxSize: %p', (maxSize) => {
+      expect(() => new IdempotencyStore({ maxSize })).toThrow(RangeError);
+    });
+
+    it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid ttlMs: %p', (ttlMs) => {
+      expect(() => new IdempotencyStore({ ttlMs })).toThrow(RangeError);
+    });
+
+    it('accepts the smallest valid store limits', () => {
+      expect(() => new IdempotencyStore({ maxSize: 1, ttlMs: 1 })).not.toThrow();
+    });
+
+    it('rejects malformed audit input before storing it', () => {
+      const invalidInput = makeInput({ actor: '' });
+      expect(() => hashIdempotencyInput(invalidInput)).toThrow(TypeError);
+      expect(() => store.set('key-1', invalidInput, makeEntry('entry-1', invalidInput))).toThrow(TypeError);
+      expect(store.size()).toBe(0);
     });
   });
 
@@ -98,6 +142,23 @@ describe('IdempotencyStore', () => {
       const input1 = makeInput({ actor: 'alice' });
       const input2 = makeInput({ actor: 'bob' });
       expect(hashIdempotencyInput(input1)).not.toBe(hashIdempotencyInput(input2));
+    });
+
+    it('canonicalizes metadata object keys while preserving array order', () => {
+      const input1 = makeInput({ metadata: { nested: { a: 1, b: 2 }, list: [1, 2] } });
+      const input2 = makeInput({ metadata: { list: [1, 2], nested: { b: 2, a: 1 } } });
+      const input3 = makeInput({ metadata: { list: [2, 1], nested: { b: 2, a: 1 } } });
+
+      expect(hashIdempotencyInput(input1)).toBe(hashIdempotencyInput(input2));
+      expect(hashIdempotencyInput(input1)).not.toBe(hashIdempotencyInput(input3));
+    });
+
+    it('rejects non-JSON object values instead of colliding with empty metadata', () => {
+      const emptyMetadata = makeInput({ metadata: {} });
+      const dateMetadata = makeInput({ metadata: new Date('2026-01-01T00:00:00.000Z') as unknown as Record<string, unknown> });
+
+      expect(() => hashIdempotencyInput(dateMetadata)).toThrow(TypeError);
+      expect(() => hashIdempotencyInput(emptyMetadata)).not.toThrow();
     });
 
     it('hash is deterministic regardless of ipAddress/correlationId', () => {
@@ -134,6 +195,38 @@ describe('IdempotencyStore', () => {
       const store = new IdempotencyStore({ ttlMs: 60_000, maxSize: 100 });
       store.set('key-1', makeInput(), makeEntry('e1', makeInput()));
       expect(store.size()).toBe(1);
+    });
+
+    it('expires an entry exactly at the TTL boundary', () => {
+      jest.useFakeTimers();
+      try {
+        const store = new IdempotencyStore({ ttlMs: 100 });
+        const input = makeInput();
+        store.set('key-1', input, makeEntry('entry-1', input));
+
+        jest.advanceTimersByTime(100);
+
+        expect(store.get('key-1')).toBeUndefined();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('allows a key to be reused at the TTL boundary', () => {
+      jest.useFakeTimers();
+      try {
+        const store = new IdempotencyStore({ ttlMs: 100 });
+        const originalInput = makeInput({ actor: 'alice' });
+        const replacementInput = makeInput({ actor: 'bob' });
+        store.set('key-1', originalInput, makeEntry('entry-1', originalInput));
+
+        jest.advanceTimersByTime(100);
+        store.set('key-1', replacementInput, makeEntry('entry-2', replacementInput));
+
+        expect(store.get('key-1')?.response.id).toBe('entry-2');
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
