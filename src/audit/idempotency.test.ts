@@ -85,6 +85,35 @@ describe('IdempotencyStore', () => {
       expect(store.get('key-1')!.response.id).toBe('entry-1');
     });
 
+    it('isolates stored records from mutations by callers', () => {
+      const input = makeInput({ metadata: { nested: { note: 'test' } } });
+      const entry: AuditEntry = {
+        ...makeEntry('entry-1', input),
+        metadata: JSON.parse(JSON.stringify(input.metadata)) as Record<string, unknown>,
+      };
+      store.set('key-1', input, entry);
+
+      entry.actor = 'mutated';
+      ((entry.metadata.nested as Record<string, unknown>).note) = 'mutated';
+      const retrieved = store.get('key-1')!;
+      retrieved.bodyHash = 'tampered';
+      (((retrieved.response.metadata.nested as Record<string, unknown>).note)) = 'also mutated';
+
+      expect(() => store.set('key-1', input, makeEntry('entry-2', input))).not.toThrow();
+      expect(store.get('key-1')?.response.actor).toBe('user-abc');
+      expect(
+        (store.get('key-1')?.response.metadata.nested as Record<string, unknown>).note,
+      ).toBe('test');
+    });
+
+    it('rejects an invalid response without storing the key', () => {
+      const input = makeInput();
+      const invalidResponse = makeEntry('entry-1', makeInput({ actor: '' }));
+
+      expect(() => store.set('key-1', input, invalidResponse)).toThrow(TypeError);
+      expect(store.get('key-1')).toBeUndefined();
+    });
+
     it('rejects reuse of a key for different input without replacing the record', () => {
       const input1 = makeInput({ actor: 'alice' });
       const input2 = makeInput({ actor: 'bob' });

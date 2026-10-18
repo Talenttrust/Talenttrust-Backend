@@ -44,6 +44,44 @@ function validateInput(input: CreateAuditEntryInput): CreateAuditEntryInput {
   return result.data;
 }
 
+function snapshotResponse(response: AuditEntry): AuditEntry {
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+    throw new TypeError('Invalid audit idempotency response');
+  }
+
+  for (const field of ['id', 'timestamp', 'hash', 'previousHash'] as const) {
+    if (typeof response[field] !== 'string' || response[field].length === 0) {
+      throw new TypeError('Invalid audit idempotency response');
+    }
+  }
+
+  const input = validateInput({
+    action: response.action,
+    severity: response.severity,
+    actor: response.actor,
+    resource: response.resource,
+    resourceId: response.resourceId,
+    metadata: response.metadata,
+    ...(response.ipAddress !== undefined && { ipAddress: response.ipAddress }),
+    ...(response.correlationId !== undefined && { correlationId: response.correlationId }),
+  });
+
+  return {
+    id: response.id,
+    timestamp: response.timestamp,
+    action: input.action,
+    severity: input.severity,
+    actor: input.actor,
+    resource: input.resource,
+    resourceId: input.resourceId,
+    metadata: JSON.parse(canonicalize(input.metadata)) as Record<string, unknown>,
+    ipAddress: input.ipAddress,
+    correlationId: input.correlationId,
+    previousHash: response.previousHash,
+    hash: response.hash,
+  };
+}
+
 function canonicalize(value: unknown): string {
   if (value === null || typeof value !== 'object') {
     const serialized = JSON.stringify(value);
@@ -121,7 +159,11 @@ export class IdempotencyStore {
       return undefined;
     }
 
-    return record;
+    return {
+      bodyHash: record.bodyHash,
+      response: snapshotResponse(record.response),
+      createdAt: record.createdAt,
+    };
   }
 
   set(key: string, input: CreateAuditEntryInput, response: AuditEntry): void {
@@ -138,6 +180,8 @@ export class IdempotencyStore {
       return;
     }
 
+    const responseSnapshot = snapshotResponse(response);
+
     if (this.store.size >= this.maxSize) {
       const oldestKey = this.store.keys().next().value;
       if (oldestKey) {
@@ -147,7 +191,7 @@ export class IdempotencyStore {
 
     this.store.set(key, {
       bodyHash,
-      response,
+      response: responseSnapshot,
       createdAt: Date.now(),
     });
   }
