@@ -1,11 +1,14 @@
 import { config, explorerUrl } from './config';
 
+
 const json = (schema: object) => ({ 'application/json': { schema } });
+const errContent = () => json({ $ref: '#/components/schemas/Error' });
 const ok = (description: string, schema: object = { type: 'object' }) => ({
   200: { description, content: json(schema) },
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const evidenceRef = { $ref: '#/components/schemas/DisputeEvidence' };
 
 export const openapi = {
   openapi: '3.0.3',
@@ -18,7 +21,7 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Disputes' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -89,10 +92,72 @@ export const openapi = {
         responses: ok('Updated contract', contractRef),
       },
     },
+    '/api/v1/contracts/{id}/dispute/evidence': {
+      post: {
+        tags: ['Disputes'],
+        summary: 'Submit a dispute evidence item',
+        description:
+          'Attaches a structured, content-hashed evidence item to an open dispute. ' +
+          'Only the contract client or freelancer may submit (403 forbidden). ' +
+          'Contract must be Disputed (409 dispute_not_open) and not yet resolved (409 dispute_closed). ' +
+          'At most 20 items per party per dispute (409 evidence_limit_reached). ' +
+          'Kind-specific fields are validated (400 invalid_evidence).',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['submittedBy', 'kind'],
+            properties: {
+              submittedBy: { type: 'string', description: 'Contract client or freelancer address' },
+              kind: { type: 'string', enum: ['text', 'link', 'file_hash'] },
+              text: { type: 'string', maxLength: 4000, description: 'Required for kind=text' },
+              url: { type: 'string', format: 'uri', description: 'Required for kind=link; must be https' },
+              sha256: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'Required for kind=file_hash; 64 lowercase hex' },
+              fileName: { type: 'string', maxLength: 200, description: 'Optional for kind=file_hash' },
+            },
+          }),
+        },
+        responses: {
+          201: { description: 'Evidence item created', content: json(evidenceRef) },
+          400: { description: 'invalid_evidence', content: errContent() },
+          403: { description: 'forbidden', content: errContent() },
+          404: { description: 'Contract not found', content: errContent() },
+          409: {
+            description: 'dispute_not_open | dispute_closed | evidence_limit_reached',
+            content: errContent(),
+          },
+        },
+      },
+      get: {
+        tags: ['Disputes'],
+        summary: 'List dispute evidence with integrity digest',
+        description:
+          'Returns all evidence items for the contract dispute ordered by submittedAt, ' +
+          'together with digest = sha256 over the canonical JSON of all items. The digest is ' +
+          'stored on the dispute as evidenceDigest when the dispute is resolved.',
+        parameters: [idParam],
+        responses: {
+          200: {
+            description: 'Evidence items and digest',
+            content: json({
+              type: 'object',
+              required: ['data', 'digest'],
+              properties: {
+                data: { type: 'array', items: evidenceRef },
+                digest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+              },
+            }),
+          },
+          404: { description: 'Contract not found', content: errContent() },
+        },
+      },
+    },
     '/api/v1/contracts/{id}/resolve': {
       post: {
         tags: ['Contracts'],
         summary: 'Resolve a dispute (admin)',
+        description: 'Resolving a dispute seals the current evidence digest on the dispute as evidenceDigest.',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
         responses: ok('Updated contract', contractRef),
@@ -121,6 +186,28 @@ export const openapi = {
   },
   components: {
     schemas: {
+      Error: {
+        type: 'object',
+        properties: {
+          error: { type: 'string', description: 'Machine-readable error code' },
+          message: { type: 'string' },
+        },
+      },
+      DisputeEvidence: {
+        type: 'object',
+        required: ['id', 'contractId', 'submittedBy', 'kind', 'submittedAt'],
+        properties: {
+          id: { type: 'string' },
+          contractId: { type: 'integer' },
+          submittedBy: { type: 'string' },
+          kind: { type: 'string', enum: ['text', 'link', 'file_hash'] },
+          text: { type: 'string', maxLength: 4000 },
+          url: { type: 'string', format: 'uri' },
+          sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+          fileName: { type: 'string', maxLength: 200 },
+          submittedAt: { type: 'string', format: 'date-time' },
+        },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
@@ -145,6 +232,17 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          dispute: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              reason: { type: 'string' },
+              raisedBy: { type: 'string' },
+              openedAt: { type: 'string', format: 'date-time' },
+              evidenceCount: { type: 'integer', description: 'Number of evidence items attached to the dispute' },
+              evidenceDigest: { type: 'string', nullable: true, description: 'Sealed evidence digest set on resolution' },
+            },
+          },
         },
       },
     },

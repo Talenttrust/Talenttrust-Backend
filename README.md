@@ -6,7 +6,7 @@
 - Docs: https://talenttrust-frontend.vercel.app/docs
 - API: https://talenttrust-backend.vercel.app
 - API docs (Swagger UI): https://talenttrust-backend.vercel.app/docs
-- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W)
+- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCHIFIJBGZBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCHIFIJBGZBKTXK5W)
 
 Express + TypeScript API for TalentTrust, a milestone-based freelancer escrow protocol on Stellar.
 The API mirrors the state machine of the Soroban escrow contract
@@ -27,14 +27,33 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/chain` | On-chain contract deployment info |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
-| GET | `/api/v1/contracts/:id` | Get a contract |
+| GET | `/api/v1/contracts/:id` | Get a contract (includes `dispute.evidenceCount`) |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
+| POST | `/api/v1/contracts/:id/dispute/evidence` | Submit evidence item `{ "submittedBy": "G...", "kind": "text" | "link" | "file_hash", ... }` |
+| GET | `/api/v1/contracts/:id/dispute/evidence` | List evidence items and sealed digest `{ data, digest }` |
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+
+## Dispute evidence
+
+Both parties can attach structured, content-hashed evidence to an open dispute.
+Each item is `{ id, contractId, submittedBy, kind, text?, url?, sha256?, fileName?, submittedAt }`, where
+`kind` is one of `text` (text ≤ 4000), `link` (https URL) or `file_hash` (sha256 64 hex + fileName ≤ 200).
+
+Rules:
+
+-  submittedBy` must be the contract client or freelancer (else `403 forbidden`).
+- The contract must be in `Disputed` state (else `409 dispute_not_open`).
+- At most 20 items per party per dispute (else `409 evidence_limit_reached`).
+- Kind-specific fields are validated; invalid combinations return `400 invalid_evidence`.
+- Text is trimmed and control characters (other than newline and tab) are rejected.
+- After resolution the dispute is sealed: further submissions return `409 dispute_closed` and the `evidenceDigest` stored on the dispute equals the digest returned by `GET` before resolution.
+
+The digest is `sha256` over the canonical JSON of all evidence items for the dispute, ordered by `submittedAt`.
 
 ## Development
 
@@ -52,7 +71,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, 
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+`vercel.json` `rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod
