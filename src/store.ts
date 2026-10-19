@@ -4,6 +4,8 @@
  * for the lifetime of the process (or serverless instance).
  */
 
+import { shouldSeedDemoData } from './config';
+
 export type ContractStatus =
   | 'Created'
   | 'Funded'
@@ -40,6 +42,7 @@ export interface EscrowContract {
   status: ContractStatus;
   reputationIssued: boolean;
   dispute?: Dispute;
+  demo: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -49,6 +52,7 @@ export interface Reputation {
   completedContracts: number;
   totalRating: number;
   averageRating: number;
+  demo: boolean;
 }
 
 export class HttpError extends Error {
@@ -67,11 +71,14 @@ const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
+  private demoReputation = new Set<string>();
   private nextId = 1;
 
-  list(filter: { status?: string; party?: string } = {}): EscrowContract[] {
+  list(filter: { status?: string; party?: string; includeDemo?: boolean } = {}): EscrowContract[] {
+    const includeDemo = filter.includeDemo !== false;
     return [...this.contracts.values()].filter(
       (c) =>
+        (includeDemo || !c.demo) &&
         (!filter.status || c.status === filter.status) &&
         (!filter.party || c.client === filter.party || c.freelancer === filter.party),
     );
@@ -89,6 +96,7 @@ export class EscrowStore {
     freelancer?: unknown;
     token?: unknown;
     milestones?: unknown;
+    demo?: boolean;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
@@ -129,6 +137,7 @@ export class EscrowStore {
       releasedAmount: 0,
       status: 'Created',
       reputationIssued: false,
+      demo: input.demo === true,
       createdAt: now,
       updatedAt: now,
     };
@@ -235,6 +244,7 @@ export class EscrowStore {
     r.completed += 1;
     r.total += rating;
     this.reputation.set(c.freelancer, r);
+    if (c.demo) this.demoReputation.add(c.freelancer);
     c.reputationIssued = true;
     this.touch(c);
     return this.getReputation(c.freelancer);
@@ -247,11 +257,12 @@ export class EscrowStore {
       completedContracts: r.completed,
       totalRating: r.total,
       averageRating: r.completed ? Math.round((r.total / r.completed) * 100) / 100 : 0,
+      demo: this.demoReputation.has(address),
     };
   }
 
-  stats() {
-    const all = this.list();
+  stats(filter: { includeDemo?: boolean } = {}) {
+    const all = this.list({ includeDemo: filter.includeDemo });
     const byStatus: Record<string, number> = {};
     for (const c of all) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
     return {
@@ -259,15 +270,18 @@ export class EscrowStore {
       byStatus,
       totalEscrowed: all.reduce((s, c) => s + (c.fundedAmount - c.releasedAmount), 0),
       totalReleased: all.reduce((s, c) => s + c.releasedAmount, 0),
+      demoData: all.some((c) => c.demo),
     };
   }
 
   /** Seed a few demo engagements so the API is explorable out of the box. */
   seed(): this {
+    if (this.contracts.size > 0) return this;
     const a = this.create({
       title: 'Landing page redesign',
       client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      demo: true,
       milestones: [
         { title: 'Wireframes', amount: 250 },
         { title: 'Visual design', amount: 500 },
@@ -280,11 +294,17 @@ export class EscrowStore {
       title: 'Smart contract audit',
       client: 'GCLIENTDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
       freelancer: 'GFREELANCERDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+      demo: true,
       milestones: [{ title: 'Audit report', amount: 2000 }],
     });
     this.deposit(b.id, 2000);
     this.release(b.id, 0);
     this.rate(b.id, 5);
     return this;
+  }
+
+  /** Seed demo data only when configuration allows it. */
+  seedIfEnabled(): this {
+    return shouldSeedDemoData() ? this.seed() : this;
   }
 }
