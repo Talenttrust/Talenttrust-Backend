@@ -6,6 +6,34 @@ const ok = (description: string, schema: object = { type: 'object' }) => ({
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const errorResponse = (description: string) => ({
+  description,
+  content: json({
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      message: { type: 'string' },
+    },
+  }),
+});
+const milestonesSchema = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 20,
+  items: {
+    oneOf: [
+      { type: 'number', minimum: 0, exclusiveMinimum: true },
+      {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
+        },
+        required: ['amount'],
+      },
+    ],
+  },
+};
 
 export const openapi = {
   openapi: '3.0.3',
@@ -48,18 +76,89 @@ export const openapi = {
               client: { type: 'string' },
               freelancer: { type: 'string' },
               token: { type: 'string', default: 'XLM' },
-              milestones: {
-                type: 'array',
-                items: { type: 'object', properties: { title: { type: 'string' }, amount: { type: 'number' } } },
-              },
+              milestones: milestonesSchema,
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: {
+          201: { description: 'Created', content: json(contractRef) },
+          400: errorResponse('Invalid contract input'),
+        },
       },
     },
     '/api/v1/contracts/{id}': {
-      get: { tags: ['Contracts'], summary: 'Get a contract', parameters: [idParam], responses: ok('Contract', contractRef) },
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get a contract',
+        parameters: [idParam],
+        responses: {
+          ...ok('Contract', contractRef),
+          400: errorResponse('Invalid contract id'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+      patch: {
+        tags: ['Contracts'],
+        summary: 'Edit an unfunded contract',
+        description: 'Only the matching client can edit a contract while it is Created and has received no funds.',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client'],
+            minProperties: 2,
+            properties: {
+              client: { type: 'string' },
+              title: { type: 'string' },
+              milestones: milestonesSchema,
+            },
+          }),
+        },
+        responses: {
+          ...ok('Updated contract', contractRef),
+          400: errorResponse('Empty patch, invalid contract id, or invalid milestones'),
+          403: errorResponse('Client does not own the contract'),
+          404: errorResponse('Contract not found'),
+          409: errorResponse('Contract is funded or no longer editable'),
+        },
+      },
+      delete: {
+        tags: ['Contracts'],
+        summary: 'Withdraw an unfunded contract',
+        description: 'Only the matching client can withdraw a contract while it is Created and has received no funds.',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client'],
+            properties: { client: { type: 'string' } },
+          }),
+        },
+        responses: {
+          204: { description: 'Contract withdrawn' },
+          400: errorResponse('Invalid contract id'),
+          403: errorResponse('Client does not own the contract'),
+          404: errorResponse('Contract not found'),
+          409: errorResponse('Contract is funded or no longer withdrawable'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/revisions': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get contract term revision history',
+        parameters: [idParam],
+        responses: {
+          ...ok('Revision history', {
+            type: 'array',
+            items: { $ref: '#/components/schemas/ContractRevision' },
+          }),
+          400: errorResponse('Invalid contract id'),
+          404: errorResponse('Contract not found'),
+        },
+      },
     },
     '/api/v1/contracts/{id}/deposit': {
       post: {
@@ -145,6 +244,51 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          revision: { type: 'integer', minimum: 1 },
+          revisions: {
+            type: 'array',
+            maxItems: 50,
+            items: { $ref: '#/components/schemas/ContractRevision' },
+          },
+        },
+      },
+      ContractRevision: {
+        type: 'object',
+        required: ['revision', 'at', 'changes'],
+        properties: {
+          revision: { type: 'integer', minimum: 2 },
+          at: { type: 'string', format: 'date-time' },
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['field', 'from', 'to'],
+              properties: {
+                field: { type: 'string', enum: ['title', 'milestones'] },
+                from: {
+                  oneOf: [
+                    { type: 'string' },
+                    { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
+                  ],
+                },
+                to: {
+                  oneOf: [
+                    { type: 'string' },
+                    { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      Milestone: {
+        type: 'object',
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          title: { type: 'string' },
+          amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
+          released: { type: 'boolean' },
         },
       },
     },

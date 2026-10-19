@@ -28,6 +28,9 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
+| PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
+| DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
+| GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |

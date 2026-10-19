@@ -54,3 +54,115 @@ describe('TalentTrust API', () => {
     expect(r.body.status).toBe('Resolved');
   });
 });
+
+describe('unfunded contract edits and withdrawal', () => {
+  let app = createApp(new EscrowStore());
+  beforeEach(() => {
+    app = createApp(new EscrowStore());
+  });
+
+  const createContract = async () =>
+    request(app)
+      .post('/api/v1/contracts')
+      .send({
+        client: 'GCLIENT',
+        freelancer: 'GFREELANCER',
+        title: 'Original terms',
+        milestones: [{ title: 'Design', amount: 100 }, { title: 'Build', amount: 200 }],
+      });
+
+  it('edits terms and records a revision diff', async () => {
+    const created = await createContract().expect(201);
+    const updated = await request(app)
+      .patch(`/api/v1/contracts/${created.body.id}`)
+      .send({
+        client: 'GCLIENT',
+        title: 'Revised terms',
+        milestones: [{ title: 'Specification', amount: 150 }],
+      })
+      .expect(200);
+
+    expect(updated.body.title).toBe('Revised terms');
+    expect(updated.body.totalAmount).toBe(150);
+    expect(updated.body.revision).toBe(2);
+    expect(updated.body.milestones).toEqual([
+      { index: 0, title: 'Specification', amount: 150, released: false },
+    ]);
+    const revisions = await request(app).get(`/api/v1/contracts/${created.body.id}/revisions`).expect(200);
+    expect(revisions.body).toEqual([
+      {
+        revision: 2,
+        at: expect.any(String),
+        changes: [
+          { field: 'title', from: 'Original terms', to: 'Revised terms' },
+          {
+            field: 'milestones',
+            from: [
+              { index: 0, title: 'Design', amount: 100, released: false },
+              { index: 1, title: 'Build', amount: 200, released: false },
+            ],
+            to: [{ index: 0, title: 'Specification', amount: 150, released: false }],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('rejects edits after funding and invalid or empty patches', async () => {
+    const created = await createContract().expect(201);
+    const contractPath = `/api/v1/contracts/${created.body.id}`;
+    await request(app).post(`${contractPath}/deposit`).send({ amount: 10 }).expect(200);
+    await request(app)
+      .patch(contractPath)
+      .send({ client: 'GCLIENT', title: 'Too late' })
+      .expect(409, { error: 'contract_locked', message: 'Contract terms can only be edited before funding' });
+
+    const unfunded = await createContract().expect(201);
+    const unfundedPath = `/api/v1/contracts/${unfunded.body.id}`;
+    await request(app).patch(unfundedPath).send({ client: 'OTHER', title: 'No' }).expect(403);
+    await request(app)
+      .patch(unfundedPath)
+      .send({ client: 'GCLIENT', milestones: [{ amount: 0 }] })
+      .expect(400);
+    await request(app).patch(unfundedPath).send({ client: 'GCLIENT' }).expect(400, {
+      error: 'empty_patch',
+      message: 'At least one of title or milestones must be provided',
+    });
+  });
+
+  it('withdraws unfunded contracts from reads, lists, and stats', async () => {
+    const created = await createContract().expect(201);
+    const contractPath = `/api/v1/contracts/${created.body.id}`;
+    await request(app).delete(contractPath).send({ client: 'GCLIENT' }).expect(204);
+    await request(app).get(contractPath).expect(404);
+    const list = await request(app).get('/api/v1/contracts').expect(200);
+    expect(list.body.data.some((contract: { id: number }) => contract.id === created.body.id)).toBe(false);
+    const stats = await request(app).get('/api/v1/stats').expect(200);
+    expect(stats.body.contracts).toBe(0);
+  });
+
+  it('rejects withdrawal after funding', async () => {
+    const created = await createContract().expect(201);
+    const contractPath = `/api/v1/contracts/${created.body.id}`;
+    await request(app).post(`${contractPath}/deposit`).send({ amount: 10 }).expect(200);
+    await request(app)
+      .delete(contractPath)
+      .send({ client: 'GCLIENT' })
+      .expect(409, { error: 'contract_locked', message: 'Contract can only be withdrawn before funding' });
+  });
+
+  it('keeps only the most recent 50 revisions', async () => {
+    const created = await createContract().expect(201);
+    const contractPath = `/api/v1/contracts/${created.body.id}`;
+    for (let edit = 1; edit <= 51; edit += 1) {
+      await request(app)
+        .patch(contractPath)
+        .send({ client: 'GCLIENT', title: `Revision ${edit}` })
+        .expect(200);
+    }
+    const revisions = await request(app).get(`${contractPath}/revisions`).expect(200);
+    expect(revisions.body).toHaveLength(50);
+    expect(revisions.body[0].revision).toBe(3);
+    expect(revisions.body[49].revision).toBe(52);
+  });
+});

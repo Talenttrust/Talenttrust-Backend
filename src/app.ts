@@ -50,6 +50,9 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
+        'PATCH /api/v1/contracts/:id',
+        'DELETE /api/v1/contracts/:id',
+        'GET  /api/v1/contracts/:id/revisions',
         'POST /api/v1/contracts/:id/deposit',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
@@ -104,6 +107,15 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
     }),
   );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
+  v1.patch('/contracts/:id', wrap((req) => store.edit(id(req), req.body ?? {})));
+  v1.delete(
+    '/contracts/:id',
+    wrap((req, res) => {
+      store.delete(id(req), req.body?.client);
+      res.status(204).end();
+    }),
+  );
+  v1.get('/contracts/:id/revisions', wrap((req) => store.getRevisions(id(req))));
   v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
   v1.post(
     '/contracts/:id/milestones/:index/release',

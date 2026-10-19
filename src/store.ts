@@ -27,6 +27,12 @@ export interface Dispute {
   resolvedAt?: string;
 }
 
+export interface ContractRevision {
+  revision: number;
+  at: string;
+  changes: Array<{ field: 'title' | 'milestones'; from: string | Milestone[]; to: string | Milestone[] }>;
+}
+
 export interface EscrowContract {
   id: number;
   title: string;
@@ -40,6 +46,8 @@ export interface EscrowContract {
   status: ContractStatus;
   reputationIssued: boolean;
   dispute?: Dispute;
+  revision: number;
+  revisions: ContractRevision[];
   createdAt: string;
   updatedAt: string;
 }
@@ -62,7 +70,30 @@ export class HttpError extends Error {
 }
 
 const MAX_MILESTONES = 20;
+const MAX_REVISIONS = 50;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
+
+function parseMilestones(input: unknown): Milestone[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+  }
+  if (input.length > MAX_MILESTONES) {
+    throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
+  }
+  return input.map((m: unknown, index: number) => {
+    const raw = (typeof m === 'number' ? { amount: m } : m) as { title?: unknown; amount?: unknown };
+    const amount = Number(raw?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
+    }
+    return {
+      index,
+      title: typeof raw?.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
+      amount,
+      released: false,
+    };
+  });
+}
 
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
@@ -97,25 +128,7 @@ export class EscrowStore {
     if (client === freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
-    if (!Array.isArray(input.milestones) || input.milestones.length === 0) {
-      throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
-    }
-    if (input.milestones.length > MAX_MILESTONES) {
-      throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
-    }
-    const milestones: Milestone[] = input.milestones.map((m: unknown, index: number) => {
-      const raw = (typeof m === 'number' ? { amount: m } : m) as { title?: unknown; amount?: unknown };
-      const amount = Number(raw?.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
-      }
-      return {
-        index,
-        title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
-        amount,
-        released: false,
-      };
-    });
+    const milestones = parseMilestones(input.milestones);
     const now = new Date().toISOString();
     const c: EscrowContract = {
       id: this.nextId++,
@@ -129,11 +142,76 @@ export class EscrowStore {
       releasedAmount: 0,
       status: 'Created',
       reputationIssued: false,
+      revision: 1,
+      revisions: [],
       createdAt: now,
       updatedAt: now,
     };
     this.contracts.set(c.id, c);
     return c;
+  }
+
+  edit(
+    id: number,
+    input: { client?: unknown; title?: unknown; milestones?: unknown },
+  ): EscrowContract {
+    const c = this.get(id);
+    if (input.client !== c.client) {
+      throw new HttpError(403, 'forbidden', 'Only the client can edit this contract');
+    }
+    if (c.status !== 'Created' || c.fundedAmount !== 0) {
+      throw new HttpError(409, 'contract_locked', 'Contract terms can only be edited before funding');
+    }
+    const hasTitle = Object.prototype.hasOwnProperty.call(input, 'title');
+    const hasMilestones = Object.prototype.hasOwnProperty.call(input, 'milestones');
+    if (!hasTitle && !hasMilestones) {
+      throw new HttpError(400, 'empty_patch', 'At least one of title or milestones must be provided');
+    }
+
+    const changes: ContractRevision['changes'] = [];
+    let title: string | undefined;
+    let milestones: Milestone[] | undefined;
+    if (hasTitle) {
+      title = typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement';
+      if (title !== c.title) changes.push({ field: 'title', from: c.title, to: title });
+    }
+    if (hasMilestones) {
+      milestones = parseMilestones(input.milestones);
+      if (JSON.stringify(c.milestones) !== JSON.stringify(milestones)) {
+        changes.push({
+          field: 'milestones',
+          from: c.milestones.map((milestone) => ({ ...milestone })),
+          to: milestones.map((milestone) => ({ ...milestone })),
+        });
+      }
+    }
+
+    const at = new Date().toISOString();
+    if (title !== undefined) c.title = title;
+    if (milestones) {
+      c.milestones = milestones;
+      c.totalAmount = milestones.reduce((sum, milestone) => sum + milestone.amount, 0);
+    }
+    c.revision += 1;
+    c.revisions.push({ revision: c.revision, at, changes });
+    if (c.revisions.length > MAX_REVISIONS) c.revisions.shift();
+    c.updatedAt = at;
+    return c;
+  }
+
+  getRevisions(id: number): ContractRevision[] {
+    return this.get(id).revisions;
+  }
+
+  delete(id: number, clientRaw: unknown): void {
+    const c = this.get(id);
+    if (clientRaw !== c.client) {
+      throw new HttpError(403, 'forbidden', 'Only the client can withdraw this contract');
+    }
+    if (c.status !== 'Created' || c.fundedAmount !== 0) {
+      throw new HttpError(409, 'contract_locked', 'Contract can only be withdrawn before funding');
+    }
+    this.contracts.delete(id);
   }
 
   private requireActive(c: EscrowContract) {
