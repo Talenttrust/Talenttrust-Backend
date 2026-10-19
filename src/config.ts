@@ -9,3 +9,10 @@ export const config = {
 
 export const explorerUrl = (id: string = config.contractId) =>
   `https://stellar.expert/explorer/${config.network}/contract/${id}`;
+
+export function storageConfig() {
+  const driver = process.env.STORAGE_DRIVER || 'memory';
+  if (driver !== 'memory' && driver !== 'sqlite') throw new Error('STORAGE_DRIVER must be memory or sqlite');
+  return { driver, path: process.env.SQLITE_PATH || './data/talenttrust.db',
+    seedDemoData: process.env.SEED_DEMO_DATA !== 'false' };
+}

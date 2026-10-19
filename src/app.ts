@@ -1,16 +1,18 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError } from './store';
+import { config, explorerUrl, storageConfig } from './config';
+import { HttpError } from './domain';
+import { EscrowService } from './service';
+import { createRepository } from './repo';
 import { openapi, docsHtml } from './openapi';
 
 const startedAt = Date.now();
 
 type Handler = (req: Request, res: Response) => unknown;
-const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
+const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const out = fn(req, res);
+    const out = await fn(req, res);
     if (out !== undefined && !res.headersSent) res.json(out);
   } catch (err) {
     next(err);
@@ -23,13 +25,21 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export function createApp(service?: EscrowService) {
+  const options = service ? undefined : storageConfig();
+  const store = service ?? new EscrowService(createRepository(options!));
+  const ready = options?.seedDemoData ? store.seed() : Promise.resolve();
+  // Mark initialization rejection as handled even before the first request arrives.
+  void ready.catch(() => undefined);
   const app = express();
+  app.locals.ready = ready;
+  app.locals.close = async () => { await ready.catch(() => undefined); await store.repository.close(); };
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cors());
   app.use(express.json({ limit: '100kb' }));
+  app.use((_req, _res, next) => { void ready.then(() => next(), next); });
 
   app.get(
     '/',
@@ -67,7 +77,7 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
       status: 'ok',
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
-      storage: 'in-memory',
+      storage: store.repository.driver,
       timestamp: new Date().toISOString(),
     })),
   );
@@ -90,8 +100,8 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',
-    wrap((req) => ({
-      data: store.list({
+    wrap(async (req) => ({
+      data: await store.list({
         status: typeof req.query.status === 'string' ? req.query.status : undefined,
         party: typeof req.query.party === 'string' ? req.query.party : undefined,
       }),
@@ -99,8 +109,8 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   );
   v1.post(
     '/contracts',
-    wrap((req, res) => {
-      res.status(201).json(store.create(req.body ?? {}));
+    wrap(async (req, res) => {
+      res.status(201).json(await store.create(req.body ?? {}));
     }),
   );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));

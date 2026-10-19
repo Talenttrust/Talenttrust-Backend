@@ -3,7 +3,10 @@ import { config, explorerUrl } from './config';
 const json = (schema: object) => ({ 'application/json': { schema } });
 const ok = (description: string, schema: object = { type: 'object' }) => ({
   200: { description, content: json(schema) },
+  500: { description: 'Storage or initialization failure', content: json({ $ref: '#/components/schemas/Error' }) },
 });
+const storageError = { description: 'Storage or initialization failure', content: json({ $ref: '#/components/schemas/Error' }) };
+const conflictError = { description: 'State conflict or stale update (write_conflict); reload before retrying', content: json({ $ref: '#/components/schemas/Error' }) };
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
@@ -15,12 +18,12 @@ export const openapi = {
     description:
       'Milestone-based escrow API for freelancers and clients. State mirrors the TalentTrust ' +
       `Soroban escrow contract on Stellar ${config.network} (${config.contractId}). ` +
-      `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
+      `Explorer: ${explorerUrl()}. Storage defaults to process-local memory; self-hosted deployments can opt into persistent SQLite.`,
   },
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/health': { get: { tags: ['System'], summary: 'Health check', responses: { ...ok('Service is healthy', { $ref: '#/components/schemas/Health' }), 500: storageError } } },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
@@ -55,7 +58,7 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: { 201: { description: 'Created', content: json(contractRef) }, 409: conflictError, 500: storageError },
       },
     },
     '/api/v1/contracts/{id}': {
@@ -67,7 +70,7 @@ export const openapi = {
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 409: conflictError },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -75,7 +78,7 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
         parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 409: conflictError },
       },
     },
     '/api/v1/contracts/{id}/dispute': {
@@ -86,7 +89,7 @@ export const openapi = {
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 409: conflictError },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
@@ -95,11 +98,11 @@ export const openapi = {
         summary: 'Resolve a dispute (admin)',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 409: conflictError },
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: { ...ok('Updated contract', contractRef), 409: conflictError } },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -107,7 +110,7 @@ export const openapi = {
         summary: 'Rate the freelancer of a completed contract',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: { ...ok('Reputation'), 409: conflictError },
       },
     },
     '/api/v1/reputation/{address}': {
@@ -121,10 +124,20 @@ export const openapi = {
   },
   components: {
     schemas: {
+      Error: { type: 'object', required: ['error', 'message'], properties: {
+        error: { type: 'string' }, message: { type: 'string' },
+      } },
+      Health: { type: 'object', required: ['status', 'version', 'uptimeSeconds', 'storage', 'timestamp'], properties: {
+        status: { type: 'string', enum: ['ok'] }, version: { type: 'string' },
+        uptimeSeconds: { type: 'integer' }, storage: { type: 'string', enum: ['memory', 'sqlite'] },
+        timestamp: { type: 'string', format: 'date-time' },
+      } },
       EscrowContract: {
         type: 'object',
         properties: {
           id: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time', description: 'Monotonic revision timestamp used internally for optimistic concurrency' },
           title: { type: 'string' },
           client: { type: 'string' },
           freelancer: { type: 'string' },

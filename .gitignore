@@ -8,3 +8,9 @@ coverage/
 .vercel
 .env*
 !.env.example
+
+# Local SQLite data and journals
+data/
+*.db
+*.db-wal
+*.db-shm
