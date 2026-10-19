@@ -1,8 +1,9 @@
+import { timingSafeEqual } from 'crypto';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError } from './store';
+import { ClockSource, EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 
 const startedAt = Date.now();
@@ -23,7 +24,29 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+const secretsEqual = (a: string, b: string) => {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+
+export interface AppOptions {
+  store?: EscrowStore;
+  now?: ClockSource;
+  cronSecret?: string;
+}
+
+export function createApp(
+  storeOrOptions: EscrowStore | AppOptions = new EscrowStore().seed(),
+  moreOptions: AppOptions = {},
+) {
+  const options: AppOptions =
+    storeOrOptions instanceof EscrowStore
+      ? { ...moreOptions, store: storeOrOptions }
+      : storeOrOptions;
+  const store = options.store ?? new EscrowStore().seed();
+  store.setClock(options.now);
+
   const app = express();
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
@@ -51,12 +74,14 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
         'POST /api/v1/contracts/:id/deposit',
+        'POST /api/v1/contracts/:id/milestones/:index/submit',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
         'POST /api/v1/contracts/:id/resolve',
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
         'GET  /api/v1/reputation/:address',
+        'POST /api/cron/auto-release',
       ],
     })),
   );
@@ -76,6 +101,21 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   app.get(['/docs', '/docs/'], (_req, res) => {
     res.type('html').send(docsHtml);
   });
+
+  app.post(
+    '/api/cron/auto-release',
+    wrap((req, res) => {
+      const cronSecret =
+        options.cronSecret !== undefined
+          ? options.cronSecret
+          : process.env.CRON_SECRET ?? config.cronSecret;
+      const provided = req.headers.authorization ?? '';
+      if (!cronSecret || !secretsEqual(provided, `Bearer ${cronSecret}`)) {
+        throw new HttpError(401, 'unauthorized', 'Invalid cron secret');
+      }
+      res.json(store.sweepDue());
+    }),
+  );
 
   const v1 = express.Router();
   v1.get(
@@ -105,6 +145,16 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
   v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
+  v1.post(
+    '/contracts/:id/milestones/:index/submit',
+    wrap((req) =>
+      store.submit(id(req), Number(req.params.index), {
+        freelancer: req.body?.freelancer,
+        note: req.body?.note,
+        url: req.body?.url,
+      }),
+    ),
+  );
   v1.post(
     '/contracts/:id/milestones/:index/release',
     wrap((req) => store.release(id(req), Number(req.params.index))),
