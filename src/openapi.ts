@@ -1,14 +1,27 @@
 import { config, explorerUrl } from './config';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
-const ok = (description: string, schema: object = { type: 'object' }) => ({
-  200: { description, content: json(schema) },
+const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
+  200: { description, ...(headers ? { headers } : {}), content: json(schema) },
 });
 const errorResponse = (description: string, schema: object = { $ref: '#/components/schemas/ErrorResponse' }) => ({
   description,
   content: json(schema),
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
+const receiptQueryParam = {
+  name: 'receipt',
+  in: 'query',
+  required: false,
+  schema: { type: 'boolean' },
+  description: 'When true, includes detached JWS Receipt header for the contract state',
+};
+const receiptHeaders = {
+  Receipt: {
+    schema: { type: 'string' },
+    description: 'Detached compact JWS receipt of post-mutation contract state',
+  },
+};
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
 export const openapi = {
@@ -22,9 +35,16 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Receipts' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/.well-known/talenttrust-receipts.json': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Published ed25519 public keys for offline JWS receipt verification',
+        responses: ok('Published keys', { $ref: '#/components/schemas/PublishedKeys' }),
+      },
+    },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
@@ -43,6 +63,7 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        parameters: [receiptQueryParam],
         requestBody: {
           required: true,
           content: json({
@@ -60,59 +81,75 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: { 201: { description: 'Created', headers: receiptHeaders, content: json(contractRef) } },
       },
     },
     '/api/v1/contracts/{id}': {
       get: { tags: ['Contracts'], summary: 'Get a contract', parameters: [idParam], responses: ok('Contract', contractRef) },
     },
+    '/api/v1/contracts/{id}/receipt': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Get detached server-signed JWS receipt for a contract',
+        parameters: [idParam],
+        responses: ok('Contract receipt', {
+          type: 'object',
+          properties: { receipt: { type: 'string', description: 'Compact JWS receipt' } },
+        }),
+      },
+    },
     '/api/v1/contracts/{id}/deposit': {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
-        parameters: [idParam],
+        parameters: [idParam, receiptQueryParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: ok('Updated contract', contractRef, receiptHeaders),
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
       post: {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
-        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }, receiptQueryParam],
+        responses: ok('Updated contract', contractRef, receiptHeaders),
       },
     },
     '/api/v1/contracts/{id}/dispute': {
       post: {
         tags: ['Contracts'],
         summary: 'Open a dispute',
-        parameters: [idParam],
+        parameters: [idParam, receiptQueryParam],
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: ok('Updated contract', contractRef, receiptHeaders),
       },
     },
     '/api/v1/contracts/{id}/resolve': {
       post: {
         tags: ['Contracts'],
         summary: 'Resolve a dispute (admin)',
-        parameters: [idParam],
+        parameters: [idParam, receiptQueryParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: ok('Updated contract', contractRef, receiptHeaders),
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: {
+        tags: ['Contracts'],
+        summary: 'Cancel and refund',
+        parameters: [idParam, receiptQueryParam],
+        responses: ok('Updated contract', contractRef, receiptHeaders),
+      },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
         tags: ['Reputation'],
         summary: 'Rate the freelancer of a completed contract',
-        parameters: [idParam],
+        parameters: [idParam, receiptQueryParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: ok('Reputation', { type: 'object' }, receiptHeaders),
       },
     },
     '/api/v1/contracts/{id}/link': {
@@ -176,6 +213,21 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/v1/receipts/verify': {
+      post: {
+        tags: ['Receipts'],
+        summary: 'Verify a server-signed JWS receipt and check against current state',
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['receipt'],
+            properties: { receipt: { type: 'string', description: 'Compact JWS receipt string' } },
+          }),
+        },
+        responses: ok('Verification result', { $ref: '#/components/schemas/ReceiptVerification' }),
+      },
+    },
   },
   components: {
     schemas: {
@@ -221,6 +273,40 @@ export const openapi = {
           },
         },
         required: ['error', 'message'],
+      },
+      PublishedKeys: {
+        type: 'object',
+        properties: {
+          keys: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                kid: { type: 'string' },
+                alg: { type: 'string', enum: ['EdDSA'] },
+                publicKey: { type: 'string' },
+                jwk: {
+                  type: 'object',
+                  properties: {
+                    kty: { type: 'string', enum: ['OKP'] },
+                    crv: { type: 'string', enum: ['Ed25519'] },
+                    x: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      ReceiptVerification: {
+        type: 'object',
+        properties: {
+          valid: { type: 'boolean' },
+          kid: { type: 'string', nullable: true },
+          iat: { type: 'integer', nullable: true },
+          contractId: { type: 'integer', nullable: true },
+          matchesCurrent: { type: 'boolean' },
+        },
       },
       EscrowContract: {
         type: 'object',

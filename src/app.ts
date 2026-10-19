@@ -6,6 +6,7 @@ import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
+import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
 
 declare global {
   namespace Express {
@@ -38,8 +39,8 @@ const id = (req: Request) => {
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
 
 function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
-): { store: EscrowStore; logger: Logger; chainReader: ChainReader } {
+  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader; receiptManager?: ReceiptManager } = new EscrowStore().seed(),
+): { store: EscrowStore; logger: Logger; chainReader: ChainReader; receiptManager?: ReceiptManager } {
   if (
     storeOrOpts &&
     typeof storeOrOpts === 'object' &&
@@ -48,23 +49,37 @@ function resolveStoreAndLogger(
   ) {
     return { store: storeOrOpts as EscrowStore, logger: createLogger(), chainReader: new SorobanRpcChainReader() };
   }
-  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } | undefined) ?? {};
+  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader; receiptManager?: ReceiptManager } | undefined) ?? {};
   return {
     store: opts.store ?? new EscrowStore().seed(),
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
+    receiptManager: opts.receiptManager,
   };
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
-  fallbackChainReader?: ChainReader,
+  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader; receiptManager?: ReceiptManager } = new EscrowStore().seed(),
+  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager,
+  fallbackReceiptManager?: ReceiptManager,
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
-  const chainReader = fallbackChainReader ?? resolved.chainReader;
 
+  let chainReader: ChainReader;
+  let receiptManager: ReceiptManager;
+
+  if (fallbackChainReaderOrReceiptManager instanceof ReceiptManager) {
+    chainReader = resolved.chainReader;
+    receiptManager = fallbackChainReaderOrReceiptManager;
+  } else if (fallbackChainReaderOrReceiptManager) {
+    chainReader = fallbackChainReaderOrReceiptManager;
+    receiptManager = fallbackReceiptManager ?? resolved.receiptManager ?? new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET);
+  } else {
+    chainReader = resolved.chainReader;
+    receiptManager = fallbackReceiptManager ?? resolved.receiptManager ?? new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET);
+  }
   const app = express();
   app.disable('x-powered-by');
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
@@ -103,6 +118,17 @@ export function createApp(
     next();
   });
 
+  const getOrigin = (req: Request) => `${req.protocol}://${req.get('host') || 'localhost'}`;
+
+  const maybeAttachReceipt = (req: Request, res: Response, contract: unknown) => {
+    if (req.query.receipt === 'true' && contract && typeof contract === 'object') {
+      const receipt = receiptManager.issueReceipt(contract as Record<string, unknown>, getOrigin(req));
+      res.setHeader('Receipt', receipt);
+    }
+  };
+
+  app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager.getPublishedKeys()));
+
   app.get(
     '/',
     wrap(() => ({
@@ -117,11 +143,13 @@ export function createApp(
         'GET  /health',
         'GET  /docs',
         'GET  /openapi.json',
+        'GET  /.well-known/talenttrust-receipts.json',
         'GET  /api/v1/chain',
         'GET  /api/v1/stats',
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
+        'GET  /api/v1/contracts/:id/receipt',
         'POST /api/v1/contracts/:id/deposit',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
@@ -131,6 +159,7 @@ export function createApp(
         'POST /api/v1/contracts/:id/link',
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
+        'POST /api/v1/receipts/verify',
       ],
     })),
   );
@@ -183,22 +212,68 @@ export function createApp(
   v1.post(
     '/contracts',
     wrap((req, res) => {
-      res.status(201).json(store.create(req.body ?? {}));
+      const created = store.create(req.body ?? {});
+      maybeAttachReceipt(req, res, created);
+      res.status(201).json(created);
     }),
   );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
-  v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
+  v1.get(
+    '/contracts/:id/receipt',
+    wrap((req) => {
+      const contract = store.get(id(req));
+      const receipt = receiptManager.issueReceipt(contract as unknown as Record<string, unknown>, getOrigin(req));
+      return { receipt };
+    }),
+  );
+  v1.post(
+    '/contracts/:id/deposit',
+    wrap((req, res) => {
+      const updated = store.deposit(id(req), req.body?.amount);
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
+  );
   v1.post(
     '/contracts/:id/milestones/:index/release',
-    wrap((req) => store.release(id(req), Number(req.params.index))),
+    wrap((req, res) => {
+      const updated = store.release(id(req), Number(req.params.index));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/dispute',
-    wrap((req) => store.openDispute(id(req), req.body?.raisedBy, req.body?.reason)),
+    wrap((req, res) => {
+      const updated = store.openDispute(id(req), req.body?.raisedBy, req.body?.reason);
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
-  v1.post('/contracts/:id/resolve', wrap((req) => store.resolveDispute(id(req), req.body?.freelancerBps)));
-  v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req))));
-  v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
+  v1.post(
+    '/contracts/:id/resolve',
+    wrap((req, res) => {
+      const updated = store.resolveDispute(id(req), req.body?.freelancerBps);
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
+  );
+  v1.post(
+    '/contracts/:id/cancel',
+    wrap((req, res) => {
+      const updated = store.cancel(id(req));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
+  );
+  v1.post(
+    '/contracts/:id/reputation',
+    wrap((req, res) => {
+      const updated = store.rate(id(req), req.body?.rating);
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
+  );
   v1.post(
     '/contracts/:id/link',
     wrap(async (req) => store.linkEscrow(id(req), req.body?.escrowId, chainReader)),
@@ -208,6 +283,46 @@ export function createApp(
     wrap(async (req) => store.checkParity(id(req), chainReader)),
   );
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+
+  v1.post(
+    '/receipts/verify',
+    wrap((req) => {
+      const receipt = req.body?.receipt;
+      if (!receipt || typeof receipt !== 'string') {
+        throw new HttpError(400, 'invalid_receipt', 'receipt must be a non-empty JWS string');
+      }
+
+      const verified = verifyReceipt(receipt, receiptManager.publicKey);
+      if (!verified.valid) {
+        return {
+          valid: false,
+          kid: verified.kid ?? null,
+          iat: verified.iat ?? null,
+          contractId: verified.contractId ?? null,
+          matchesCurrent: false,
+        };
+      }
+
+      let matchesCurrent = false;
+      if (verified.contractId) {
+        try {
+          const current = store.get(verified.contractId);
+          matchesCurrent = hashContractState(current) === verified.contractHash;
+        } catch {
+          matchesCurrent = false;
+        }
+      }
+
+      return {
+        valid: true,
+        kid: verified.kid,
+        iat: verified.iat,
+        contractId: verified.contractId,
+        matchesCurrent,
+      };
+    }),
+  );
+
   app.use('/api/v1', v1);
 
   app.use((req, res) => {

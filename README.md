@@ -37,6 +37,11 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+| GET | `/.well-known/talenttrust-receipts.json` | Published ed25519 public keys for offline verification |
+| GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
+| POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
+
+*Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
 
 ## Development
 
@@ -49,7 +54,7 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`, `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed).
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
