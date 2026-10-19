@@ -1,6 +1,8 @@
 import { config, explorerUrl } from './config';
+import { ERRORS, type ErrorKey } from './errors';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
+const problemJson = () => ({ 'application/problem+json': { schema: { $ref: '#/components/schemas/Problem' } } });
 const ok = (description: string, schema: object = { type: 'object' }) => ({
   200: { description, content: json(schema) },
 });
@@ -10,6 +12,23 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+
+/** Build error responses for a list of catalog keys, always including a generic 500. */
+const errorResponses = (keys: ErrorKey[]) => {
+  const responses: Record<string, { description: string; content: object }> = {};
+  for (const key of keys) {
+    const entry = ERRORS[key];
+    responses[String(entry.status)] = {
+      description: entry.title,
+      content: problemJson(),
+    };
+  }
+  responses['500'] = {
+    description: ERRORS.internal_error.title,
+    content: problemJson(),
+  };
+  return responses;
+};
 
 export const openapi = {
   openapi: '3.0.3',
@@ -24,11 +43,29 @@ export const openapi = {
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
-    '/api/v1/chain': {
-      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
+    '/health': { get: { tags: ['System'], summary: 'Health check', responses: { ...ok('Service is healthy'), ...errorResponses([]) } } },
+    '/api/v1/errors': {
+      get: {
+        tags: ['System'],
+        summary: 'List the full error catalog',
+        responses: { 200: { description: 'Error catalog', content: json({ type: 'object' }) }, ...errorResponses([]) },
+      },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/errors/{code}': {
+      get: {
+        tags: ['System'],
+        summary: 'Get a human-readable error description',
+        parameters: [{ name: 'code', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Error description', content: json({ type: 'object' }) },
+          404: { description: 'Unknown error code', content: problemJson() },
+        },
+      },
+    },
+    '/api/v1/chain': {
+      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: { ...ok('Deployment'), ...errorResponses([]) } },
+    },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: { ...ok('Stats'), ...errorResponses([]) } } },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
@@ -38,7 +75,10 @@ export const openapi = {
           { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
-        responses: ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
+        responses: {
+          ...ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
+          ...errorResponses([]),
+        },
       },
       post: {
         tags: ['Contracts'],
@@ -60,11 +100,22 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: {
+          201: { description: 'Created', content: json(contractRef) },
+          ...errorResponses(['invalid_parties', 'invalid_milestones', 'invalid_amount']),
+        },
       },
     },
     '/api/v1/contracts/{id}': {
-      get: { tags: ['Contracts'], summary: 'Get a contract', parameters: [idParam], responses: ok('Contract', contractRef) },
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get a contract',
+        parameters: [idParam],
+        responses: {
+          ...ok('Contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id']),
+        },
+      },
     },
     '/api/v1/contracts/{id}/deposit': {
       post: {
@@ -72,7 +123,10 @@ export const openapi = {
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'contract_not_active', 'invalid_amount', 'over_funded']),
+        },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -80,7 +134,10 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
         parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'contract_not_active', 'milestone_not_found', 'already_released', 'insufficient_funds']),
+        },
       },
     },
     '/api/v1/contracts/{id}/dispute': {
@@ -91,7 +148,10 @@ export const openapi = {
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'forbidden', 'contract_not_active']),
+        },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
@@ -100,11 +160,22 @@ export const openapi = {
         summary: 'Resolve a dispute (admin)',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'contract_not_disputed', 'invalid_split']),
+        },
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: {
+        tags: ['Contracts'],
+        summary: 'Cancel and refund',
+        parameters: [idParam],
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'contract_not_active']),
+        },
+      },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -112,7 +183,10 @@ export const openapi = {
         summary: 'Rate the freelancer of a completed contract',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: {
+          ...ok('Reputation'),
+          ...errorResponses(['contract_not_found', 'invalid_id', 'contract_not_completed', 'already_rated', 'invalid_rating']),
+        },
       },
     },
     '/api/v1/contracts/{id}/link': {
@@ -173,7 +247,7 @@ export const openapi = {
         tags: ['Reputation'],
         summary: 'Get freelancer reputation',
         parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: ok('Reputation'),
+        responses: { ...ok('Reputation'), ...errorResponses([]) },
       },
     },
   },
@@ -250,6 +324,25 @@ export const openapi = {
           chain: { $ref: '#/components/schemas/ChainInfo' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      Problem: {
+        type: 'object',
+        required: ['type', 'title', 'status', 'error', 'message'],
+        properties: {
+          type: { type: 'string', format: 'uri' },
+          title: { type: 'string' },
+          status: { type: 'integer' },
+          detail: { type: 'string' },
+          error: { type: 'string' },
+          message: { type: 'string' },
+          contractError: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              code: { type: 'integer' },
+            },
+          },
         },
       },
     },
