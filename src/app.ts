@@ -14,6 +14,7 @@ declare global {
     }
   }
 }
+import { idempotency, IdempotencyStore, MemoryIdempotencyStore } from './idempotency';
 
 const startedAt = Date.now();
 
@@ -56,9 +57,15 @@ function resolveStoreAndLogger(
   };
 }
 
+export interface AppOptions {
+  idempotencyStore?: IdempotencyStore;
+  idempotencyRequired?: boolean;
+}
+
 export function createApp(
   storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
   fallbackChainReader?: ChainReader,
+  options: AppOptions = {},
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
@@ -155,6 +162,11 @@ export function createApp(
   });
 
   const v1 = express.Router();
+  v1.use(
+    idempotency(options.idempotencyStore ?? new MemoryIdempotencyStore(), {
+      required: options.idempotencyRequired ?? process.env.IDEMPOTENCY_REQUIRED === 'true',
+    }),
+  );
   v1.get(
     '/chain',
     wrap(() => ({

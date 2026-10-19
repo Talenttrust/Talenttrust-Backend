@@ -11,7 +11,7 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
-export const openapi = {
+const spec = {
   openapi: '3.0.3',
   info: {
     title: 'TalentTrust API',
@@ -178,6 +178,36 @@ export const openapi = {
     },
   },
   components: {
+    parameters: {
+      IdempotencyKey: {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: false,
+        description:
+          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
+          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+        schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
+      },
+    },
+    responses: {
+      InvalidIdempotencyKey: {
+        description: 'Idempotency-Key is malformed (`invalid_idempotency_key`) or missing while required (`idempotency_key_required`)',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyConflict: {
+        description:
+          '`idempotency_request_in_progress`: a request with this key is still running (see `Retry-After`). ' +
+          'Other 409 codes are business-rule conflicts such as `over_funded`.',
+        headers: { 'Retry-After': { schema: { type: 'integer' }, description: 'Seconds to wait before retrying' } },
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyKeyReused: {
+        description: '`idempotency_key_reused`: the key was already used with a different request body',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+    },
     schemas: {
       DriftItem: {
         type: 'object',
@@ -222,6 +252,10 @@ export const openapi = {
         },
         required: ['error', 'message'],
       },
+      Error: {
+        type: 'object',
+        properties: { error: { type: 'string' }, message: { type: 'string' } },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
@@ -255,6 +289,27 @@ export const openapi = {
     },
   },
 };
+
+type Operation = { parameters?: object[]; responses: Record<string, object> };
+
+/** Documents Idempotency-Key and its error statuses on every POST operation. */
+function withIdempotency<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const item of Object.values(paths)) {
+    const op = item.post;
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+    op.responses = {
+      ...op.responses,
+      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+      409: { $ref: '#/components/responses/IdempotencyConflict' },
+      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+    };
+  }
+  return doc;
+}
+
+export const openapi = withIdempotency(spec);
 
 export const docsHtml = `<!doctype html>
 <html lang="en">
