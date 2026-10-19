@@ -61,16 +61,19 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
     })),
   );
 
-  app.get(
-    '/health',
-    wrap(() => ({
+  app.get('/health', (req, res) => {
+    if (app.get('draining')) {
+      res.status(503).setHeader('Connection', 'close').json({ status: 'draining' });
+      return;
+    }
+    res.json({
       status: 'ok',
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
       timestamp: new Date().toISOString(),
-    })),
-  );
+    });
+  });
 
   app.get('/openapi.json', wrap(() => openapi));
   app.get(['/docs', '/docs/'], (_req, res) => {
