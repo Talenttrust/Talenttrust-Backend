@@ -1,9 +1,11 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { InMemoryEventStore } from '../src/indexer/store';
+import { EventIndexer } from '../src/indexer/indexer';
 
 describe('TalentTrust API', () => {
-  const app = createApp(new EscrowStore());
+  const app = createApp(new EscrowStore(), new InMemoryEventStore());
 
   it('serves health and root', async () => {
     const h = await request(app).get('/health');

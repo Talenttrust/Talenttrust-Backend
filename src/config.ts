@@ -5,6 +5,8 @@ export const config = {
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
   version: '1.0.0',
+  cronSecret: process.env.CRON_SECRET,
+  indexerIntervalMs: process.env.INDEXER_INTERVAL_MS ? Number(process.env.INDEXER_INTERVAL_MS) : 0,
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

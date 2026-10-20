@@ -4,6 +4,8 @@ import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { InMemoryEventStore } from './indexer/store';
+import { EventIndexer, withBackoff } from './indexer/indexer';
 
 const startedAt = Date.now();
 
@@ -23,7 +25,11 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export function createApp(
+  store: EscrowStore = new EscrowStore().seed(),
+  eventStore: InMemoryEventStore = new InMemoryEventStore(),
+  indexer?: EventIndexer,
+) {
   const app = express();
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
@@ -57,6 +63,9 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
         'GET  /api/v1/reputation/:address',
+        'POST /api/cron/index-events',
+        'GET  /api/v1/chain/events',
+        'GET  /api/v1/chain/indexer',
       ],
     })),
   );
@@ -118,6 +127,50 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
   app.use('/api/v1', v1);
+
+  const eventIndexer = indexer ?? new EventIndexer(eventStore);
+
+  app.post(
+    '/api/cron/index-events',
+    wrap(async (req, res) => {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith('Bearer ')) {
+        res.status(401).json({ error: 'unauthorized', message: 'Missing or invalid authorization header' });
+        return;
+      }
+      const token = auth.slice(7);
+      if (!config.cronSecret || token !== config.cronSecret) {
+        res.status(401).json({ error: 'unauthorized', message: 'Invalid secret' });
+        return;
+      }
+
+      try {
+        const result = await withBackoff(() => eventIndexer.runOnce());
+        res.status(200).json(result);
+      } catch (err) {
+        if (err instanceof Error && err.message === 'indexer_busy') {
+          res.status(409).json({ error: 'indexer_busy', message: 'Indexer is already running' });
+          return;
+        }
+        throw err;
+      }
+    }),
+  );
+
+  const chain = express.Router();
+  chain.get(
+    '/events',
+    wrap((req) => {
+      const escrowId = typeof req.query.escrowId === 'string' ? req.query.escrowId : undefined;
+      const type = typeof req.query.type === 'string' ? req.query.type : undefined;
+      const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+      const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+
+      return eventStore.query({ escrowId, type, limit, cursor });
+    }),
+  );
+  chain.get('/indexer', wrap(() => eventIndexer.getState()));
+  app.use('/api/v1/chain', chain);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, docs: '/docs' });
