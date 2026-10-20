@@ -45,6 +45,13 @@ const idParam = {
   schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
   description: 'Contract ID (positive integer)',
 };
+const templateIdParam = {
+  name: 'id',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+  description: 'Template ID (positive integer)',
+};
 const indexParam = {
   name: 'index',
   in: 'path',
@@ -61,6 +68,7 @@ const addressParam = {
 };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 const reputationRef = { $ref: '#/components/schemas/Reputation' };
+const templateRef = { $ref: '#/components/schemas/Template' };
 
 export const openapi = {
   openapi: '3.0.3',
@@ -73,7 +81,7 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Templates' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -164,6 +172,47 @@ export const openapi = {
         responses: { 200: { description: 'Reputation', content: json(reputationRef) }, ...errorResponses },
       },
     },
+    '/api/v1/templates': {
+      post: {
+        tags: ['Templates'],
+        summary: 'Create a milestone template',
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/CreateTemplateRequest' }) },
+        responses: { 201: { description: 'Created', content: json(templateRef) }, ...errorResponses },
+      },
+      get: {
+        tags: ['Templates'],
+        summary: 'List milestone templates',
+        parameters: [
+          { name: 'owner', in: 'query', required: true, schema: { type: 'string', minLength: 1 }, description: 'Template owner address' },
+        ],
+        responses: {
+          200: { description: 'Templates', content: json({ type: 'object', properties: { data: { type: 'array', items: templateRef } } }) },
+          ...validationErrorResponse,
+        },
+      },
+    },
+    '/api/v1/templates/{id}': {
+      get: {
+        tags: ['Templates'],
+        summary: 'Get a milestone template',
+        parameters: [templateIdParam],
+        responses: { 200: { description: 'Template', content: json(templateRef) }, ...errorResponses },
+      },
+      put: {
+        tags: ['Templates'],
+        summary: 'Update a milestone template (owner only)',
+        parameters: [templateIdParam],
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/UpdateTemplateRequest' }) },
+        responses: { 200: { description: 'Updated template', content: json(templateRef) }, ...errorResponses },
+      },
+      delete: {
+        tags: ['Templates'],
+        summary: 'Delete a milestone template (owner only)',
+        parameters: [templateIdParam],
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/DeleteTemplateRequest' }) },
+        responses: { 200: { description: 'Deleted', content: json({ type: 'object', properties: { success: { type: 'boolean' } } }) }, ...errorResponses },
+      },
+    },
   },
   components: {
     schemas: {
@@ -191,6 +240,8 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          templateId: { type: 'integer', nullable: true },
+          templateVersion: { type: 'integer', nullable: true },
         },
       },
       Reputation: {
@@ -229,35 +280,136 @@ export const openapi = {
         },
         required: ['error', 'message', 'details'],
       },
-      CreateContractRequest: {
+      Template: {
         type: 'object',
-        required: ['client', 'freelancer', 'milestones'],
         properties: {
-          title: { type: 'string', maxLength: 120 },
-          client: { type: 'string', minLength: 1 },
-          freelancer: { type: 'string', minLength: 1 },
-          token: { type: 'string', maxLength: 64 },
+          id: { type: 'integer' },
+          owner: { type: 'string' },
+          name: { type: 'string', maxLength: 80 },
+          description: { type: 'string', maxLength: 500, nullable: true },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
           milestones: {
             type: 'array',
+            items: { $ref: '#/components/schemas/TemplateMilestone' },
             minItems: 1,
             maxItems: 20,
-            items: {
-              oneOf: [
-                { type: 'integer', minimum: 1 },
-                {
-                  type: 'object',
-                  properties: {
-                    title: { type: 'string', maxLength: 120 },
-                    amount: { type: 'integer', minimum: 1 },
-                  },
-                  required: ['amount'],
-                  additionalProperties: false,
-                },
-              ],
+          },
+          version: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+        required: ['id', 'owner', 'name', 'mode', 'milestones', 'version', 'createdAt', 'updatedAt'],
+      },
+      TemplateMilestone: {
+        type: 'object',
+        oneOf: [
+          {
+            type: 'object',
+            properties: {
+              title: { type: 'string', maxLength: 120 },
+              amount: { type: 'integer', minimum: 1 },
             },
+            required: ['amount'],
+            additionalProperties: false,
+          },
+          {
+            type: 'object',
+            properties: {
+              title: { type: 'string', maxLength: 120 },
+              percentBps: { type: 'integer', minimum: 1, maximum: 10000 },
+            },
+            required: ['percentBps'],
+            additionalProperties: false,
+          },
+        ],
+      },
+      CreateTemplateRequest: {
+        type: 'object',
+        required: ['owner', 'name', 'mode', 'milestones'],
+        properties: {
+          owner: { type: 'string', minLength: 1 },
+          name: { type: 'string', minLength: 1, maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/TemplateMilestone' },
+            minItems: 1,
+            maxItems: 20,
           },
         },
         additionalProperties: false,
+      },
+      UpdateTemplateRequest: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/TemplateMilestone' },
+            minItems: 1,
+            maxItems: 20,
+          },
+        },
+        additionalProperties: false,
+        minProperties: 1,
+      },
+      DeleteTemplateRequest: {
+        type: 'object',
+        required: ['owner'],
+        properties: {
+          owner: { type: 'string', minLength: 1 },
+        },
+        additionalProperties: false,
+      },
+      CreateContractRequest: {
+        oneOf: [
+          {
+            type: 'object',
+            required: ['client', 'freelancer', 'milestones'],
+            properties: {
+              title: { type: 'string', maxLength: 120 },
+              client: { type: 'string', minLength: 1 },
+              freelancer: { type: 'string', minLength: 1 },
+              token: { type: 'string', maxLength: 64 },
+              milestones: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 20,
+                items: {
+                  oneOf: [
+                    { type: 'integer', minimum: 1 },
+                    {
+                      type: 'object',
+                      properties: {
+                        title: { type: 'string', maxLength: 120 },
+                        amount: { type: 'integer', minimum: 1 },
+                      },
+                      required: ['amount'],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+              },
+            },
+            additionalProperties: false,
+          },
+          {
+            type: 'object',
+            required: ['client', 'freelancer', 'templateId', 'budget'],
+            properties: {
+              title: { type: 'string', maxLength: 120 },
+              client: { type: 'string', minLength: 1 },
+              freelancer: { type: 'string', minLength: 1 },
+              token: { type: 'string', maxLength: 64 },
+              templateId: { type: 'integer', minimum: 1 },
+              budget: { type: 'integer', minimum: 1 },
+            },
+            additionalProperties: false,
+          },
+        ],
       },
       DepositRequest: {
         type: 'object',

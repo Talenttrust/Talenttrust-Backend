@@ -17,6 +17,11 @@ import {
   CancelBody,
   ListQuery,
   ReputationAddressParam,
+  TemplateIdParam,
+  CreateTemplateBody,
+  UpdateTemplateBody,
+  DeleteTemplateBody,
+  TemplateOwnerQuery,
 } from './validation/schemas';
 
 const startedAt = Date.now();
@@ -65,6 +70,11 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
         'GET  /api/v1/reputation/:address',
+        'POST /api/v1/templates',
+        'GET  /api/v1/templates',
+        'GET  /api/v1/templates/:id',
+        'PUT  /api/v1/templates/:id',
+        'DELETE /api/v1/templates/:id',
       ],
     })),
   );
@@ -153,6 +163,41 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
     validate({ params: ReputationAddressParam }),
     wrap((req) => store.getReputation(req.params.address)),
   );
+
+  // Template routes
+  v1.post(
+    '/templates',
+    validate({ body: CreateTemplateBody }),
+    wrap((req, res) => {
+      res.status(201).json(store.createTemplate(req.body));
+    }),
+  );
+  v1.get(
+    '/templates',
+    validate({ query: TemplateOwnerQuery }),
+    wrap((req) => ({
+      data: store.listTemplates({ owner: req.query.owner as string }),
+    })),
+  );
+  v1.get(
+    '/templates/:id',
+    validate({ params: TemplateIdParam }),
+    wrap((req) => store.getTemplate(Number(req.params.id))),
+  );
+  v1.put(
+    '/templates/:id',
+    validate({ params: TemplateIdParam, body: UpdateTemplateBody }),
+    wrap((req) => store.updateTemplate(Number(req.params.id), req.body.owner, req.body)),
+  );
+  v1.delete(
+    '/templates/:id',
+    validate({ params: TemplateIdParam, body: DeleteTemplateBody }),
+    wrap((req) => {
+      store.deleteTemplate(Number(req.params.id), req.body.owner);
+      return { success: true };
+    }),
+  );
+
   app.use('/api/v1', v1);
 
   app.use((req, res) => {
