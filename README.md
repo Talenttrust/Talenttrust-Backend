@@ -36,6 +36,18 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
 
+Method handling follows the router registry in `src/routes.ts`:
+
+- An unsupported method on a known path returns `405` with an `Allow` header and
+  `{ "error": "method_not_allowed", "message": "...", "allowed": [...] }`.
+- `OPTIONS` on a known path returns `204` with `Allow` (CORS preflight responses
+  keep their CORS headers).
+- `HEAD` is supported for every `GET` route.
+- Unknown paths still return `404` with `{ "error": "not_found", ... }`.
+
+The same registry generates the `endpoints` list served by `GET /` and the
+`405` response documented for every OpenAPI operation.
+
 ## Development
 
 ```bash

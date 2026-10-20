@@ -1,8 +1,10 @@
 import { config, explorerUrl } from './config';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
+const methodNotAllowed = { $ref: '#/components/responses/MethodNotAllowed' };
 const ok = (description: string, schema: object = { type: 'object' }) => ({
   200: { description, content: json(schema) },
+  405: methodNotAllowed,
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
@@ -55,7 +57,10 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: {
+          201: { description: 'Created', content: json(contractRef) },
+          405: methodNotAllowed,
+        },
       },
     },
     '/api/v1/contracts/{id}': {
@@ -120,6 +125,26 @@ export const openapi = {
     },
   },
   components: {
+    responses: {
+      MethodNotAllowed: {
+        description: 'The path exists but does not support this HTTP method.',
+        headers: {
+          Allow: {
+            description: 'Comma-separated list of supported methods, including HEAD for GET routes.',
+            schema: { type: 'string' },
+          },
+        },
+        content: json({
+          type: 'object',
+          required: ['error', 'message', 'allowed'],
+          properties: {
+            error: { type: 'string', enum: ['method_not_allowed'] },
+            message: { type: 'string' },
+            allowed: { type: 'array', items: { type: 'string' } },
+          },
+        }),
+      },
+    },
     schemas: {
       EscrowContract: {
         type: 'object',
