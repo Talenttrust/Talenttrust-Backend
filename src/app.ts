@@ -4,13 +4,14 @@ import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { ChainReader, createStellarChainReader } from './stellar/chain-status';
 
 const startedAt = Date.now();
 
-type Handler = (req: Request, res: Response) => unknown;
-const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
+type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
+const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const out = fn(req, res);
+    const out = await fn(req, res);
     if (out !== undefined && !res.headersSent) res.json(out);
   } catch (err) {
     next(err);
@@ -23,7 +24,14 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export interface CreateAppOptions {
+  store?: EscrowStore;
+  /** Injected for tests; defaults to the real cached Soroban RPC reader. */
+  chainReader?: ChainReader;
+}
+
+export function createApp({ store = new EscrowStore().seed(), chainReader }: CreateAppOptions = {}) {
+  const reader = chainReader ?? createStellarChainReader();
   const app = express();
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
@@ -80,11 +88,12 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   const v1 = express.Router();
   v1.get(
     '/chain',
-    wrap(() => ({
+    wrap(async (req) => ({
       network: config.network,
       rpcUrl: config.rpcUrl,
       contractId: config.contractId,
       explorer: explorerUrl(),
+      onChain: await reader.getStatus({ refresh: req.query.refresh === 'true' }),
     })),
   );
   v1.get('/stats', wrap(() => store.stats()));

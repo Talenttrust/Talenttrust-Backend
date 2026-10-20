@@ -24,7 +24,7 @@ data is per-instance and resets on redeploy.
 | GET | `/health` | Health check |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
-| GET | `/api/v1/chain` | On-chain contract deployment info |
+| GET | `/api/v1/chain` | Deployment info + live on-chain status (`version`, `paused`, `contractCount`, `admin`, `latestLedger`); `?refresh=true` bypasses the 15s cache (rate-limited to once per 5s) |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
@@ -47,7 +47,8 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
-`STELLAR_RPC_URL`, `FRONTEND_URL`.
+`STELLAR_RPC_URL`, `FRONTEND_URL`, `RPC_TIMEOUT_MS` (default 4000), `CHAIN_STATUS_TTL_MS`
+(default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000).
 
 ## Deployment
 

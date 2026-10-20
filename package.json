@@ -16,6 +16,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@stellar/stellar-sdk": "^17.2.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "helmet": "^7.2.0"
@@ -35,6 +36,24 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "roots": ["<rootDir>/tests"]
+    "roots": [
+      "<rootDir>/tests"
+    ],
+    "setupFiles": [
+      "<rootDir>/tests/setup/network-guard.ts"
+    ],
+    "transform": {
+      "^.+\\.[tj]sx?$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "allowJs": true
+          }
+        }
+      ]
+    },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!.*\\/node_modules\\/)(?!(@exodus/bytes|@noble|uint8array-extras))"
+    ]
   }
 }

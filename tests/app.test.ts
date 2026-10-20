@@ -3,7 +3,7 @@ import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 
 describe('TalentTrust API', () => {
-  const app = createApp(new EscrowStore());
+  const app = createApp({ store: new EscrowStore() });
 
   it('serves health and root', async () => {
     const h = await request(app).get('/health');

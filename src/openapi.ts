@@ -22,7 +22,39 @@ export const openapi = {
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
-      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
+      get: {
+        tags: ['System'],
+        summary: 'On-chain escrow contract deployment info with live contract status',
+        description:
+          'Static deployment info plus `onChain`, a cached snapshot read from the Soroban RPC ' +
+          '(contract version, paused flag, escrow count, admin, latest ledger). The endpoint ' +
+          'always returns 200; when the RPC is unreachable, `onChain.reachable` is false and ' +
+          '`onChain.error` explains why. If a previous snapshot exists it is served with ' +
+          '`onChain.stale` true. Results are cached for 15s; `refresh=true` bypasses the cache ' +
+          'at most once per 5 seconds.',
+        parameters: [
+          {
+            name: 'refresh',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['true'] },
+            description: 'Bypass the cache and re-read the contract (rate-limited to once per 5s).',
+          },
+        ],
+        responses: ok(
+          'Deployment and live on-chain status',
+          {
+            type: 'object',
+            properties: {
+              network: { type: 'string' },
+              rpcUrl: { type: 'string' },
+              contractId: { type: 'string' },
+              explorer: { type: 'string' },
+              onChain: { $ref: '#/components/schemas/OnChainStatus' },
+            },
+          },
+        ),
+      },
     },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
     '/api/v1/contracts': {
@@ -121,6 +153,21 @@ export const openapi = {
   },
   components: {
     schemas: {
+      OnChainStatus: {
+        type: 'object',
+        description: 'Live escrow contract state read from the Soroban RPC (cached, degrades gracefully).',
+        properties: {
+          reachable: { type: 'boolean', description: 'False when the RPC could not be reached and no cached snapshot exists.' },
+          latestLedger: { type: 'integer', description: 'Latest ledger seen at fetch time.' },
+          version: { type: 'string', description: 'Contract version() return value.' },
+          paused: { type: 'boolean', description: 'Contract is_paused() return value.' },
+          contractCount: { type: 'integer', description: 'Contract contract_count() return value.' },
+          admin: { type: 'string', description: 'Contract get_admin() return value.' },
+          fetchedAt: { type: 'string', format: 'date-time' },
+          stale: { type: 'boolean', description: 'True when serving the last good snapshot after an RPC failure.' },
+          error: { type: 'string', description: 'Sanitised error summary when the last RPC read failed.' },
+        },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
