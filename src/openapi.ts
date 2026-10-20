@@ -24,6 +24,33 @@ export const openapi = {
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
+    '/api/v1/chain/contracts/{chainId}': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Read an escrow contract from Soroban',
+        parameters: [{ name: 'chainId', in: 'path', required: true, schema: { type: 'string', pattern: '^[1-9][0-9]*$' } }],
+        responses: {
+          200: { description: 'On-chain escrow contract', content: json({ $ref: '#/components/schemas/ChainEscrow' }) },
+          400: { description: 'Invalid chain id' },
+          404: { description: 'Contract not found' },
+          502: { description: 'Contract read failed' },
+          503: { description: 'Soroban RPC unavailable' },
+        },
+      },
+    },
+    '/api/v1/chain/reputation/{address}': {
+      get: {
+        tags: ['Reputation'],
+        summary: 'Read reputation from Soroban',
+        parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'On-chain reputation', content: json({ $ref: '#/components/schemas/ChainReputation' }) },
+          400: { description: 'Invalid Stellar address' },
+          502: { description: 'Contract read failed' },
+          503: { description: 'Soroban RPC unavailable' },
+        },
+      },
+    },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
     '/api/v1/contracts': {
       get: {
@@ -145,6 +172,24 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+        },
+      },
+      ChainEscrow: {
+        type: 'object',
+        required: ['id', 'client', 'freelancer', 'token', 'milestones', 'totalAmount', 'fundedAmount', 'releasedAmount', 'status', 'reputationIssued', 'source', 'latestLedger'],
+        properties: {
+          id: { type: 'string' }, client: { type: 'string' }, freelancer: { type: 'string' }, token: { type: 'string' },
+          milestones: { type: 'array', items: { type: 'object', properties: { index: { type: 'integer' }, amount: { type: 'string' }, released: { type: 'boolean' } } } },
+          totalAmount: { type: 'string' }, fundedAmount: { type: 'string' }, releasedAmount: { type: 'string' },
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          reputationIssued: { type: 'boolean' }, source: { type: 'string', enum: ['chain'] }, latestLedger: { type: 'integer' },
+        },
+      },
+      ChainReputation: {
+        type: 'object', required: ['address', 'completedContracts', 'totalRating', 'averageRating', 'source'],
+        properties: {
+          address: { type: 'string' }, completedContracts: { type: 'integer' }, totalRating: { type: 'integer' },
+          averageRating: { type: 'number' }, source: { type: 'string', enum: ['chain'] },
         },
       },
     },

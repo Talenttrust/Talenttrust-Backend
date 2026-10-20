@@ -4,6 +4,8 @@ import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
+import { StrKey } from '@stellar/stellar-sdk';
 
 const startedAt = Date.now();
 
@@ -11,10 +13,46 @@ type Handler = (req: Request, res: Response) => unknown;
 const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
   try {
     const out = fn(req, res);
-    if (out !== undefined && !res.headersSent) res.json(out);
+    Promise.resolve(out).then((value) => {
+      if (value !== undefined && !res.headersSent) res.json(value);
+    }, next);
   } catch (err) {
     next(err);
   }
+};
+
+class ChainReadCache {
+  private readonly values = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
+
+  constructor(private readonly ttlMs: number, private readonly maxEntries = 256) {}
+
+  get<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const cached = this.values.get(key);
+    if (cached && cached.expiresAt > now) return cached.promise as Promise<T>;
+    if (cached) this.values.delete(key);
+    while (this.values.size >= this.maxEntries) this.values.delete(this.values.keys().next().value as string);
+    const promise = load();
+    this.values.set(key, { expiresAt: now + this.ttlMs, promise });
+    promise.catch(() => {
+      if (this.values.get(key)?.promise === promise) this.values.delete(key);
+    });
+    return promise;
+  }
+}
+
+const chainId = (raw: string): bigint => {
+  if (!/^[1-9]\d*$/.test(raw)) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  const value = BigInt(raw);
+  if (value > 18_446_744_073_709_551_615n) {
+    throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  }
+  return value;
+};
+
+const stellarAddress = (raw: string): string => {
+  if (!StrKey.isValidEd25519PublicKey(raw)) throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar account');
+  return raw;
 };
 
 const id = (req: Request) => {
@@ -23,8 +61,10 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export function createApp(store: EscrowStore = new EscrowStore().seed(), chainClient: ChainReadClient = new SorobanChainReadClient()) {
   const app = express();
+  const ttl = Number(process.env.CHAIN_READ_TTL_MS ?? 5000);
+  const chainCache = new ChainReadCache(Number.isFinite(ttl) && ttl >= 0 ? ttl : 5000);
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
   app.use(helmet({ contentSecurityPolicy: false }));
@@ -46,6 +86,8 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'GET  /docs',
         'GET  /openapi.json',
         'GET  /api/v1/chain',
+        'GET  /api/v1/chain/contracts/:chainId',
+        'GET  /api/v1/chain/reputation/:address',
         'GET  /api/v1/stats',
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
@@ -87,6 +129,25 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
       explorer: explorerUrl(),
     })),
   );
+  v1.get('/chain/contracts/:chainId', wrap(async (req) => {
+    const id = chainId(req.params.chainId);
+    const result = await chainCache.get(`contract:${id}`, () => chainClient.getContract(id));
+    return { ...result.value, source: 'chain', latestLedger: result.latestLedger };
+  }));
+  v1.get('/chain/reputation/:address', wrap(async (req) => {
+    const address = stellarAddress(req.params.address);
+    const result = await chainCache.get(`reputation:${address}`, () => chainClient.getReputation(address));
+    const averageRating = result.value.completedContracts
+      ? Math.round((result.value.totalRating / result.value.completedContracts) * 100) / 100
+      : 0;
+    return {
+      address,
+      completedContracts: result.value.completedContracts,
+      totalRating: result.value.totalRating,
+      averageRating,
+      source: 'chain',
+    };
+  }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',
@@ -127,6 +188,17 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof HttpError) {
       res.status(err.status).json({ error: err.code, message: err.message });
+      return;
+    }
+    if (err instanceof ChainReadError) {
+      if (err.failure === 'not_found') {
+        res.status(404).json({ error: 'contract_not_found', message: 'On-chain contract not found' });
+      } else if (err.failure === 'contract') {
+        res.status(502).json({ error: 'chain_error', message: 'On-chain read failed', contractError: err.contractError });
+      } else {
+        res.setHeader('Retry-After', '1');
+        res.status(503).json({ error: 'chain_unavailable', message: 'On-chain service temporarily unavailable' });
+      }
       return;
     }
     if (err && typeof err === 'object' && (err as { type?: string }).type === 'entity.parse.failed') {
