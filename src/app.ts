@@ -3,7 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
-import { openapi, docsHtml } from './openapi';
+import { openapi, docsHtml, docsCsp } from './openapi';
+import { allowlist, corsOptionsFor, originGuard } from './cors';
 
 const startedAt = Date.now();
 
@@ -23,12 +24,38 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export function createApp(store: EscrowStore = new EscrowStore().seed(), origins: string[] = allowlist()) {
   const app = express();
   app.disable('x-powered-by');
-  // CSP disabled so the /docs page can load Swagger UI from a CDN.
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(cors());
+  // Trust the first hop (Vercel / any reverse proxy) so req.protocol reflects X-Forwarded-Proto.
+  // Without this the same-origin allowance in originGuard compares https://host Origin
+  // headers against http://host and 403s same-origin non-GET requests behind the proxy.
+  app.set('trust proxy', 1);
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: false,
+        directives: {
+          'default-src': ["'self'"],
+          'base-uri': ["'self'"],
+          // unpkg hosts the pinned Swagger UI assets on /docs (all SRI-checked);
+          // docsCsp allows that page's own inline style/script and nothing else.
+          'script-src': ["'self'", 'https://unpkg.com', docsCsp.script],
+          'script-src-attr': ["'none'"],
+          'style-src': ["'self'", 'https://unpkg.com', docsCsp.style],
+          'style-src-attr': ["'unsafe-inline'"],
+          'img-src': ["'self'", 'data:'],
+          'font-src': ["'self'", 'data:', 'https://unpkg.com'],
+          'connect-src': ["'self'"],
+          'object-src': ["'none'"],
+          'frame-ancestors': ["'none'"],
+          'form-action': ["'self'"],
+        },
+      },
+    }),
+  );
+  app.use(originGuard(origins));
+  app.use(cors(corsOptionsFor(origins)));
   app.use(express.json({ limit: '100kb' }));
 
   app.get(

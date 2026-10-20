@@ -47,7 +47,19 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
-`STELLAR_RPC_URL`, `FRONTEND_URL`.
+`STELLAR_RPC_URL`, `FRONTEND_URL`, `CORS_ORIGINS`.
+
+## Security
+
+- **CORS allowlist**: cross-origin requests are answered only for `FRONTEND_URL`, extra origins listed
+  in `CORS_ORIGINS` (comma-separated), local dev origins outside production, and the API's own origin.
+  Any other `Origin` gets `403 origin_not_allowed` before a handler runs; requests without an `Origin`
+  (curl, server-to-server) are unaffected.
+- **CSP**: every response carries a `Content-Security-Policy` (no `unsafe-inline` scripts) that permits
+  only self-hosted code plus the pinned Swagger UI assets on `/docs`.
+- **SRI**: the `/docs` page loads `swagger-ui-dist@5.17.14` from unpkg with `sha384` `integrity`
+  hashes and `crossorigin="anonymous"`; the page's inline style/script are allowed by exact `sha256`
+  hashes derived from the served markup.
 
 ## Deployment
 
