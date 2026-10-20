@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { AuditContext } from './audit';
 
 const startedAt = Date.now();
 
@@ -21,6 +22,12 @@ const id = (req: Request) => {
   const n = Number(req.params.id);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
   return n;
+};
+
+const auditCtx = (req: Request): AuditContext => {
+  const actor = (req as any).auth?.address || (req.headers['x-api-key'] as string) || null;
+  const requestId = req.headers['x-request-id'] as string | undefined;
+  return { actor, requestId };
 };
 
 export function createApp(store: EscrowStore = new EscrowStore().seed()) {
@@ -57,6 +64,8 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
         'GET  /api/v1/reputation/:address',
+        'GET  /api/v1/contracts/:id/history',
+        'GET  /api/v1/audit/verify',
       ],
     })),
   );
@@ -100,23 +109,32 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   v1.post(
     '/contracts',
     wrap((req, res) => {
-      res.status(201).json(store.create(req.body ?? {}));
+      res.status(201).json(store.create(req.body ?? {}, auditCtx(req)));
     }),
   );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
-  v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
+  v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount, auditCtx(req))));
   v1.post(
     '/contracts/:id/milestones/:index/release',
-    wrap((req) => store.release(id(req), Number(req.params.index))),
+    wrap((req) => store.release(id(req), Number(req.params.index), auditCtx(req))),
   );
   v1.post(
     '/contracts/:id/dispute',
-    wrap((req) => store.openDispute(id(req), req.body?.raisedBy, req.body?.reason)),
+    wrap((req) => store.openDispute(id(req), req.body?.raisedBy, req.body?.reason, auditCtx(req))),
   );
-  v1.post('/contracts/:id/resolve', wrap((req) => store.resolveDispute(id(req), req.body?.freelancerBps)));
-  v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req))));
-  v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
+  v1.post('/contracts/:id/resolve', wrap((req) => store.resolveDispute(id(req), req.body?.freelancerBps, auditCtx(req))));
+  v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req), auditCtx(req))));
+  v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating, auditCtx(req))));
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+  v1.get(
+    '/contracts/:id/history',
+    wrap((req) => {
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const cursor = req.query.cursor ? Number(req.query.cursor) : undefined;
+      return store.audit.getContractHistory(id(req), limit, cursor);
+    }),
+  );
+  v1.get('/audit/verify', wrap(() => store.audit.verify()));
   app.use('/api/v1', v1);
 
   app.use((req, res) => {

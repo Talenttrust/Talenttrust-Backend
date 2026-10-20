@@ -6,6 +6,7 @@ const ok = (description: string, schema: object = { type: 'object' }) => ({
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const auditEntryRef = { $ref: '#/components/schemas/AuditEntry' };
 
 export const openapi = {
   openapi: '3.0.3',
@@ -18,7 +19,7 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Audit' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -118,6 +119,38 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/v1/contracts/{id}/history': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get audit history for a contract',
+        parameters: [
+          idParam,
+          { name: 'limit', in: 'query', schema: { type: 'integer' }, description: 'Maximum number of entries to return' },
+          { name: 'cursor', in: 'query', schema: { type: 'integer' }, description: 'Sequence number to start from (exclusive)' },
+        ],
+        responses: ok('Audit history', {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: auditEntryRef },
+            nextCursor: { type: 'integer', nullable: true },
+          },
+        }),
+      },
+    },
+    '/api/v1/audit/verify': {
+      get: {
+        tags: ['Audit'],
+        summary: 'Verify audit log integrity',
+        responses: ok('Verification result', {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            entries: { type: 'integer' },
+            brokenAt: { type: 'integer', nullable: true },
+          },
+        }),
+      },
+    },
   },
   components: {
     schemas: {
@@ -145,6 +178,39 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+        },
+      },
+      AuditEntry: {
+        type: 'object',
+        properties: {
+          seq: { type: 'integer' },
+          contractId: { type: 'integer' },
+          action: {
+            type: 'string',
+            enum: ['create', 'deposit', 'release', 'dispute', 'resolve', 'cancel', 'rate'],
+          },
+          actor: { type: 'string', nullable: true },
+          requestId: { type: 'string', nullable: true },
+          at: { type: 'string', format: 'date-time' },
+          before: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number' },
+              releasedAmount: { type: 'number' },
+            },
+          },
+          after: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number' },
+              releasedAmount: { type: 'number' },
+            },
+          },
+          details: { type: 'object' },
+          prevHash: { type: 'string' },
+          hash: { type: 'string' },
         },
       },
     },
