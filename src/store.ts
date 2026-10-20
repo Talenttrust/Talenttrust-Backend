@@ -12,11 +12,31 @@ export type ContractStatus =
   | 'Resolved'
   | 'Cancelled';
 
+export type TemplateMode = 'fixed' | 'percent';
+
+export interface TemplateMilestone {
+  title: string;
+  amount?: number;
+  percentBps?: number;
+}
+
 export interface Milestone {
   index: number;
   title: string;
   amount: number;
   released: boolean;
+}
+
+export interface Template {
+  id: number;
+  owner: string;
+  name: string;
+  description?: string;
+  mode: TemplateMode;
+  milestones: TemplateMilestone[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Dispute {
@@ -40,6 +60,8 @@ export interface EscrowContract {
   status: ContractStatus;
   reputationIssued: boolean;
   dispute?: Dispute;
+  templateId?: number;
+  templateVersion?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -67,7 +89,9 @@ const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
+  private templates = new Map<number, Template>();
   private nextId = 1;
+  private nextTemplateId = 1;
 
   list(filter: { status?: string; party?: string } = {}): EscrowContract[] {
     return [...this.contracts.values()].filter(
@@ -89,33 +113,61 @@ export class EscrowStore {
     freelancer?: unknown;
     token?: unknown;
     milestones?: unknown;
+    templateId?: unknown;
+    budget?: unknown;
   }): EscrowContract {
-    const { client, freelancer } = input;
+    const { client, freelancer, templateId, budget } = input;
+
+    if (templateId !== undefined && input.milestones !== undefined) {
+      throw new HttpError(400, 'invalid_contract', 'Cannot provide both templateId and milestones');
+    }
+
+    let milestones: Milestone[];
+    let totalAmount: number;
+    let templateVersion: number | undefined;
+
+    if (templateId !== undefined) {
+      const tid = Number(templateId);
+      if (!Number.isInteger(tid) || tid <= 0) {
+        throw new HttpError(400, 'invalid_template', 'templateId must be a positive integer');
+      }
+      const resolved = this.resolveTemplate(tid, budget !== undefined ? Number(budget) : undefined);
+      milestones = resolved.milestones;
+      totalAmount = resolved.totalAmount;
+      templateVersion = resolved.templateVersion;
+    } else {
+      if (!Array.isArray(input.milestones) || input.milestones.length === 0) {
+        throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+      }
+      if (input.milestones.length > MAX_MILESTONES) {
+        throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
+      }
+      milestones = input.milestones.map((m: unknown, index: number) => {
+        const raw = (typeof m === 'number' ? { amount: m } : m) as { title?: unknown; amount?: unknown };
+        const amount = Number(raw?.amount);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
+        }
+        return {
+          index,
+          title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
+          amount,
+          released: false,
+        };
+      });
+      totalAmount = milestones.reduce((s, m) => s + m.amount, 0);
+      if (budget !== undefined) {
+        throw new HttpError(400, 'invalid_budget', 'budget must not be provided when using milestones directly');
+      }
+    }
+
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer are required strings');
     }
     if (client === freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
-    if (!Array.isArray(input.milestones) || input.milestones.length === 0) {
-      throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
-    }
-    if (input.milestones.length > MAX_MILESTONES) {
-      throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
-    }
-    const milestones: Milestone[] = input.milestones.map((m: unknown, index: number) => {
-      const raw = (typeof m === 'number' ? { amount: m } : m) as { title?: unknown; amount?: unknown };
-      const amount = Number(raw?.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
-      }
-      return {
-        index,
-        title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
-        amount,
-        released: false,
-      };
-    });
+
     const now = new Date().toISOString();
     const c: EscrowContract = {
       id: this.nextId++,
@@ -124,11 +176,13 @@ export class EscrowStore {
       freelancer,
       token: typeof input.token === 'string' && input.token ? input.token : 'XLM',
       milestones,
-      totalAmount: milestones.reduce((s, m) => s + m.amount, 0),
+      totalAmount,
       fundedAmount: 0,
       releasedAmount: 0,
       status: 'Created',
       reputationIssued: false,
+      templateId: templateId !== undefined ? Number(templateId) : undefined,
+      templateVersion,
       createdAt: now,
       updatedAt: now,
     };
@@ -250,7 +304,7 @@ export class EscrowStore {
     };
   }
 
-  stats() {
+stats() {
     const all = this.list();
     const byStatus: Record<string, number> = {};
     for (const c of all) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
@@ -258,8 +312,218 @@ export class EscrowStore {
       contracts: all.length,
       byStatus,
       totalEscrowed: all.reduce((s, c) => s + (c.fundedAmount - c.releasedAmount), 0),
-      totalReleased: all.reduce((s, c) => s + c.releasedAmount, 0),
+      totalReleased: all.reduce((s, c) => c.releasedAmount, 0),
     };
+  }
+
+  listTemplates(filter: { owner?: string } = {}): Template[] {
+    return [...this.templates.values()].filter(
+      (t) => !filter.owner || t.owner === filter.owner,
+    );
+  }
+
+  getTemplate(id: number): Template {
+    const t = this.templates.get(id);
+    if (!t) throw new HttpError(404, 'template_not_found', `Template ${id} not found`);
+    return t;
+  }
+
+  createTemplate(input: {
+    owner?: unknown;
+    name?: unknown;
+    description?: unknown;
+    mode?: unknown;
+    milestones?: unknown;
+  }): Template {
+    const { owner, name, description, mode, milestones } = input;
+    if (typeof owner !== 'string' || !owner) {
+      throw new HttpError(400, 'invalid_owner', 'owner is required');
+    }
+    if (typeof name !== 'string' || !name || name.length > 80) {
+      throw new HttpError(400, 'invalid_name', 'name is required (max 80 characters)');
+    }
+    if (description !== undefined && (typeof description !== 'string' || description.length > 500)) {
+      throw new HttpError(400, 'invalid_description', 'description must be a string (max 500 characters)');
+    }
+    if (mode !== 'fixed' && mode !== 'percent') {
+      throw new HttpError(400, 'invalid_mode', "mode must be 'fixed' or 'percent'");
+    }
+    if (!Array.isArray(milestones) || milestones.length === 0) {
+      throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+    }
+    if (milestones.length > 20) {
+      throw new HttpError(400, 'invalid_milestones', 'at most 20 milestones');
+    }
+
+    const templateMilestones: TemplateMilestone[] = milestones.map((m: unknown, index: number) => {
+      const raw = m as { title?: unknown; amount?: unknown; percentBps?: unknown };
+      const title = typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`;
+      const amount = raw.amount !== undefined ? Number(raw.amount) : undefined;
+      const percentBps = raw.percentBps !== undefined ? Number(raw.percentBps) : undefined;
+
+      if (mode === 'fixed') {
+        if (amount === undefined || !Number.isFinite(amount) || amount <= 0) {
+          throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
+        }
+        if (percentBps !== undefined) {
+          throw new HttpError(400, 'invalid_milestones', 'fixed mode milestones must not have percentBps');
+        }
+        return { title, amount };
+      } else {
+        if (percentBps === undefined || !Number.isInteger(percentBps) || percentBps <= 0) {
+          throw new HttpError(400, 'invalid_percent', `milestone ${index} percentBps must be a positive integer`);
+        }
+        if (amount !== undefined) {
+          throw new HttpError(400, 'invalid_milestones', 'percent mode milestones must not have amount');
+        }
+        return { title, percentBps };
+      }
+    });
+
+    if (mode === 'percent') {
+      const totalBps = templateMilestones.reduce((s, m) => s + (m.percentBps ?? 0), 0);
+      if (totalBps !== 10000) {
+        throw new HttpError(400, 'invalid_template', 'percentBps must sum to exactly 10000');
+      }
+    }
+
+    const now = new Date().toISOString();
+    const template: Template = {
+      id: this.nextTemplateId++,
+      owner,
+      name,
+      description,
+      mode,
+      milestones: templateMilestones,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.templates.set(template.id, template);
+    return template;
+  }
+
+  updateTemplate(id: number, owner: string, input: {
+    name?: unknown;
+    description?: unknown;
+    mode?: unknown;
+    milestones?: unknown;
+  }): Template {
+    const template = this.getTemplate(id);
+    if (template.owner !== owner) {
+      throw new HttpError(403, 'unauthorized', 'Only the owner can update this template');
+    }
+
+    const { name, description, mode, milestones } = input;
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name || name.length > 80) {
+        throw new HttpError(400, 'invalid_name', 'name is required (max 80 characters)');
+      }
+      template.name = name;
+    }
+    if (description !== undefined) {
+      if (typeof description !== 'string' || description.length > 500) {
+        throw new HttpError(400, 'invalid_description', 'description must be a string (max 500 characters)');
+      }
+      template.description = description;
+    }
+    if (mode !== undefined) {
+      if (mode !== 'fixed' && mode !== 'percent') {
+        throw new HttpError(400, 'invalid_mode', "mode must be 'fixed' or 'percent'");
+      }
+      template.mode = mode;
+    }
+    if (milestones !== undefined) {
+      if (!Array.isArray(milestones) || milestones.length === 0) {
+        throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+      }
+      if (milestones.length > 20) {
+        throw new HttpError(400, 'invalid_milestones', 'at most 20 milestones');
+      }
+
+      const templateMilestones: TemplateMilestone[] = milestones.map((m: unknown, index: number) => {
+        const raw = m as { title?: unknown; amount?: unknown; percentBps?: unknown };
+        const title = typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`;
+        const amount = raw.amount !== undefined ? Number(raw.amount) : undefined;
+        const percentBps = raw.percentBps !== undefined ? Number(raw.percentBps) : undefined;
+
+        const targetMode = mode ?? template.mode;
+        if (targetMode === 'fixed') {
+          if (amount === undefined || !Number.isFinite(amount) || amount <= 0) {
+            throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
+          }
+          if (percentBps !== undefined) {
+            throw new HttpError(400, 'invalid_milestones', 'fixed mode milestones must not have percentBps');
+          }
+          return { title, amount };
+        } else {
+          if (percentBps === undefined || !Number.isInteger(percentBps) || percentBps <= 0) {
+            throw new HttpError(400, 'invalid_percent', `milestone ${index} percentBps must be a positive integer`);
+          }
+          if (amount !== undefined) {
+            throw new HttpError(400, 'invalid_milestones', 'percent mode milestones must not have amount');
+          }
+          return { title, percentBps };
+        }
+      });
+
+      if (template.mode === 'percent') {
+        const totalBps = templateMilestones.reduce((s, m) => s + (m.percentBps ?? 0), 0);
+        if (totalBps !== 10000) {
+          throw new HttpError(400, 'invalid_template', 'percentBps must sum to exactly 10000');
+        }
+      }
+
+      template.milestones = templateMilestones;
+    }
+
+    template.version += 1;
+    template.updatedAt = new Date().toISOString();
+    return template;
+  }
+
+  deleteTemplate(id: number, owner: string): void {
+    const template = this.getTemplate(id);
+    if (template.owner !== owner) {
+      throw new HttpError(403, 'unauthorized', 'Only the owner can delete this template');
+    }
+    this.templates.delete(id);
+  }
+
+  resolveTemplate(templateId: number, budget?: number): { milestones: Milestone[]; totalAmount: number; templateVersion: number } {
+    const template = this.getTemplate(templateId);
+    if (template.mode === 'percent') {
+      if (budget === undefined || !Number.isFinite(budget) || budget <= 0) {
+        throw new HttpError(400, 'invalid_budget', 'budget is required for percent mode templates');
+      }
+      const milestones: Milestone[] = template.milestones.map((m, index) => {
+        const amount = Math.floor((budget * (m.percentBps ?? 0)) / 10000);
+        return {
+          index,
+          title: m.title,
+          amount,
+          released: false,
+        };
+      });
+      const sum = milestones.reduce((s, m) => s + m.amount, 0);
+      const remainder = budget - sum;
+      if (milestones.length > 0) {
+        milestones[milestones.length - 1].amount += remainder;
+      }
+      return { milestones, totalAmount: budget, templateVersion: template.version };
+    } else {
+      if (budget !== undefined) {
+        throw new HttpError(400, 'invalid_budget', 'budget must not be provided for fixed mode templates');
+      }
+      const milestones: Milestone[] = template.milestones.map((m, index) => ({
+        index,
+        title: m.title,
+        amount: m.amount!,
+        released: false,
+      }));
+      const totalAmount = milestones.reduce((s, m) => s + m.amount, 0);
+      return { milestones, totalAmount, templateVersion: template.version };
+    }
   }
 
   /** Seed a few demo engagements so the API is explorable out of the box. */
