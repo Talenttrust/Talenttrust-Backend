@@ -41,6 +41,25 @@ class ChainReadCache {
   }
 }
 
+class ChainRateLimiter {
+  private readonly clients = new Map<string, { windowStarted: number; count: number }>();
+
+  constructor(private readonly maxRequests = 60, private readonly windowMs = 60_000, private readonly maxClients = 1024) {}
+
+  allow(key: string): boolean {
+    const now = Date.now();
+    const current = this.clients.get(key);
+    if (!current || now - current.windowStarted >= this.windowMs) {
+      while (this.clients.size >= this.maxClients) this.clients.delete(this.clients.keys().next().value as string);
+      this.clients.set(key, { windowStarted: now, count: 1 });
+      return true;
+    }
+    if (current.count >= this.maxRequests) return false;
+    current.count += 1;
+    return true;
+  }
+}
+
 const chainId = (raw: string): bigint => {
   if (!/^[1-9]\d*$/.test(raw)) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
   const value = BigInt(raw);
@@ -65,6 +84,13 @@ export function createApp(store: EscrowStore = new EscrowStore().seed(), chainCl
   const app = express();
   const ttl = Number(process.env.CHAIN_READ_TTL_MS ?? 5000);
   const chainCache = new ChainReadCache(Number.isFinite(ttl) && ttl >= 0 ? ttl : 5000);
+  const chainRateLimiter = new ChainRateLimiter();
+  const allowChainRead = (req: Request, res: Response) => {
+    if (!chainRateLimiter.allow(req.ip || 'unknown')) {
+      res.setHeader('Retry-After', '60');
+      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
+    }
+  };
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
   app.use(helmet({ contentSecurityPolicy: false }));
@@ -129,12 +155,14 @@ export function createApp(store: EscrowStore = new EscrowStore().seed(), chainCl
       explorer: explorerUrl(),
     })),
   );
-  v1.get('/chain/contracts/:chainId', wrap(async (req) => {
+  v1.get('/chain/contracts/:chainId', wrap(async (req, res) => {
+    allowChainRead(req, res);
     const id = chainId(req.params.chainId);
     const result = await chainCache.get(`contract:${id}`, () => chainClient.getContract(id));
     return { ...result.value, source: 'chain', latestLedger: result.latestLedger };
   }));
-  v1.get('/chain/reputation/:address', wrap(async (req) => {
+  v1.get('/chain/reputation/:address', wrap(async (req, res) => {
+    allowChainRead(req, res);
     const address = stellarAddress(req.params.address);
     const result = await chainCache.get(`reputation:${address}`, () => chainClient.getReputation(address));
     const averageRating = result.value.completedContracts

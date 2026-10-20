@@ -50,8 +50,9 @@ npm run build && npm start
 
 Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
 `STELLAR_RPC_URL`, `CHAIN_READ_TTL_MS`, `FRONTEND_URL`. Chain reads are cached for 5 seconds by
-default and identical concurrent reads share one Soroban simulation. Amounts from the chain are
-returned as decimal strings so large `i128` values remain exact.
+default and identical concurrent reads share one Soroban simulation. Chain read endpoints are also
+limited to 60 requests per minute per client. Amounts from the chain are returned as decimal
+strings so large `i128` values remain exact.
 
 The chain contract endpoint returns the escrow fields (`id`, parties, token, milestones, totals,
 status, and `reputationIssued`) together with `source: "chain"` and `latestLedger`. The reputation

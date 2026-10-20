@@ -90,4 +90,15 @@ describe('on-chain read-through routes', () => {
     await request(app).get('/api/v1/chain/contracts/1').expect(200);
     expect(rpc.getContract).toHaveBeenCalledTimes(2);
   });
+
+  it('bounds repeated chain reads per client', async () => {
+    const rpc = client();
+    const app = createApp(new EscrowStore(), rpc);
+    for (let index = 0; index < 60; index += 1) {
+      await request(app).get(`/api/v1/chain/contracts/${index + 1}`).expect(200);
+    }
+    const limited = await request(app).get('/api/v1/chain/contracts/61').expect(429);
+    expect(limited.headers['retry-after']).toBe('60');
+    expect(limited.body).toEqual({ error: 'chain_rate_limited', message: 'Too many chain read requests' });
+  });
 });
