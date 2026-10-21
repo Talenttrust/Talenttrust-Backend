@@ -106,13 +106,18 @@ export function startServer({
     app.set('draining', true);
 
     return new Promise((resolve) => {
+      let acceptStopped = false;
       server.close(() => {
-        // Stopped accepting new connections.
+        acceptStopped = true;
       });
       server.closeIdleConnections();
 
       const start = Date.now();
       const poll = () => {
+        if (!acceptStopped) {
+          setTimeout(poll, 10);
+          return;
+        }
         if (activeRequests === 0) {
           resolve({ forced: false });
           return;
