@@ -1,11 +1,10 @@
 import { createApp } from './app';
+import { startServer, parsePort } from './server';
 
-const port = Number(process.env.PORT) || 3001;
+const port = parsePort(process.env.PORT);
 
 if (require.main === module) {
-  createApp().listen(port, () => {
-    console.log(`TalentTrust API listening on http://localhost:${port}`);
-  });
+  startServer({ app: createApp(), port });
 }
 
 export { createApp };
