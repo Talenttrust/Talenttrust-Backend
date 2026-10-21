@@ -1,3 +1,4 @@
+import { allowedActions, describeStateMachine } from './stateMachine';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -119,6 +120,8 @@ export function createApp(
         'GET  /openapi.json',
         'GET  /api/v1/chain',
         'GET  /api/v1/stats',
+        'GET  /api/v1/state-machine',
+        'GET  /api/v1/contracts/:id/actions',
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
@@ -164,6 +167,14 @@ export function createApp(
       explorer: explorerUrl(),
     })),
   );
+  v1.get('/state-machine', wrap(() => describeStateMachine()));
+  v1.get('/contracts/:id/actions', wrap((req) => {
+    const c = store.get(id(req));
+    if (req.query.as !== undefined && (typeof req.query.as !== 'string' || !req.query.as.trim())) {
+      throw new HttpError(400, 'invalid_actor', 'as must be a non-empty address string');
+    }
+    return allowedActions(c, req.query.as as string | undefined);
+  }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',

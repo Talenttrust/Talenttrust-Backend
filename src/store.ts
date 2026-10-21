@@ -1,3 +1,4 @@
+import { assertAllowed, TRANSITIONS, usesBigDeposit } from './stateMachine';
 /**
  * In-memory escrow store. Mirrors the state machine of the on-chain Soroban
  * escrow contract so the API can be used without a database. Data lives only
@@ -78,7 +79,6 @@ export class HttpError extends Error {
 }
 
 const MAX_MILESTONES = 20;
-const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
@@ -168,12 +168,6 @@ export class EscrowStore {
     return c;
   }
 
-  private requireActive(c: EscrowContract) {
-    if (!ACTIVE.includes(c.status)) {
-      throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
-    }
-  }
-
   private touch(c: EscrowContract) {
     c.updatedAt = new Date().toISOString();
     return c;
@@ -181,81 +175,32 @@ export class EscrowStore {
 
   deposit(id: number, amountRaw: unknown): EscrowContract {
     const c = this.get(id);
-    this.requireActive(c);
-    const isBig =
-      typeof c.totalAmount === 'string' ||
-      (typeof amountRaw === 'string' && /^\d+$/.test(amountRaw));
-
-    if (isBig) {
-      let amount: bigint;
-      try {
-        amount = BigInt(String(amountRaw));
-      } catch {
-        throw new HttpError(400, 'invalid_amount', 'amount must be positive');
-      }
-      if (amount <= 0n) {
-        throw new HttpError(400, 'invalid_amount', 'amount must be positive');
-      }
-      const curFunded = BigInt(String(c.fundedAmount));
-      const total = BigInt(String(c.totalAmount));
-      if (curFunded + amount > total) {
-        throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
-      }
-      c.fundedAmount = (curFunded + amount).toString();
-      if (BigInt(c.fundedAmount) === total) c.status = 'Funded';
-      return this.touch(c);
-    }
-
-    const amount = Number(amountRaw);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new HttpError(400, 'invalid_amount', 'amount must be positive');
-    }
-    if (Number(c.fundedAmount) + amount > Number(c.totalAmount)) {
-      throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
-    }
-    c.fundedAmount = Number(c.fundedAmount) + amount;
-    if (c.fundedAmount === c.totalAmount) c.status = 'Funded';
+    assertAllowed('deposit', c, { amount: amountRaw });
+    c.fundedAmount = usesBigDeposit(c, amountRaw)
+      ? (BigInt(String(c.fundedAmount)) + BigInt(String(amountRaw))).toString()
+      : Number(c.fundedAmount) + Number(amountRaw);
+    c.status = TRANSITIONS.deposit.nextStatus(c);
     return this.touch(c);
   }
 
   release(id: number, index: number): EscrowContract {
     const c = this.get(id);
-    this.requireActive(c);
+    assertAllowed('release', c, { index });
     const m = c.milestones[index];
-    if (!m) throw new HttpError(404, 'milestone_not_found', `Milestone ${index} not found`);
-    if (m.released) throw new HttpError(409, 'already_released', 'Milestone already released');
-
-    const isBig = typeof c.totalAmount === 'string' || typeof m.amount === 'string';
-    if (isBig) {
-      const balance = BigInt(String(c.fundedAmount)) - BigInt(String(c.releasedAmount));
-      const needed = BigInt(String(m.amount));
-      if (balance < needed) {
-        throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
-      }
-      m.released = true;
-      c.releasedAmount = (BigInt(String(c.releasedAmount)) + needed).toString();
-      if (c.milestones.every((x) => x.released)) c.status = 'Completed';
-      return this.touch(c);
-    }
-
-    if (Number(c.fundedAmount) - Number(c.releasedAmount) < Number(m.amount)) {
-      throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
-    }
+    c.releasedAmount = typeof c.totalAmount === 'string' || typeof m.amount === 'string'
+      ? (BigInt(String(c.releasedAmount)) + BigInt(String(m.amount))).toString()
+      : Number(c.releasedAmount) + Number(m.amount);
     m.released = true;
-    c.releasedAmount = Number(c.releasedAmount) + Number(m.amount);
-    if (c.milestones.every((x) => x.released)) c.status = 'Completed';
+    c.status = TRANSITIONS.release.nextStatus(c);
     return this.touch(c);
   }
 
   openDispute(id: number, raisedBy: unknown, reason: unknown): EscrowContract {
     const c = this.get(id);
-    if (raisedBy !== c.client && raisedBy !== c.freelancer) {
-      throw new HttpError(403, 'unauthorized', 'Only the client or freelancer can open a dispute');
-    }
-    this.requireActive(c);
-    c.status = 'Disputed';
+    assertAllowed('dispute', c, { raisedBy });
+    c.status = TRANSITIONS.dispute.nextStatus(c);
     c.dispute = {
-      raisedBy,
+      raisedBy: raisedBy as string,
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
       openedAt: new Date().toISOString(),
     };
@@ -264,17 +209,12 @@ export class EscrowStore {
 
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
     const c = this.get(id);
-    if (c.status !== 'Disputed') {
-      throw new HttpError(409, 'invalid_status', 'Only disputed contracts can be resolved');
-    }
+    assertAllowed('resolve', c, { freelancerBps: freelancerBpsRaw });
     const bps = Number(freelancerBpsRaw);
-    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
-      throw new HttpError(400, 'invalid_split', 'freelancerBps must be an integer between 0 and 10000');
-    }
     const remaining = Number(c.fundedAmount) - Number(c.releasedAmount);
     const toFreelancer = Math.round((remaining * bps) / 10000);
     c.releasedAmount = Number(c.releasedAmount) + toFreelancer;
-    c.status = 'Resolved';
+    c.status = TRANSITIONS.resolve.nextStatus(c);
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
       c.dispute.resolvedAt = new Date().toISOString();
@@ -284,28 +224,21 @@ export class EscrowStore {
 
   cancel(id: number): EscrowContract {
     const c = this.get(id);
-    this.requireActive(c);
-    c.status = 'Cancelled';
+    assertAllowed('cancel', c);
+    c.status = TRANSITIONS.cancel.nextStatus(c);
     return this.touch(c);
   }
 
   rate(id: number, ratingRaw: unknown): Reputation {
     const c = this.get(id);
-    if (c.status !== 'Completed') {
-      throw new HttpError(409, 'invalid_status', 'Only completed contracts can issue reputation');
-    }
-    if (c.reputationIssued) {
-      throw new HttpError(409, 'reputation_already_issued', 'Reputation already issued for this contract');
-    }
+    assertAllowed('rate', c, { rating: ratingRaw });
     const rating = Number(ratingRaw);
-    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-      throw new HttpError(400, 'invalid_rating', 'rating must be an integer from 1 to 5');
-    }
     const r = this.reputation.get(c.freelancer) ?? { completed: 0, total: 0 };
     r.completed += 1;
     r.total += rating;
     this.reputation.set(c.freelancer, r);
     c.reputationIssued = true;
+    c.status = TRANSITIONS.rate.nextStatus(c);
     this.touch(c);
     return this.getReputation(c.freelancer);
   }

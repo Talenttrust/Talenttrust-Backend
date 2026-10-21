@@ -1,4 +1,5 @@
 import { config, explorerUrl } from './config';
+import { TRANSITIONS } from './stateMachine';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
 const ok = (description: string, schema: object = { type: 'object' }) => ({
@@ -24,6 +25,25 @@ export const openapi = {
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
+    '/api/v1/state-machine': {
+      get: {
+        tags: ['System'], summary: 'Escrow transition table and generated Mermaid diagram',
+        description: 'actor describes intended roles; actorEnforced is true only for dispute. Other mutation permissions remain unrestricted. No authentication or admin identity is inferred.',
+        responses: ok('State machine', { $ref: '#/components/schemas/StateMachine' }),
+      },
+    },
+    '/api/v1/contracts/{id}/actions': {
+      get: {
+        tags: ['Contracts'], summary: 'Discover currently possible actions',
+        description: 'Non-mutating advisory view using the same checks as mutations. allowed means at least one valid argument exists, not that arbitrary inputs will succeed. Without as, dispute is unauthorized. Other actions retain existing unrestricted permissions. Check order: existence, status, actor, guards.',
+        parameters: [idParam, { name: 'as', in: 'query', required: false, schema: { type: 'string', minLength: 1 }, description: 'Advisory caller address for dispute, corresponding to raisedBy. Not authentication; cannot grant admin rights.' }],
+        responses: {
+          ...ok('Available actions and failure reasons', { $ref: '#/components/schemas/AllowedActions' }),
+          400: errorResponse('invalid_id or invalid_actor (empty or non-string as)'),
+          404: errorResponse('contract_not_found'),
+        },
+      },
+    },
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
@@ -87,11 +107,12 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Open a dispute',
+        description: 'Existence is checked before status, then raisedBy must match a party. A non-party on an inactive contract now receives 409 invalid_status before 403 unauthorized.',
         parameters: [idParam],
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 400: errorResponse('invalid_id or invalid_json'), 404: errorResponse('contract_not_found'), 409: errorResponse('invalid_status: contract must be Created or Funded'), 403: errorResponse('unauthorized: raisedBy is not a contract party') },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
@@ -179,6 +200,41 @@ export const openapi = {
   },
   components: {
     schemas: {
+      AllowedActions: {
+        type: 'object', required: ['status', 'actions'],
+        properties: {
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          actions: { type: 'array', items: {
+            type: 'object', required: ['action', 'allowed'],
+            properties: {
+              action: { type: 'string', enum: Object.keys(TRANSITIONS) }, allowed: { type: 'boolean' },
+              reason: { type: 'string', description: 'Human-readable first failure' },
+              code: { type: 'string', description: 'Existing mutation error code; omitted when allowed' },
+              params: { type: 'object', properties: {
+                index: { type: 'array', items: { type: 'integer', minimum: 0 }, description: 'Currently releasable milestone indexes, empty when blocked' },
+                maxDeposit: { oneOf: [{ type: 'number' }, { type: 'string', pattern: '^\\d+$' }], description: 'Remaining funding capacity. Exact decimal string for integer-string amounts; does not override a status restriction.' },
+              } },
+            },
+          } },
+        },
+      },
+      StateMachine: {
+        type: 'object', required: ['checkOrder', 'transitions', 'mermaid'],
+        properties: {
+          checkOrder: { type: 'array', items: { type: 'string', enum: ['existence', 'status', 'actor', 'guards'] } },
+          mermaid: { type: 'string', description: 'Generated stateDiagram-v2; conditional transitions retain their source status otherwise' },
+          transitions: { type: 'array', items: {
+            type: 'object', required: ['action', 'from', 'actor', 'actorEnforced', 'next'],
+            properties: {
+              action: { type: 'string', enum: Object.keys(TRANSITIONS) },
+              from: { type: 'array', items: { type: 'string' } },
+              actor: { type: 'string', enum: ['client', 'freelancer', 'party', 'admin'] },
+              actorEnforced: { type: 'boolean', description: 'Whether mutation checks enforce the actor role today' },
+              next: { type: 'object', required: ['status', 'when'], properties: { status: { type: 'string' }, when: { type: 'string' } } },
+            },
+          } },
+        },
+      },
       DriftItem: {
         type: 'object',
         properties: {

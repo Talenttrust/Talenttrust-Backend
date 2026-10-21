@@ -25,6 +25,8 @@ data is per-instance and resets on redeploy.
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | On-chain contract deployment info |
+| GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
+| GET | `/api/v1/contracts/:id/actions?as=<address>` | Advisory allowed actions, reasons, releasable indexes and remaining deposit capacity |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
@@ -37,6 +39,30 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+
+## Lifecycle discovery
+
+The store and discovery endpoint share `src/stateMachine.ts`. Checks run in order:
+contract existence ? status ? actor ? guards. Discovery is read-only; `allowed` means
+there is a valid argument for that action, not that every submitted amount/index is valid.
+`release.params.index` lists currently releasable milestones; `deposit.params.maxDeposit`
+is the remaining capacity (an exact decimal string when the contract uses integer-string amounts).
+Status restrictions still apply even when a remaining capacity is returned.
+
+`as` is an optional advisory address, corresponding to `raisedBy` for disputes. Missing
+`as` makes dispute unavailable; empty, repeated or structured `as` values return 400
+`invalid_actor`. This is not authentication. To preserve existing permissions, only
+`dispute` enforces the table's actor role; client/admin roles for other actions are
+intent metadata and explicitly have `actorEnforced: false`. No admin identity or new
+configuration is introduced. Consumers must use `allowed`, not infer authorization
+from the role label. A non-party disputing an inactive contract now receives 409
+`invalid_status` before the actor check (previously 403 `unauthorized`), following the
+defined status-first order. Other error codes and statuses are preserved.
+
+```bash
+curl -s 'localhost:3001/api/v1/contracts/1/actions?as=GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+curl -s localhost:3001/api/v1/state-machine
+```
 
 ## Development
 
