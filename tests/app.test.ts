@@ -1,4 +1,4 @@
-import request from 'supertest';
+import { request } from './helpers/openapi';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 
