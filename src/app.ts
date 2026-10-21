@@ -5,6 +5,7 @@ import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
+import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './health';
 
 declare global {
   namespace Express {
@@ -36,25 +37,58 @@ const id = (req: Request) => {
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
 
-function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
-): { store: EscrowStore; logger: Logger } {
+export interface AppOptions {
+  logger?: Logger;
+  store?: EscrowStore;
+  /** A ready-made health service, or overrides for the one built here. */
+  health?:
+    | HealthService
+    | {
+        /** Injected in tests; defaults to a lazy Soroban RPC client. */
+        rpc?: HealthRpcClient;
+        timeoutMs?: number;
+        cacheMs?: number;
+      };
+}
+
+function resolveOptions(
+  storeOrOpts: EscrowStore | AppOptions = new EscrowStore().seed(),
+): { store: EscrowStore; logger: Logger; health: HealthService } {
   if (
     storeOrOpts &&
     typeof storeOrOpts === 'object' &&
     'list' in storeOrOpts &&
     typeof (storeOrOpts as EscrowStore).list === 'function'
   ) {
-    return { store: storeOrOpts as EscrowStore, logger: createLogger() };
+    const store = storeOrOpts as EscrowStore;
+    return {
+      store,
+      logger: createLogger(),
+      health: new HealthService({ store, rpc: createSorobanRpcClient(config.rpcUrl) }),
+    };
   }
-  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore } | undefined) ?? {};
-  return { store: opts.store ?? new EscrowStore().seed(), logger: opts.logger ?? createLogger() };
+  const opts = storeOrOpts as AppOptions | undefined;
+  const store = opts?.store ?? new EscrowStore().seed();
+  const logger = opts?.logger ?? createLogger();
+  const health =
+    opts?.health instanceof HealthService
+      ? opts.health
+      : new HealthService({
+          store,
+          rpc: opts?.health?.rpc ?? createSorobanRpcClient(config.rpcUrl),
+          network: config.network,
+          networkPassphrase: config.networkPassphrase,
+          contractId: config.contractId,
+          timeoutMs: opts?.health?.timeoutMs,
+          cacheMs: opts?.health?.cacheMs,
+        });
+  return { store, logger, health };
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
+  storeOrOpts: EscrowStore | AppOptions = new EscrowStore().seed(),
 ) {
-  const { store, logger } = resolveStoreAndLogger(storeOrOpts);
+  const { store, logger, health } = resolveOptions(storeOrOpts);
   const app = express();
   app.disable('x-powered-by');
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
@@ -128,13 +162,24 @@ export function createApp(
       res.status(503).setHeader('Connection', 'close').json({ status: 'draining' });
       return;
     }
+    const last = health.lastReport();
     res.json({
       status: 'ok',
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
       timestamp: new Date().toISOString(),
+      ...(last ? { checks: last.checks } : {}),
     });
+  });
+
+  app.get('/health/live', wrap(() => health.live()));
+
+  app.get('/health/ready', (_req, res, next) => {
+    health
+      .ready()
+      .then(({ httpStatus, report }) => res.status(httpStatus).json(report))
+      .catch(next);
   });
 
   app.get('/openapi.json', wrap(() => openapi));

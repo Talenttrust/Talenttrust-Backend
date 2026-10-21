@@ -20,7 +20,38 @@ export const openapi = {
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/health': {
+      get: {
+        tags: ['System'],
+        summary: 'Health check',
+        description:
+          'Liveness fields plus, once a readiness probe has run, a `checks` summary of that run.',
+        responses: ok('Service is healthy', { $ref: '#/components/schemas/Health' }),
+      },
+    },
+    '/health/live': {
+      get: {
+        tags: ['System'],
+        summary: 'Liveness probe',
+        description: 'Always 200 while the process is up; touches no dependency.',
+        responses: ok('Process is up', { $ref: '#/components/schemas/Liveness' }),
+      },
+    },
+    '/health/ready': {
+      get: {
+        tags: ['System'],
+        summary: 'Readiness probe',
+        description:
+          'Checks the Soroban RPC health, the network passphrase, the escrow contract ledger ' +
+          'entry and the store in parallel. Results are cached for HEALTH_CACHE_MS with ' +
+          'single-flight. 200 when every check passes (or only warns), 503 when a critical ' +
+          'check fails. Failure details never include the RPC URL.',
+        responses: {
+          200: { description: 'Ready (or degraded)', content: json({ $ref: '#/components/schemas/Readiness' }) },
+          503: { description: 'Unready', content: json({ $ref: '#/components/schemas/Readiness' }) },
+        },
+      },
+    },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
@@ -121,6 +152,53 @@ export const openapi = {
   },
   components: {
     schemas: {
+      Liveness: {
+        type: 'object',
+        required: ['status'],
+        additionalProperties: false,
+        properties: { status: { type: 'string', enum: ['ok'] } },
+      },
+      HealthCheck: {
+        type: 'object',
+        required: ['status', 'latencyMs'],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['pass', 'fail', 'warn'] },
+          latencyMs: { type: 'number', minimum: 0 },
+          detail: { type: 'string', description: 'Fixed string such as "timeout" or a mismatch explanation.' },
+        },
+      },
+      Health: {
+        type: 'object',
+        required: ['status', 'version', 'uptimeSeconds', 'storage', 'timestamp'],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          version: { type: 'string' },
+          uptimeSeconds: { type: 'integer', minimum: 0 },
+          storage: { type: 'string' },
+          timestamp: { type: 'string', format: 'date-time' },
+          checks: {
+            type: 'object',
+            description: 'Summary of the last readiness run, present once one has completed.',
+            additionalProperties: { $ref: '#/components/schemas/HealthCheck' },
+          },
+        },
+      },
+      Readiness: {
+        type: 'object',
+        required: ['status', 'checks', 'checkedAt'],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ready', 'degraded', 'unready'] },
+          checks: {
+            type: 'object',
+            description: 'rpc, network, contract and storage results.',
+            additionalProperties: { $ref: '#/components/schemas/HealthCheck' },
+          },
+          checkedAt: { type: 'string', format: 'date-time' },
+        },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
