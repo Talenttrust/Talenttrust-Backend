@@ -28,7 +28,7 @@ export const openapi = {
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
@@ -55,7 +55,7 @@ export const openapi = {
               token: { type: 'string', default: 'XLM' },
               milestones: {
                 type: 'array',
-                items: { type: 'object', properties: { title: { type: 'string' }, amount: { type: 'number' } } },
+                items: { type: 'object', properties: { title: { type: 'string' }, amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$' }], description: 'Amount in token base units. Must be a positive integer.' } } },
               },
             },
           }),
@@ -71,7 +71,7 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
+        requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
         responses: ok('Updated contract', contractRef),
       },
     },
@@ -237,14 +237,42 @@ export const openapi = {
               properties: {
                 index: { type: 'integer' },
                 title: { type: 'string' },
-                amount: { type: 'number' },
+                amount: {
+                  description: 'DEPRECATED — lossy above 2^53. Use amountUnits.',
+                  oneOf: [{ type: 'number' }, { type: 'string' }],
+                },
+                amountUnits: {
+                  type: 'string',
+                  description: 'Canonical decimal string amount in token base units (e.g. stroops).',
+                },
                 released: { type: 'boolean' },
               },
             },
           },
-          totalAmount: { type: 'number' },
-          fundedAmount: { type: 'number' },
-          releasedAmount: { type: 'number' },
+          totalAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          totalAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string total in token base units.',
+          },
+          fundedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          fundedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string funded amount in token base units.',
+          },
+          releasedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          releasedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string released amount in token base units.',
+          },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
           reputationIssued: { type: 'boolean' },
           chain: { $ref: '#/components/schemas/ChainInfo' },

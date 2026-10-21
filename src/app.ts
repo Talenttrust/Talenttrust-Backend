@@ -6,6 +6,7 @@ import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
+import { bigIntReplacer } from './amount';
 
 declare global {
   namespace Express {
@@ -23,7 +24,11 @@ type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
 const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
   try {
     const out = await fn(req, res);
-    if (out !== undefined && !res.headersSent) res.json(out);
+    if (out !== undefined && !res.headersSent) {
+      // Use bigIntReplacer so bigint amounts serialise as decimal strings
+      // and JSON.stringify never throws on a response.
+      res.type('json').send(JSON.stringify(out, bigIntReplacer));
+    }
   } catch (err) {
     next(err);
   }
