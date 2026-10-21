@@ -1,23 +1,110 @@
 import { config, explorerUrl } from './config';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
-const ok = (description: string, schema: object) => ({
-  200: { description, content: json(schema) },
-});
-const created = (description: string, schema: object) => ({
-  201: { description, content: json(schema) },
-});
-const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
+const response = (description: string, schema: object) => ({ description, content: json(schema) });
+const ok = (description: string, schema: object) => ({ 200: response(description, schema) });
+const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } };
+const indexParam = { name: 'index', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } };
+const addressParam = { name: 'address', in: 'path', required: true, schema: { type: 'string', minLength: 1 } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
-const errorRef = { $ref: '#/components/schemas/Error' };
-const errorResponse = (description: string) => ({
-  description,
-  content: json(errorRef),
-});
-const errors400 = { description: 'Bad request', content: json(errorRef) };
-const errors403 = { description: 'Forbidden', content: json(errorRef) };
-const errors404 = { description: 'Not found', content: json(errorRef) };
-const errors409 = { description: 'Conflict', content: json(errorRef) };
+
+const ERROR_STATUS = {
+  BadRequest: 400,
+  Forbidden: 403,
+  NotFound: 404,
+  Conflict: 409,
+  InternalServerError: 500,
+} as const;
+
+/** `errors('BadRequest', 'Conflict')` → `{ 400: {$ref}, 409: {$ref} }`. */
+const errors = (...names: (keyof typeof ERROR_STATUS)[]) =>
+  Object.fromEntries(
+    names.map(
+      (name): [number, { $ref: string }] => [
+        ERROR_STATUS[name],
+        { $ref: `#/components/responses/${name}` },
+      ],
+    ),
+  );
+
+const contractList = {
+  type: 'object',
+  required: ['data'],
+  properties: { data: { type: 'array', items: contractRef } },
+};
+
+const createBody = {
+  type: 'object',
+  required: ['client', 'freelancer', 'milestones'],
+  properties: {
+    title: { type: 'string', minLength: 1, description: 'Defaults to "Untitled engagement".' },
+    client: { type: 'string', minLength: 1, description: 'Stellar address of the client. Must differ from freelancer.' },
+    freelancer: { type: 'string', minLength: 1, description: 'Stellar address of the freelancer. Must differ from client.' },
+    token: { type: 'string', minLength: 1, default: 'XLM', description: 'Token the escrow is denominated in.' },
+    milestones: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 20,
+      description: '1..20 milestones. An item is either a bare positive amount or a {title, amount} object.',
+      items: {
+        oneOf: [
+          { type: 'number', minimum: 0, exclusiveMinimum: true },
+          {
+            type: 'object',
+            required: ['amount'],
+            properties: {
+              title: { type: 'string', minLength: 1, description: 'Defaults to "Milestone <n>".' },
+              amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
+            },
+          },
+        ],
+      },
+    },
+  },
+};
+
+const depositBody = {
+  type: 'object',
+  required: ['amount'],
+  properties: {
+    amount: {
+      type: 'number',
+      minimum: 0,
+      exclusiveMinimum: true,
+      description: 'Positive amount; may not push fundedAmount past totalAmount.',
+    },
+  },
+};
+
+const disputeBody = {
+  type: 'object',
+  required: ['raisedBy'],
+  properties: {
+    raisedBy: { type: 'string', minLength: 1, description: 'Client or freelancer address; anyone else gets 403.' },
+    reason: { type: 'string', minLength: 1, description: 'Defaults to "No reason given".' },
+  },
+};
+
+const resolveBody = {
+  type: 'object',
+  required: ['freelancerBps'],
+  properties: {
+    freelancerBps: {
+      type: 'integer',
+      minimum: 0,
+      maximum: 10000,
+      description: 'Basis points of the remaining escrow paid to the freelancer.',
+    },
+  },
+};
+
+const rateBody = {
+  type: 'object',
+  required: ['rating'],
+  properties: {
+    rating: { type: 'integer', minimum: 1, maximum: 5, description: 'Whole-star rating for the freelancer.' },
+  },
+};
 
 export const openapi = {
   openapi: '3.0.3',
@@ -30,29 +117,48 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [
+    { name: 'System', description: 'Service metadata, health and documentation.' },
+    { name: 'Contracts', description: 'Escrow contract lifecycle: create, fund, release, dispute.' },
+    { name: 'Reputation', description: 'Freelancer ratings accumulated from completed contracts.' },
+  ],
   paths: {
     '/': {
       get: {
         tags: ['System'],
-        summary: 'API service information',
-        responses: {
-          200: {
-            description: 'Service info',
-            content: json({ $ref: '#/components/schemas/ServiceInfo' }),
-          },
-        },
+        summary: 'Service index',
+        description: 'Service name, documentation links and the list of available endpoints.',
+        responses: { ...ok('Service index', { $ref: '#/components/schemas/ServiceInfo' }), ...errors('InternalServerError') },
       },
     },
     '/health': {
       get: {
         tags: ['System'],
         summary: 'Health check',
+        responses: { ...ok('Service is healthy', { $ref: '#/components/schemas/Health' }), ...errors('InternalServerError') },
+      },
+    },
+    '/docs': {
+      get: {
+        tags: ['System'],
+        summary: 'Interactive API reference',
+        description: 'Swagger UI page for this specification.',
         responses: {
           200: {
-            description: 'Service is healthy',
-            content: json({ $ref: '#/components/schemas/Health' }),
+            description: 'Swagger UI page',
+            content: { 'text/html': { schema: { type: 'string' } } },
           },
+          ...errors('InternalServerError'),
+        },
+      },
+    },
+    '/openapi.json': {
+      get: {
+        tags: ['System'],
+        summary: 'OpenAPI document',
+        responses: {
+          ...ok('This document', { $ref: '#/components/schemas/OpenApiDocument' }),
+          ...errors('InternalServerError'),
         },
       },
     },
@@ -60,24 +166,14 @@ export const openapi = {
       get: {
         tags: ['System'],
         summary: 'On-chain escrow contract deployment info',
-        responses: {
-          200: {
-            description: 'Deployment',
-            content: json({ $ref: '#/components/schemas/ChainInfo' }),
-          },
-        },
+        responses: { ...ok('Deployment', { $ref: '#/components/schemas/ChainInfo' }), ...errors('InternalServerError') },
       },
     },
     '/api/v1/stats': {
       get: {
         tags: ['System'],
         summary: 'Aggregate escrow statistics',
-        responses: {
-          200: {
-            description: 'Stats',
-            content: json({ $ref: '#/components/schemas/Stats' }),
-          },
-        },
+        responses: { ...ok('Stats', { $ref: '#/components/schemas/Stats' }), ...errors('InternalServerError') },
       },
     },
     '/api/v1/contracts': {
@@ -85,55 +181,28 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'List escrow contracts',
         parameters: [
-          { name: 'status', in: 'query', schema: { type: 'string' } },
-          { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
-        ],
-        responses: {
-          200: {
-            description: 'Contracts',
-            content: json({ $ref: '#/components/schemas/ContractList' }),
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string' },
+            description: 'Exact ContractStatus to filter on; unknown statuses simply match nothing.',
           },
-        },
+          {
+            name: 'party',
+            in: 'query',
+            schema: { type: 'string' },
+            description: 'Client or freelancer address.',
+          },
+        ],
+        responses: { ...ok('Contracts', contractList), ...errors('InternalServerError') },
       },
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['client', 'freelancer', 'milestones'],
-            additionalProperties: false,
-            properties: {
-              title: { type: 'string' },
-              client: { type: 'string' },
-              freelancer: { type: 'string' },
-              token: { type: 'string', default: 'XLM' },
-              milestones: {
-                type: 'array',
-                minItems: 1,
-                maxItems: 20,
-                items: {
-                  oneOf: [
-                    { type: 'number', minimum: 0, exclusiveMinimum: true },
-                    {
-                      type: 'object',
-                      required: ['amount'],
-                      additionalProperties: false,
-                      properties: {
-                        title: { type: 'string' },
-                        amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          }),
-        },
+        requestBody: { required: true, content: json(createBody) },
         responses: {
-          201: { description: 'Created', content: json(contractRef) },
-          400: errors400,
+          201: response('Created', contractRef),
+          ...errors('BadRequest', 'InternalServerError'),
         },
       },
     },
@@ -143,9 +212,8 @@ export const openapi = {
         summary: 'Get a contract',
         parameters: [idParam],
         responses: {
-          200: { description: 'Contract', content: json(contractRef) },
-          400: errors400,
-          404: errors404,
+          ...ok('Contract', contractRef),
+          ...errors('BadRequest', 'NotFound', 'InternalServerError'),
         },
       },
     },
@@ -153,21 +221,14 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
+        description:
+          '400 invalid_amount / invalid_id; 404 contract_not_found; ' +
+          '409 invalid_status (contract not Created/Funded) or over_funded.',
         parameters: [idParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['amount'],
-            additionalProperties: false,
-            properties: { amount: { type: 'number', minimum: 0, exclusiveMinimum: true } },
-          }),
-        },
+        requestBody: { required: true, content: json(depositBody) },
         responses: {
-          200: { description: 'Updated contract', content: json(contractRef) },
-          400: errors400,
-          404: errors404,
-          409: errors409,
+          ...ok('Updated contract', contractRef),
+          ...errors('BadRequest', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -175,12 +236,13 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
-        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
+        description:
+          '400 invalid_id; 404 contract_not_found / milestone_not_found; ' +
+          '409 invalid_status, already_released or insufficient_funds.',
+        parameters: [idParam, indexParam],
         responses: {
-          200: { description: 'Updated contract', content: json(contractRef) },
-          400: errors400,
-          404: errors404,
-          409: errors409,
+          ...ok('Updated contract', contractRef),
+          ...errors('BadRequest', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -188,22 +250,14 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Open a dispute',
+        description:
+          '403 unauthorized when raisedBy is neither the client nor the freelancer; ' +
+          '409 invalid_status when the contract is not active.',
         parameters: [idParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['raisedBy'],
-            additionalProperties: false,
-            properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } },
-          }),
-        },
+        requestBody: { required: true, content: json(disputeBody) },
         responses: {
-          200: { description: 'Updated contract', content: json(contractRef) },
-          400: errors400,
-          403: errors403,
-          404: errors404,
-          409: errors409,
+          ...ok('Updated contract', contractRef),
+          ...errors('BadRequest', 'Forbidden', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -211,21 +265,14 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Resolve a dispute (admin)',
+        description:
+          '400 invalid_split when freelancerBps is not an integer 0..10000; ' +
+          '409 invalid_status when the contract is not disputed.',
         parameters: [idParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['freelancerBps'],
-            additionalProperties: false,
-            properties: { freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 } },
-          }),
-        },
+        requestBody: { required: true, content: json(resolveBody) },
         responses: {
-          200: { description: 'Updated contract', content: json(contractRef) },
-          400: errors400,
-          404: errors404,
-          409: errors409,
+          ...ok('Updated contract', contractRef),
+          ...errors('BadRequest', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -233,12 +280,11 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Cancel and refund',
+        description: '409 invalid_status when the contract is not Created or Funded.',
         parameters: [idParam],
         responses: {
-          200: { description: 'Updated contract', content: json(contractRef) },
-          400: errors400,
-          404: errors404,
-          409: errors409,
+          ...ok('Updated contract', contractRef),
+          ...errors('BadRequest', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -246,21 +292,14 @@ export const openapi = {
       post: {
         tags: ['Reputation'],
         summary: 'Rate the freelancer of a completed contract',
+        description:
+          '400 invalid_rating when rating is not an integer 1..5; ' +
+          '409 invalid_status when the contract is not Completed, or already_rated.',
         parameters: [idParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['rating'],
-            additionalProperties: false,
-            properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } },
-          }),
-        },
+        requestBody: { required: true, content: json(rateBody) },
         responses: {
-          200: { description: 'Reputation', content: json({ $ref: '#/components/schemas/Reputation' }) },
-          400: errors400,
-          404: errors404,
-          409: errors409,
+          200: response('Reputation of the contract freelancer', { $ref: '#/components/schemas/Reputation' }),
+          ...errors('BadRequest', 'NotFound', 'Conflict', 'InternalServerError'),
         },
       },
     },
@@ -268,163 +307,26 @@ export const openapi = {
       get: {
         tags: ['Reputation'],
         summary: 'Get freelancer reputation',
-        parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+        description: 'Addresses with no completed contracts report zeros.',
+        parameters: [addressParam],
         responses: {
-          200: { description: 'Reputation', content: json({ $ref: '#/components/schemas/Reputation' }) },
+          ...ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
+          ...errors('InternalServerError'),
         },
       },
-    },
-    '/openapi.json': {
-      get: {
-        tags: ['System'],
-        summary: 'OpenAPI specification',
-        responses: {
-          200: {
-            description: 'OpenAPI 3.0 specification',
-            content: {
-              'application/json': {
-                schema: { type: 'object' },
-              },
-            },
-          },
-        },
-      },
-    },
-    '/docs': {
-      get: {
-        tags: ['System'],
-        summary: 'API documentation',
-        responses: {
-          200: {
-            description: 'Swagger UI',
-            content: {
-              'text/html': {
-                schema: { type: 'string' },
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-  default: {
-    responses: {
-      '404': { description: 'Not found', content: json({ $ref: '#/components/schemas/Error' }) },
-      '500': { description: 'Internal server error', content: json({ $ref: '#/components/schemas/Error' }) },
     },
   },
   components: {
     schemas: {
       Error: {
         type: 'object',
+        description: 'Error envelope returned by every non-2xx response.',
         required: ['error', 'message'],
-        additionalProperties: true,
-        properties: {
-          error: { type: 'string' },
-          message: { type: 'string' },
-          docs: { type: 'string' },
-        },
-      },
-      Milestone: {
-        type: 'object',
-        required: ['index', 'title', 'amount', 'released'],
         additionalProperties: false,
         properties: {
-          index: { type: 'integer' },
-          title: { type: 'string' },
-          amount: { type: 'number' },
-          released: { type: 'boolean' },
-        },
-      },
-      Dispute: {
-        type: 'object',
-        required: ['raisedBy', 'reason', 'openedAt'],
-        additionalProperties: false,
-        properties: {
-          raisedBy: { type: 'string' },
-          reason: { type: 'string' },
-          openedAt: { type: 'string' },
-          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
-          resolvedAt: { type: 'string' },
-        },
-      },
-      EscrowContract: {
-        type: 'object',
-        required: [
-          'id',
-          'title',
-          'client',
-          'freelancer',
-          'token',
-          'milestones',
-          'totalAmount',
-          'fundedAmount',
-          'releasedAmount',
-          'status',
-          'reputationIssued',
-          'createdAt',
-          'updatedAt',
-        ],
-        additionalProperties: false,
-        properties: {
-          id: { type: 'integer' },
-          title: { type: 'string' },
-          client: { type: 'string' },
-          freelancer: { type: 'string' },
-          token: { type: 'string' },
-          milestones: {
-            type: 'array',
-            items: { $ref: '#/components/schemas/Milestone' },
-          },
-          totalAmount: { type: 'number' },
-          fundedAmount: { type: 'number' },
-          releasedAmount: { type: 'number' },
-          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
-          reputationIssued: { type: 'boolean' },
-          dispute: { $ref: '#/components/schemas/Dispute' },
-          createdAt: { type: 'string' },
-          updatedAt: { type: 'string' },
-        },
-      },
-      ContractList: {
-        type: 'object',
-        required: ['data'],
-        additionalProperties: false,
-        properties: {
-          data: { type: 'array', items: { $ref: '#/components/schemas/EscrowContract' } },
-        },
-      },
-      Reputation: {
-        type: 'object',
-        required: ['address', 'completedContracts', 'totalRating', 'averageRating'],
-        additionalProperties: false,
-        properties: {
-          address: { type: 'string' },
-          completedContracts: { type: 'integer' },
-          totalRating: { type: 'integer' },
-          averageRating: { type: 'number' },
-        },
-      },
-      Stats: {
-        type: 'object',
-        required: ['contracts', 'byStatus', 'totalEscrowed', 'totalReleased'],
-        additionalProperties: false,
-        properties: {
-          contracts: { type: 'integer' },
-          byStatus: { type: 'object', additionalProperties: { type: 'integer' } },
-          totalEscrowed: { type: 'number' },
-          totalReleased: { type: 'number' },
-        },
-      },
-      ChainInfo: {
-        type: 'object',
-        required: ['network', 'rpcUrl', 'contractId', 'explorer'],
-        additionalProperties: false,
-        properties: {
-          network: { type: 'string' },
-          rpcUrl: { type: 'string' },
-          contractId: { type: 'string' },
-          explorer: { type: 'string' },
+          error: { type: 'string', description: 'Stable machine-readable code, e.g. invalid_amount.' },
+          message: { type: 'string', description: 'Human-readable explanation.' },
+          docs: { type: 'string', description: 'Documentation link; present on global route-not-found responses.' },
         },
       },
       Health: {
@@ -432,11 +334,11 @@ export const openapi = {
         required: ['status', 'version', 'uptimeSeconds', 'storage', 'timestamp'],
         additionalProperties: false,
         properties: {
-          status: { type: 'string' },
+          status: { type: 'string', enum: ['ok'] },
           version: { type: 'string' },
-          uptimeSeconds: { type: 'integer' },
-          storage: { type: 'string' },
-          timestamp: { type: 'string' },
+          uptimeSeconds: { type: 'integer', minimum: 0 },
+          storage: { type: 'string', description: 'Always "in-memory".' },
+          timestamp: { type: 'string', format: 'date-time' },
         },
       },
       ServiceInfo: {
@@ -458,11 +360,169 @@ export const openapi = {
               network: { type: 'string' },
               contractId: { type: 'string' },
               explorer: { type: 'string' },
-              rpcUrl: { type: 'string' },
             },
           },
           endpoints: { type: 'array', items: { type: 'string' } },
         },
+      },
+      ChainInfo: {
+        type: 'object',
+        required: ['network', 'rpcUrl', 'contractId', 'explorer'],
+        additionalProperties: false,
+        properties: {
+          network: { type: 'string' },
+          rpcUrl: { type: 'string' },
+          contractId: { type: 'string' },
+          explorer: { type: 'string' },
+        },
+      },
+      Stats: {
+        type: 'object',
+        required: ['contracts', 'byStatus', 'totalEscrowed', 'totalReleased'],
+        additionalProperties: false,
+        properties: {
+          contracts: { type: 'integer', minimum: 0 },
+          byStatus: {
+            type: 'object',
+            description: 'Contract count per ContractStatus; statuses with no contracts are omitted.',
+            additionalProperties: { type: 'number' },
+          },
+          totalEscrowed: { type: 'number', minimum: 0, description: 'fundedAmount minus releasedAmount across contracts.' },
+          totalReleased: { type: 'number', minimum: 0 },
+        },
+      },
+      Milestone: {
+        type: 'object',
+        required: ['index', 'title', 'amount', 'released'],
+        additionalProperties: false,
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          title: { type: 'string' },
+          amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
+          released: { type: 'boolean' },
+        },
+      },
+      Dispute: {
+        type: 'object',
+        required: ['raisedBy', 'reason', 'openedAt'],
+        additionalProperties: false,
+        properties: {
+          raisedBy: { type: 'string' },
+          reason: { type: 'string' },
+          openedAt: { type: 'string', format: 'date-time' },
+          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
+          resolvedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      EscrowContract: {
+        type: 'object',
+        required: [
+          'id',
+          'title',
+          'client',
+          'freelancer',
+          'token',
+          'milestones',
+          'totalAmount',
+          'fundedAmount',
+          'releasedAmount',
+          'status',
+          'reputationIssued',
+          'createdAt',
+          'updatedAt',
+        ],
+        additionalProperties: false,
+        properties: {
+          id: { type: 'integer', minimum: 1 },
+          title: { type: 'string' },
+          client: { type: 'string' },
+          freelancer: { type: 'string' },
+          token: { type: 'string' },
+          milestones: { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
+          totalAmount: { type: 'number', minimum: 0 },
+          fundedAmount: { type: 'number', minimum: 0 },
+          releasedAmount: { type: 'number', minimum: 0 },
+          status: {
+            type: 'string',
+            enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'],
+          },
+          reputationIssued: { type: 'boolean' },
+          dispute: { $ref: '#/components/schemas/Dispute' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      Reputation: {
+        type: 'object',
+        required: ['address', 'completedContracts', 'totalRating', 'averageRating'],
+        additionalProperties: false,
+        properties: {
+          address: { type: 'string' },
+          completedContracts: { type: 'integer', minimum: 0 },
+          totalRating: { type: 'number', minimum: 0 },
+          averageRating: { type: 'number', minimum: 0, maximum: 5 },
+        },
+      },
+      OpenApiDocument: {
+        type: 'object',
+        description: 'The OpenAPI 3.0 document served by GET /openapi.json.',
+        required: ['openapi', 'info', 'paths', 'components'],
+        additionalProperties: true,
+        properties: {
+          openapi: { type: 'string' },
+          info: {
+            type: 'object',
+            required: ['title', 'version'],
+            additionalProperties: true,
+            properties: { title: { type: 'string' }, version: { type: 'string' } },
+          },
+          servers: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          tags: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['name'],
+              additionalProperties: true,
+              properties: { name: { type: 'string' } },
+            },
+          },
+          paths: { type: 'object', additionalProperties: { type: 'object' } },
+          components: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              schemas: { type: 'object', additionalProperties: { type: 'object' } },
+              responses: { type: 'object', additionalProperties: { type: 'object' } },
+            },
+          },
+        },
+      },
+    },
+    responses: {
+      BadRequest: {
+        description:
+          '400 — invalid input: invalid_parties, invalid_milestones, invalid_amount, ' +
+          'invalid_id, invalid_split, invalid_rating, invalid_json.',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      Forbidden: {
+        description: '403 — unauthorized: only the client or freelancer may open a dispute.',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      NotFound: {
+        description:
+          '404 — not_found (global route fallback), contract_not_found, milestone_not_found.',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      Conflict: {
+        description:
+          '409 — state conflict: invalid_status, over_funded, already_released, ' +
+          'insufficient_funds, already_rated.',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      InternalServerError: {
+        description: '500 — unexpected server error (internal_error).',
+        content: json({ $ref: '#/components/schemas/Error' }),
       },
     },
   },

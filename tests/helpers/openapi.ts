@@ -1,164 +1,378 @@
-import request from 'supertest';
-import Ajv from 'ajv';
+/**
+ * OpenAPI conformance harness.
+ *
+ * Wraps supertest so that every response produced by the test suite is checked
+ * against the published spec (`src/openapi.ts`) for its path, method, status,
+ * content type and body schema. An undocumented path or status, or a body that
+ * does not match the documented schema, fails the test with a readable diff.
+ *
+ * OpenAPI 3.0 → JSON Schema conversion applied before handing schemas to Ajv:
+ *   - `nullable: true` becomes `type: [T, 'null']`
+ *   - boolean `exclusiveMinimum` / `exclusiveMaximum` become numeric
+ *   - `$ref: '#/components/schemas/X'` is rewritten to a standalone resource
+ *     so Ajv can resolve component schemas through `addSchema`
+ *   - OAS-only keywords (`example`, `xml`, `discriminator`, …) are dropped
+ */
+
+import originalRequest from 'supertest';
+import type { Application } from 'express';
+import Ajv, { type AnySchema, type ErrorObject, type ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import { openapi } from '../../src/openapi';
 
-type Method = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options';
+// ── Spec model ────────────────────────────────────────────────────────────────────────────────────
+
+type SchemaObject = Record<string, unknown>;
+
+interface ResponseObject {
+  $ref?: string;
+  description?: string;
+  content?: Record<string, { schema?: SchemaObject } | undefined>;
+}
+
+interface OperationObject {
+  responses?: Record<string, ResponseObject | undefined>;
+}
+
+interface SpecDocument {
+  paths: Record<string, Record<string, OperationObject> | undefined>;
+  components: {
+    schemas: Record<string, SchemaObject>;
+    responses?: Record<string, ResponseObject | undefined>;
+  };
+}
+
+const spec = openapi as unknown as SpecDocument;
+
+// ── OpenAPI 3.0 → JSON Schema ─────────────────────────────────────────────────────────────────────
+
+const COMPONENTS_RESOURCE = 'https://talenttrust.local/openapi-components.json';
+const OAS_ONLY_KEYWORDS = new Set([
+  'example',
+  'examples',
+  'xml',
+  'externalDocs',
+  'discriminator',
+  'summary',
+  'deprecated',
+]);
+
+function rewriteRef(ref: string): string {
+  const match = /^#\/components\/schemas\/([^/]+)$/.exec(ref);
+  return match ? `${COMPONENTS_RESOURCE}#/definitions/${match[1]}` : ref;
+}
+
+function toJsonSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(toJsonSchema);
+  if (node === null || typeof node !== 'object') return node;
+
+  const source = node as Record<string, unknown>;
+  const target: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'nullable' || OAS_ONLY_KEYWORDS.has(key)) continue;
+    if (key === '$ref') {
+      target.$ref = rewriteRef(String(value));
+      continue;
+    }
+    target[key] = toJsonSchema(value);
+  }
+
+  if (source.nullable === true && typeof target.type === 'string') {
+    target.type = [target.type, 'null'];
+  }
+  if (target.exclusiveMinimum === true) {
+    target.exclusiveMinimum = target.minimum;
+    delete target.minimum;
+  }
+  if (target.exclusiveMaximum === true) {
+    target.exclusiveMaximum = target.maximum;
+    delete target.maximum;
+  }
+  return target;
+}
 
 const ajv = new Ajv({ strict: false, allErrors: true });
 addFormats(ajv);
+ajv.addSchema({
+  $id: COMPONENTS_RESOURCE,
+  definitions: toJsonSchema(spec.components.schemas) as Record<string, SchemaObject>,
+});
 
-function toJsonSchema(schema: any): any {
-  if (!schema || typeof schema !== 'object') return schema;
-  if (Array.isArray(schema)) return schema.map(toJsonSchema);
-  const out: any = { ...schema };
-  if (schema.type && schema.nullable) {
-    const t = schema.type;
-    out.type = Array.isArray(t) ? Array.from(new Set([...t, 'null'])) : [t, 'null'];
-    delete out.nullable;
-  }
-  if (out.properties) {
-    const props: any = {};
-    for (const k of Object.keys(out.properties)) {
-      props[k] = toJsonSchema(out.properties[k]);
-    }
-    out.properties = props;
-  }
-  if (out.items) out.items = toJsonSchema(out.items);
-  if (out.additionalProperties && typeof out.additionalProperties === 'object') {
-    out.additionalProperties = toJsonSchema(out.additionalProperties);
-  }
-  if (out.oneOf) out.oneOf = out.oneOf.map(toJsonSchema);
-  if (out.anyOf) out.anyOf = out.anyOf.map(toJsonSchema);
-  if (out.allOf) out.allOf = out.allOf.map(toJsonSchema);
-  if (out.$ref) {
-    // Keep $ref as is; ajv will resolve if added
-  }
-  return out;
+// ── Path / response lookup ────────────────────────────────────────────────────────────────────────
+
+const pathSegments = (path: string): string[] => path.split('/').filter((s) => s.length > 0);
+
+function pathMatches(template: string, actual: string): boolean {
+  const expected = pathSegments(template);
+  const received = pathSegments(actual);
+  if (expected.length !== received.length) return false;
+  return expected.every(
+    (segment, i) => (segment.startsWith('{') && segment.endsWith('}')) || segment === received[i],
+  );
 }
 
-const components = (openapi as any).components || {};
-if (components.schemas) {
-  for (const [name, schema] of Object.entries(components.schemas)) {
-    ajv.addSchema(toJsonSchema(schema), `#/components/schemas/${name}`);
-  }
+const templateParams = (template: string): number =>
+  pathSegments(template).filter((s) => s.startsWith('{')).length;
+
+function findSpecPath(actual: string): string | undefined {
+  return Object.keys(spec.paths)
+    .filter((template) => pathMatches(template, actual))
+    .sort((a, b) => templateParams(a) - templateParams(b))[0];
 }
 
-function compile(schema: any) {
-  try {
-    return ajv.compile(toJsonSchema(schema));
-  } catch (e) {
-    return ajv.compile(schema);
-  }
+/** Follows `#/components/responses/…` so operation-level `$ref`s stay usable. */
+function resolveResponse(responseDoc: ResponseObject): ResponseObject {
+  if (!responseDoc.$ref) return responseDoc;
+  const name = /^#\/components\/responses\/([^/]+)$/.exec(responseDoc.$ref)?.[1];
+  return (name ? spec.components.responses?.[name] : undefined) ?? responseDoc;
 }
 
-function matchPath(pattern: string, actual: string): boolean {
-  if (pattern === actual) return true;
-  const p = pattern.split('/').filter(Boolean);
-  const a = actual.split('/').filter(Boolean);
-  if (p.length !== a.length) return false;
-  for (let i = 0; i < p.length; i++) {
-    if (p[i].startsWith('{') && p[i].endsWith('}')) continue;
-    if (p[i] !== a[i]) return false;
+const validatorCache = new Map<string, ValidateFunction | null>();
+
+function validatorFor(key: string, schema: SchemaObject | undefined): ValidateFunction | null {
+  if (!validatorCache.has(key)) {
+    validatorCache.set(key, schema ? ajv.compile(toJsonSchema(schema) as AnySchema) : null);
   }
-  return true;
+  return validatorCache.get(key) ?? null;
 }
 
-const paths = (openapi as any).paths || {};
-
-function getOp(path: string, method: Method) {
-  for (const [pattern, obj] of Object.entries(paths)) {
-    if (matchPath(pattern, path) && (obj as any)[method]) return (obj as any)[method];
+function selectContent(
+  responseDoc: ResponseObject,
+  contentType: string | undefined,
+): { name: string; schema?: SchemaObject } | undefined {
+  const content = responseDoc.content;
+  if (!content) return undefined;
+  const names = Object.keys(content);
+  if (contentType) {
+    const exact = names.find((name) => contentType.toLowerCase().startsWith(name.toLowerCase()));
+    if (exact) return { name: exact, schema: content[exact]?.schema };
   }
-  return null;
+  if (names.length === 1) return { name: names[0], schema: content[names[0]]?.schema };
+  return undefined;
 }
 
-function getResponseSchema(op: any, status: number) {
-  const resp = op?.responses?.[String(status)] || op?.responses?.[status];
-  if (!resp?.content?.['application/json']?.schema) return null;
-  return resp.content['application/json'].schema;
+// ── Validation ────────────────────────────────────────────────────────────────────────────────────
+
+export interface ConformanceResponse {
+  status: number;
+  headers?: unknown;
+  body?: unknown;
+  text?: string;
 }
 
-const validators = new Map<string, (data: any) => boolean>();
-
-function validateResponse(path: string, method: Method, status: number, body: any) {
-  // Normalize paths like /docs/ if needed
-  let checkPath = path;
-  if (checkPath.endsWith('/') && checkPath.length > 1 && !checkPath.match(/\/\{[^}]+\}$/)) {
-    checkPath = checkPath.slice(0, -1);
-  }
-  const op = getOp(checkPath, method) || getOp(path, method);
-  // Allow undocumented routes (like /nope) - just don't validate against OpenAPI
-  if (!op) return;
-  const schema = getResponseSchema(op, status);
-  if (!schema) return; // Don't fail if status not documented
-  const key = `${method}:${checkPath}:${status}`;
-  let v = validators.get(key);
-  if (!v) {
-    v = compile(schema);
-    validators.set(key, v);
-  }
-  const valid = v(body);
-  if (!valid) {
-    const errors = (v as any).errors || [];
-    throw new Error(`OpenAPI response schema mismatch for ${method.toUpperCase()} ${path} -> ${status}\n${JSON.stringify(errors, null, 2)}\nBody: ${JSON.stringify(body)}`);
-  }
+function responseContentType(response: ConformanceResponse): string | undefined {
+  const headers = response.headers as Record<string, unknown> | undefined;
+  const value = headers?.['content-type'];
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return undefined;
 }
 
-export function withOpenApiValidation(app: any) {
-  const agent: any = request(app);
-  const methods: Method[] = ['get', 'post', 'put', 'patch', 'delete'];
-  const orig: any = {};
-  for (const m of methods) {
-    orig[m] = agent[m].bind(agent);
-    (agent as any)[m] = function (url: string, ...args: any[]) {
-      const test = orig[m](url, ...args);
-      const origEnd = test.end.bind(test);
-      test.end = function (fn?: any) {
-        return origEnd((err: any, res: any) => {
-          try {
-            if (res) {
-              const ct = res.headers?.['content-type'] || res.headers?.['Content-Type'] || '';
-              if (ct.includes('application/json')) {
-                validateResponse(res.req?.path || res.request?.path || url, m, res.statusCode || res.status, res.body);
-              }
-            }
-          } catch (e: any) {
-            if (fn) return fn(e);
-            throw e;
-          }
-          if (fn) return fn(err, res);
-        });
-      };
-      // Also override then for promises
-      const origThen = test.then;
-      if (origThen) {
-        test.then = function (onFulfilled?: any, onRejected?: any) {
-          return origThen.call(
-            this,
-            (res: any) => {
-              try {
-                if (res) {
-                  const ct = res.headers?.['content-type'] || res.headers?.['Content-Type'] || '';
-                  if (ct.includes('application/json')) {
-                    validateResponse(res.req?.path || res.request?.path || url, m, res.statusCode || res.status, res.body);
-                  }
-                }
-              } catch (e: any) {
-                if (onRejected) return onRejected(e);
-                throw e;
-              }
-              if (onFulfilled) return onFulfilled(res);
-              return res;
-            },
-            onRejected,
-          );
-        };
+function responseBody(response: ConformanceResponse, contentType: string): unknown {
+  if (contentType.toLowerCase().includes('json')) return response.body;
+  return response.text;
+}
+
+function truncate(value: string, max = 400): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+function formatErrors(errors: ErrorObject[] | null | undefined): string {
+  return (errors ?? [])
+    .map((error) => {
+      const at = error.instancePath || '/';
+      let detail = error.message ?? 'is invalid';
+      if (error.keyword === 'required') {
+        const params = error.params as { missingProperty?: string };
+        detail = `missing required property '${params.missingProperty}'`;
+      } else if (error.keyword === 'additionalProperties') {
+        const params = error.params as { additionalProperty?: string };
+        detail = `unexpected property '${params.additionalProperty}'`;
       }
-      return test;
-    };
-  }
-  return agent;
+      return `  - ${at}: ${detail}`;
+    })
+    .join('\n');
 }
 
-export { validateResponse };
+/**
+ * Returns every way `response` deviates from the published spec for
+ * `method`/`path`. An empty array means the response is conformant.
+ */
+export function conformanceProblems(
+  response: ConformanceResponse,
+  method: string,
+  path: string,
+): string[] {
+  const verb = method.toUpperCase();
+  const contentType = responseContentType(response);
+  const status = String(response.status);
+  const problems: string[] = [];
+
+  const validateBody = (responseDoc: ResponseObject, context: string): void => {
+    const selected = selectContent(responseDoc, contentType);
+    if (!selected) {
+      if (responseDoc.content && contentType) {
+        problems.push(
+          `${context}: content-type '${contentType}' is not documented ` +
+            `(documented: ${Object.keys(responseDoc.content).join(', ') || 'none'})`,
+        );
+      }
+      return;
+    }
+    if (!selected.schema) return;
+    const validate = validatorFor(`${context} ${selected.name}`, selected.schema);
+    const body = responseBody(response, selected.name);
+    if (!validate || !validate(body)) {
+      problems.push(
+        `${context}: body does not match the documented schema ` +
+          `(#/components/schemas is referenced through the response content)\n` +
+          `${formatErrors(validate?.errors)}\n` +
+          `  received: ${truncate(JSON.stringify(body))}`,
+      );
+    }
+  };
+
+  const specPath = findSpecPath(path);
+  if (!specPath) {
+    // Undocumented path: only the documented global 404 is allowed to escape.
+    const notFound = spec.components.responses?.NotFound;
+    if (response.status !== 404 || !notFound) {
+      problems.push(
+        `path '${path}' is not documented in the OpenAPI spec and returned ` +
+          `${response.status} (an undocumented path may only return the documented 404)`,
+      );
+      return problems;
+    }
+    validateBody(notFound, `${verb} ${path} → 404`);
+    return problems;
+  }
+
+  const operation = spec.paths[specPath]?.[method.toLowerCase()];
+  if (!operation) {
+    problems.push(
+      `${verb} ${specPath} is not documented in the OpenAPI spec ` +
+        `(documented: ${Object.keys(spec.paths[specPath] ?? {}).join(', ') || 'none'})`,
+    );
+    return problems;
+  }
+
+  const responses = operation.responses ?? {};
+  const declared = responses[status] ?? responses.default;
+  if (!declared) {
+    const documented = Object.keys(responses)
+      .filter((code) => code !== 'default')
+      .sort()
+      .join(', ');
+    problems.push(
+      `${verb} ${specPath} returned ${response.status}, which is not documented ` +
+        `(documented: ${documented || 'none'})`,
+    );
+    return problems;
+  }
+  const responseDoc = resolveResponse(declared);
+
+  validateBody(responseDoc, `${verb} ${specPath} → ${response.status}`);
+  return problems;
+}
+
+/** Throws a readable error when `response` deviates from the published spec. */
+export function assertConformance(
+  response: ConformanceResponse,
+  method: string,
+  path: string,
+): void {
+  const problems = conformanceProblems(response, method, path);
+  if (problems.length > 0) {
+    throw new Error(
+      `OpenAPI conformance failure for ${method.toUpperCase()} ${path} → ${response.status}\n` +
+        problems.map((problem) => `  ${problem}`).join('\n'),
+    );
+  }
+}
+
+// ── supertest wrapper ─────────────────────────────────────────────────────────────────────────────
+
+/** The supertest response shape tests consume (`.status`, `.body`, …). */
+export interface ConformanceResult {
+  status: number;
+  body: any;
+  text: string;
+  headers: Record<string, any>;
+}
+
+/** A supertest request whose awaited response is validated against the spec. */
+export class ConformanceTest {
+  constructor(
+    private readonly test: unknown,
+    private readonly method: string,
+    private readonly path: string,
+  ) {}
+
+  send(body: unknown): this {
+    (this.test as { send: (value: unknown) => unknown }).send(body);
+    return this;
+  }
+
+  set(field: string, value: string): this {
+    (this.test as { set: (f: string, v: string) => unknown }).set(field, value);
+    return this;
+  }
+
+  query(params: Record<string, unknown>): this {
+    (this.test as { query: (value: unknown) => unknown }).query(params);
+    return this;
+  }
+
+  expect(...args: unknown[]): this {
+    (this.test as { expect: (...values: unknown[]) => unknown }).expect(...args);
+    return this;
+  }
+
+  private run(): Promise<ConformanceResult> {
+    return Promise.resolve()
+      .then(() => (this.test as PromiseLike<ConformanceResponse>).then())
+      .then((response) => {
+        assertConformance(response, this.method, this.path);
+        return response as unknown as ConformanceResult;
+      });
+  }
+
+  then(
+    onfulfilled?: ((value: ConformanceResult) => unknown) | null,
+    onrejected?: ((reason: unknown) => unknown) | null,
+  ): Promise<ConformanceResult> {
+    return this.run().then(onfulfilled ?? undefined, onrejected ?? undefined) as Promise<
+      ConformanceResult
+    >;
+  }
+
+  catch(onrejected?: ((reason: unknown) => unknown) | null): Promise<unknown> {
+    return this.run().catch(onrejected ?? undefined);
+  }
+}
+
+export interface ConformanceClient {
+  get(path: string): ConformanceTest;
+  post(path: string): ConformanceTest;
+  put(path: string): ConformanceTest;
+  patch(path: string): ConformanceTest;
+  delete(path: string): ConformanceTest;
+  head(path: string): ConformanceTest;
+}
+
+/** Drop-in replacement for supertest's `request(app)` with conformance checking. */
+export function request(app: Application): ConformanceClient {
+  const agent = originalRequest(app) as unknown as Record<string, (path: string) => unknown>;
+  const verb =
+    (name: string) =>
+    (path: string): ConformanceTest =>
+      new ConformanceTest(agent[name](path), name, path);
+  return {
+    get: verb('get'),
+    post: verb('post'),
+    put: verb('put'),
+    patch: verb('patch'),
+    delete: verb('delete'),
+    head: verb('head'),
+  };
+}
