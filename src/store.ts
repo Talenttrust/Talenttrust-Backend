@@ -12,6 +12,30 @@ export type ContractStatus =
   | 'Resolved'
   | 'Cancelled';
 
+export type SortSpec =
+  | 'createdAt'
+  | '-createdAt'
+  | 'updatedAt'
+  | '-updatedAt'
+  | 'totalAmount'
+  | '-totalAmount';
+
+export interface Cursor {
+  sort: string;
+  lastValue: string;
+  lastId: number;
+}
+
+export interface QueryFilters {
+  status?: string[];
+  party?: string;
+  role?: 'client' | 'freelancer';
+  token?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  linked?: boolean;
+}
+
 export interface Milestone {
   index: number;
   title: string;
@@ -92,6 +116,32 @@ export class EscrowStore {
         (!filter.party || c.client === filter.party || c.freelancer === filter.party) &&
         (filter.linked === undefined || (filter.linked ? !!c.chain : !c.chain)),
     );
+  }
+
+  query(opts: {
+    filters?: QueryFilters;
+    sort?: string;
+    limit?: number;
+    after?: Cursor;
+  }): { data: EscrowContract[]; hasMore: boolean; nextCursor: Cursor | null } {
+    const limit = opts.limit ?? 20;
+    const sort = opts.sort ?? '-createdAt';
+    const { field, desc } = parseSort(sort);
+    let items = [...this.contracts.values()].filter((c) => matchesFilters(c, opts.filters));
+    items.sort((a, b) => compareContracts(a, b, field, desc));
+    const after = opts.after;
+    if (after) {
+      items = items.filter((c) => isAfterCursor(c, after, field, desc));
+    }
+    const raw = items.slice(0, limit + 1);
+    const hasMore = raw.length > limit;
+    const data = hasMore ? raw.slice(0, limit) : raw;
+    let nextCursor: Cursor | null = null;
+    if (hasMore) {
+      const last = data[data.length - 1];
+      nextCursor = { sort, lastValue: String(sortValue(last, field)), lastId: last.id };
+    }
+    return { data, hasMore, nextCursor };
   }
 
   get(id: number): EscrowContract {
@@ -264,8 +314,8 @@ export class EscrowStore {
 
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
     const c = this.get(id);
-    if (c.status !== 'Disputed') {
-      throw new HttpError(409, 'invalid_status', 'Only disputed contracts can be resolved');
+    if (c.status !== 'Disputed' || !c.dispute) {
+      throw new HttpError(409, 'invalid_status', 'Contract is not disputed');
     }
     const bps = Number(freelancerBpsRaw);
     if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
@@ -578,4 +628,61 @@ export class EscrowStore {
     this.rate(b.id, 5);
     return this;
   }
+}
+
+const VALID_STATUSES: ContractStatus[] = ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'];
+const SORT_FIELDS = ['createdAt', 'updatedAt', 'totalAmount'] as const;
+
+function parseSort(sort: string): { field: string; desc: boolean } {
+  const desc = sort.startsWith('-');
+  const field = desc ? sort.slice(1) : sort;
+  if (!SORT_FIELDS.includes(field as never)) {
+    throw new HttpError(400, 'invalid_query', 'invalid sort');
+  }
+  return { field, desc };
+}
+
+function sortValue(c: EscrowContract, field: string): string | number {
+  if (field === 'totalAmount') return c.totalAmount;
+  return c[field as 'createdAt' | 'updatedAt'];
+}
+
+function compareValue(va: string | number, vb: string | number): number {
+  if (typeof va === 'number' && typeof vb === 'number') {
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+  }
+  return String(va).localeCompare(String(vb));
+}
+
+function compareContracts(a: EscrowContract, b: EscrowContract, field: string, desc: boolean): number {
+  const cmp = compareValue(sortValue(a, field), sortValue(b, field));
+  if (cmp !== 0) return desc ? -cmp : cmp;
+  return a.id - b.id;
+}
+
+function matchesFilters(c: EscrowContract, f: QueryFilters | undefined): boolean {
+  if (!f) return true;
+  if (f.status && !f.status.includes(c.status)) return false;
+  if (f.party !== undefined) {
+    if (f.role === 'client') {
+      if (c.client !== f.party) return false;
+    } else if (f.role === 'freelancer') {
+      if (c.freelancer !== f.party) return false;
+    } else {
+      if (c.client !== f.party && c.freelancer !== f.party) return false;
+    }
+  }
+  if (f.token && c.token !== f.token) return false;
+  if (f.createdAfter && c.createdAt < f.createdAfter) return false;
+  if (f.createdBefore && c.createdAt > f.createdBefore) return false;
+  if (f.linked !== undefined && (!!c.chain !== f.linked)) return false;
+  return true;
+}
+
+function isAfterCursor(c: EscrowContract, after: Cursor, field: string, desc: boolean): boolean {
+  const cmp = compareValue(sortValue(c, field), after.lastValue);
+  if (cmp !== 0) return desc ? cmp < 0 : cmp > 0;
+  return desc ? c.id < after.lastId : c.id > after.lastId;
 }

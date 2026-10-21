@@ -176,8 +176,26 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/metrics': {
+      get: {
+        tags: ['System'],
+        summary: 'Prometheus metrics endpoint',
+        description:
+          'Returns Prometheus exposition format text. Requires `Authorization: Bearer <METRICS_TOKEN>`. ' +
+          'Returns 404 when METRICS_TOKEN is unset (endpoint disabled).',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: { description: 'Prometheus exposition format', content: { 'text/plain': { schema: { type: 'string' } } } },
+          401: { description: 'Invalid or missing metrics token' },
+          404: { description: 'Metrics endpoint disabled (METRICS_TOKEN not set)' },
+        },
+      },
+    },
   },
   components: {
+    securitySchemes: {
+      bearerAuth: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
+    },
     schemas: {
       DriftItem: {
         type: 'object',

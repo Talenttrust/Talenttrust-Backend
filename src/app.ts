@@ -1,10 +1,17 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { createHmac, randomBytes } from 'node:crypto';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
+import {
+  createRegistry,
+  type Registry,
+  HTTP_DURATION_BUCKETS,
+  constantTimeEqual,
+} from './metrics';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 
 declare global {
@@ -19,23 +26,9 @@ const startedAt = Date.now();
 
 type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 
-type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
-const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const out = await fn(req, res);
-    if (out !== undefined && !res.headersSent) res.json(out);
-  } catch (err) {
-    next(err);
-  }
-};
-
-const id = (req: Request) => {
-  const n = Number(req.params.id);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
-  return n;
-};
-
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
 
 function resolveStoreAndLogger(
   storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
@@ -56,17 +49,38 @@ function resolveStoreAndLogger(
   };
 }
 
+type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
+const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const out = await fn(req, res);
+    if (out !== undefined && !res.headersSent) res.json(out);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const id = (req: Request) => {
+  const n = Number(req.params.id);
+  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
+  return n;
+};
+
 export function createApp(
   storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
+  opts: { registry?: Registry } = {},
   fallbackChainReader?: ChainReader,
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
   const chainReader = fallbackChainReader ?? resolved.chainReader;
-
+  const registry = opts.registry ?? createRegistry();
   const app = express();
   app.disable('x-powered-by');
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(cors());
+  app.use(express.json({ limit: '100kb' }));
+
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
   app.use((req, res, next) => {
@@ -78,16 +92,36 @@ export function createApp(
     next();
   });
 
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(cors());
-  app.use(express.json({ limit: '100kb' }));
+  // HTTP RED metrics: request counter and latency histogram.
+  const httpRequestsTotal = registry.counter(
+    'http_requests_total',
+    'Total number of HTTP requests',
+    ['method', 'route', 'status'],
+  );
+  const httpRequestDuration = registry.histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'route'],
+    HTTP_DURATION_BUCKETS,
+  );
+
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const durationSeconds = (Date.now() - start) / 1000;
+      const route = req.route ? String(req.baseUrl || '') + String(req.route.path || '') : 'unmatched';
+      httpRequestsTotal.inc({ method: req.method, route, status: String(res.statusCode) });
+      httpRequestDuration.observe({ method: req.method, route }, durationSeconds);
+    });
+    next();
+  });
 
   // Structured access log on response finish.
   app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
       const durationMs = Date.now() - start;
-      const route = req.route ? req.baseUrl + req.route.path : 'unmatched';
+      const route = req.route ? String(req.baseUrl || '') + String(req.route.path || '') : 'unmatched';
       let level: LoggerLevel = 'info';
       if (res.statusCode >= 500) level = 'error';
       else if (res.statusCode >= 429) level = 'warn';
@@ -102,6 +136,14 @@ export function createApp(
     });
     next();
   });
+
+  // Domain mutation counter: incremented in the store layer.
+  const escrowMutationsTotal = registry.counter(
+    'escrow_mutations_total',
+    'Total number of escrow mutations',
+    ['action', 'result'],
+  );
+  store.setMutationRecorder((action, result) => escrowMutationsTotal.inc({ action, result }));
 
   app.get(
     '/',
@@ -209,6 +251,36 @@ export function createApp(
   );
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
   app.use('/api/v1', v1);
+
+  // /metrics is disabled (404) when METRICS_TOKEN is unset; checked at request time.
+  const escrowContracts = registry.gauge('escrow_contracts', 'Escrow contracts by status', ['status']);
+  const escrowValueEscrowed = registry.gauge('escrow_value_escrowed', 'Value currently escrowed', []);
+  const escrowValueReleased = registry.gauge('escrow_value_released', 'Value released', []);
+  const processUptime = registry.gauge('process_uptime_seconds', 'Process uptime in seconds', []);
+  const nodejsHeapUsed = registry.gauge('nodejs_heap_used_bytes', 'Node.js heap used in bytes', []);
+
+  app.get('/metrics', (req, res) => {
+    if (!process.env.METRICS_TOKEN) {
+      res.status(404).json({ error: 'not_found', message: 'Metrics endpoint disabled' });
+      return;
+    }
+    const auth = req.headers['authorization'];
+    const provided = Array.isArray(auth) ? auth[0] : auth;
+    const expected = 'Bearer ' + process.env.METRICS_TOKEN!;
+    if (!provided || !constantTimeEqual(provided, expected)) {
+      res.status(401).json({ error: 'unauthorized', message: 'Invalid metrics token' });
+      return;
+    }
+    const stats = store.stats();
+    for (const [status, count] of Object.entries(stats.byStatus)) {
+      escrowContracts.set({ status }, count);
+    }
+    escrowValueEscrowed.set({}, stats.totalEscrowed);
+    escrowValueReleased.set({}, stats.totalReleased);
+    processUptime.set({}, process.uptime());
+    nodejsHeapUsed.set({}, process.memoryUsage().heapUsed);
+    res.type('text/plain; version=0.0.4').send(registry.exposition());
+  });
 
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });
