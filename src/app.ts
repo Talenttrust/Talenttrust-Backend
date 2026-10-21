@@ -5,6 +5,7 @@ import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
+import { CSV_HEADERS, csvRow } from './csv';
 
 declare global {
   namespace Express {
@@ -119,6 +120,8 @@ export function createApp(
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
         'GET  /api/v1/reputation/:address',
+        'GET  /api/v1/parties/:address/statement.csv',
+        'GET  /api/v1/parties/:address/statement.json',
       ],
     })),
   );
@@ -182,6 +185,100 @@ export function createApp(
   v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req))));
   v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+
+  // ── Statement endpoints ────────────────────────────────────────────────────
+  // Shared date-range parser used by both .csv and .json variants.
+  function parseStatementParams(req: Request): {
+    address: string;
+    from: Date;
+    to: Date;
+    role: 'client' | 'freelancer' | 'all';
+    bom: boolean;
+  } {
+    const address = req.params.address;
+    const MAX_RANGE_MS = 3 * 365.25 * 24 * 60 * 60 * 1000; // ~3 years
+    const DEFAULT_RANGE_MS = 365 * 24 * 60 * 60 * 1000;    // 365 days
+
+    const toDate = req.query.to
+      ? new Date(String(req.query.to))
+      : new Date(Date.now());
+    const fromDate = req.query.from
+      ? new Date(String(req.query.from))
+      : new Date(toDate.getTime() - DEFAULT_RANGE_MS);
+
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      throw new HttpError(400, 'invalid_range', 'from and to must be valid ISO dates');
+    }
+    if (fromDate >= toDate) {
+      throw new HttpError(400, 'invalid_range', 'from must be before to');
+    }
+    if (toDate.getTime() - fromDate.getTime() > MAX_RANGE_MS) {
+      throw new HttpError(400, 'invalid_range', 'date range must not exceed 3 years');
+    }
+
+    const roleRaw = typeof req.query.role === 'string' ? req.query.role : 'all';
+    if (roleRaw !== 'client' && roleRaw !== 'freelancer' && roleRaw !== 'all') {
+      throw new HttpError(400, 'invalid_role', 'role must be client, freelancer, or all');
+    }
+
+    const bom = req.query.bom === 'true';
+    return { address, from: fromDate, to: toDate, role: roleRaw, bom };
+  }
+
+  v1.get('/parties/:address/statement.csv', (req, res, next) => {
+    try {
+      const { address, from, to, role, bom } = parseStatementParams(req);
+      const rows = store.getStatement(address, from, to, role);
+      const safeAddress = address.replace(/[^A-Za-z0-9_-]/g, '_');
+      const fromStr = from.toISOString().slice(0, 10);
+      const toStr = to.toISOString().slice(0, 10);
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="talenttrust-${safeAddress}-${fromStr}-${toStr}.csv"`,
+      );
+
+      // UTF-8 BOM for Excel compatibility when ?bom=true
+      if (bom) res.write('\uFEFF');
+
+      // Stream: header row then one data row per contract
+      res.write(csvRow(CSV_HEADERS));
+      for (const row of rows) {
+        res.write(
+          csvRow([
+            row.contract_id,
+            row.title,
+            row.role,
+            row.counterparty,
+            row.token,
+            row.status,
+            row.total_amount,
+            row.funded_amount,
+            row.released_amount,
+            row.outstanding_amount,
+            row.dispute_freelancer_bps,
+            row.created_at,
+            row.updated_at,
+          ]),
+        );
+      }
+      res.end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  v1.get('/parties/:address/statement.json', (req, res, next) => {
+    try {
+      const { address, from, to, role } = parseStatementParams(req);
+      const rows = store.getStatement(address, from, to, role);
+      res.json({ address, from: from.toISOString(), to: to.toISOString(), role, data: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.use('/api/v1', v1);
 
   app.use((req, res) => {
