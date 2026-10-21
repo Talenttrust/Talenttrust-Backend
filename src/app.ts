@@ -5,7 +5,6 @@ import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
-import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 
 declare global {
@@ -36,13 +35,45 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed(), origins: string[] = allowlist()) {
+const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+function resolveStoreAndLogger(
+  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
+): { store: EscrowStore; logger: Logger } {
+  if (
+    storeOrOpts &&
+    typeof storeOrOpts === 'object' &&
+    'list' in storeOrOpts &&
+    typeof (storeOrOpts as EscrowStore).list === 'function'
+  ) {
+    return { store: storeOrOpts as EscrowStore, logger: createLogger() };
+  }
+  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore } | undefined) ?? {};
+  return { store: opts.store ?? new EscrowStore().seed(), logger: opts.logger ?? createLogger() };
+}
+
+export function createApp(
+  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
+  origins: string[] = allowlist(),
+) {
+  const { store, logger } = resolveStoreAndLogger(storeOrOpts);
   const app = express();
   app.disable('x-powered-by');
   // Trust the first hop (Vercel / any reverse proxy) so req.protocol reflects X-Forwarded-Proto.
   // Without this the same-origin allowance in originGuard compares https://host Origin
   // headers against http://host and 403s same-origin non-GET requests behind the proxy.
   app.set('trust proxy', 1);
+  // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
+  // The regex excludes CR/LF so a client cannot inject log-line terminators.
+  app.use((req, res, next) => {
+    const incoming = req.headers['x-request-id'];
+    const value = Array.isArray(incoming) ? incoming[0] : incoming;
+    const requestId = value && REQUEST_ID_RE.test(value) ? (value as string) : randomUUID();
+    req.id = requestId;
+    res.set('X-Request-Id', requestId);
+    next();
+  });
+
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -68,42 +99,6 @@ export function createApp(store: EscrowStore = new EscrowStore().seed(), origins
   );
   app.use(originGuard(origins));
   app.use(cors(corsOptionsFor(origins)));
-const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
-
-function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
-): { store: EscrowStore; logger: Logger } {
-  if (
-    storeOrOpts &&
-    typeof storeOrOpts === 'object' &&
-    'list' in storeOrOpts &&
-    typeof (storeOrOpts as EscrowStore).list === 'function'
-  ) {
-    return { store: storeOrOpts as EscrowStore, logger: createLogger() };
-  }
-  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore } | undefined) ?? {};
-  return { store: opts.store ?? new EscrowStore().seed(), logger: opts.logger ?? createLogger() };
-}
-
-export function createApp(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore } = new EscrowStore().seed(),
-) {
-  const { store, logger } = resolveStoreAndLogger(storeOrOpts);
-  const app = express();
-  app.disable('x-powered-by');
-  // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
-  // The regex excludes CR/LF so a client cannot inject log-line terminators.
-  app.use((req, res, next) => {
-    const incoming = req.headers['x-request-id'];
-    const value = Array.isArray(incoming) ? incoming[0] : incoming;
-    const requestId = value && REQUEST_ID_RE.test(value) ? (value as string) : randomUUID();
-    req.id = requestId;
-    res.set('X-Request-Id', requestId);
-    next();
-  });
-
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(cors());
   app.use(express.json({ limit: '100kb' }));
 
   // Structured access log on response finish.
