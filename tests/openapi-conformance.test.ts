@@ -58,6 +58,8 @@ describe('OpenAPI document', () => {
       const name = /^#\/components\/responses\/([^/]+)$/.exec(declared.$ref)?.[1];
       return name ? components.responses?.[name] : undefined;
     };
+    // The only documented non-envelope error response: /health while draining.
+    const exceptions = new Set(['GET /health 503']);
 
     const problems: string[] = [];
     for (const [path, pathItem] of Object.entries(paths)) {
@@ -67,6 +69,7 @@ describe('OpenAPI document', () => {
         if (!responses['500']) problems.push(`${label}: missing 500`);
         for (const [code, declared] of Object.entries(responses)) {
           if (!/^[45]\d\d$/.test(code)) continue;
+          if (exceptions.has(`${label} ${code}`)) continue;
           const schema = resolve(declared)?.content?.['application/json']?.schema;
           if (schema?.$ref !== '#/components/schemas/Error') {
             problems.push(`${label} ${code}: does not reference #/components/schemas/Error`);
@@ -155,6 +158,7 @@ describe('conformance harness', () => {
     const notFound = {
       error: 'not_found',
       message: 'No route for GET /not-in-spec',
+      requestId: '8f14e45f-ea6f-4f5b-9c3d-2b1a7e0d5c6a',
       docs: '/docs',
     };
 

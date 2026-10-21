@@ -135,7 +135,19 @@ export const openapi = {
       get: {
         tags: ['System'],
         summary: 'Health check',
-        responses: { ...ok('Service is healthy', { $ref: '#/components/schemas/Health' }), ...errors('InternalServerError') },
+        responses: {
+          ...ok('Service is healthy', { $ref: '#/components/schemas/Health' }),
+          503: response(
+            'Draining: the instance is shutting down and refuses new work',
+            {
+              type: 'object',
+              required: ['status'],
+              additionalProperties: false,
+              properties: { status: { type: 'string', enum: ['draining'] } },
+            },
+          ),
+          ...errors('InternalServerError'),
+        },
       },
     },
     '/docs': {
@@ -321,11 +333,15 @@ export const openapi = {
       Error: {
         type: 'object',
         description: 'Error envelope returned by every non-2xx response.',
-        required: ['error', 'message'],
+        required: ['error', 'message', 'requestId'],
         additionalProperties: false,
         properties: {
           error: { type: 'string', description: 'Stable machine-readable code, e.g. invalid_amount.' },
           message: { type: 'string', description: 'Human-readable explanation.' },
+          requestId: {
+            type: 'string',
+            description: 'Correlation id, echoed from the X-Request-Id header when present.',
+          },
           docs: { type: 'string', description: 'Documentation link; present on global route-not-found responses.' },
         },
       },
