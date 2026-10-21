@@ -51,6 +51,22 @@ export interface Reputation {
   averageRating: number;
 }
 
+export interface StatementRow {
+  contract_id: string;
+  title: string;
+  role: 'client' | 'freelancer';
+  counterparty: string;
+  token: string;
+  status: ContractStatus;
+  total_amount: number;
+  funded_amount: number;
+  released_amount: number;
+  outstanding_amount: number;
+  dispute_freelancer_bps: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -260,6 +276,47 @@ export class EscrowStore {
       totalEscrowed: all.reduce((s, c) => s + (c.fundedAmount - c.releasedAmount), 0),
       totalReleased: all.reduce((s, c) => s + c.releasedAmount, 0),
     };
+  }
+
+  /**
+   * Return statement rows for a given address, optionally filtered by role
+   * and/or date range.  Dates are interpreted as ISO date strings (UTC day
+   * boundaries) and compared against `createdAt`.
+   *
+   * @param address  Stellar address to look up (client or freelancer)
+   * @param from     Inclusive lower bound (ISO date, e.g. "2024-01-01")
+   * @param to       Exclusive upper bound (ISO date, e.g. "2025-01-01")
+   * @param role     'client' | 'freelancer' | 'all'
+   */
+  getStatement(
+    address: string,
+    from: Date,
+    to: Date,
+    role: 'client' | 'freelancer' | 'all',
+  ): StatementRow[] {
+    return this.list({ party: address })
+      .filter((c) => {
+        const created = new Date(c.createdAt).getTime();
+        if (created < from.getTime() || created >= to.getTime()) return false;
+        if (role === 'client' && c.client !== address) return false;
+        if (role === 'freelancer' && c.freelancer !== address) return false;
+        return true;
+      })
+      .map((c): StatementRow => ({
+        contract_id: String(c.id),
+        title: c.title,
+        role: c.client === address ? 'client' : 'freelancer',
+        counterparty: c.client === address ? c.freelancer : c.client,
+        token: c.token,
+        status: c.status,
+        total_amount: c.totalAmount,
+        funded_amount: c.fundedAmount,
+        released_amount: c.releasedAmount,
+        outstanding_amount: c.fundedAmount - c.releasedAmount,
+        dispute_freelancer_bps: c.dispute?.freelancerBps ?? null,
+        created_at: c.createdAt,
+        updated_at: c.updatedAt,
+      }));
   }
 
   /** Seed a few demo engagements so the API is explorable out of the box. */

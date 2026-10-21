@@ -35,6 +35,8 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+| GET | `/api/v1/parties/:address/statement.csv` | Downloadable CSV escrow statement for an address |
+| GET | `/api/v1/parties/:address/statement.json` | Same data as JSON for programmatic use |
 
 ## Development
 
