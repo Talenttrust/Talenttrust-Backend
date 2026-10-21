@@ -78,8 +78,22 @@ npm test
 npm run build && npom start
 ```
 
-Configuration (all optional, see .env.example): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
-`STELLAR_RPC_URL`, `FRONTEND_URL`.
+Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+
+Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
+`X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
+unexpected 500s are logged with a stack trace (never leaked to the client). Authorization, `x-api-key` and `Cookie` header values are redacted
+and request bodies are never logged.
+
+Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default 65000),
+`HEADERS_TIMEOUT_MS` (default 66000, must be > keep-alive), `REQUEST_TIMEOUT_MS` (default 30000).
+`SHUTDOWN_GRACE_MS` (default 10000) controls how long to wait for in-flight requests on shutdown.
+`PORT` is validated: non-integer or out-of-range (1–65535) values cause a fast fail with a clear message.
+
+On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
+returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
+the grace deadline, then force-closes remaining sockets and exits.
 
 SSM specific configuration:
 
