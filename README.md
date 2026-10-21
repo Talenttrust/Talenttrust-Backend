@@ -21,7 +21,9 @@ data is per-instance and resets on redeploy.
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Service info and endpoint list (JSON) |
-| GET | `/health` | Health check |
+| GET | `/health` | Health check (liveness fields + last readiness summary) |
+| GET | `/health/live` | Liveness probe (always 200 while the process is up) |
+| GET | `/health/ready` | Readiness probe: Soroban RPC, network passphrase, contract, storage |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | On-chain contract deployment info |
@@ -47,7 +49,16 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`,
+`STELLAR_NETWORK_PASSPHRASE` (expected passphrase when the network name has no well-known value),
+`HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness result cache, default 10000).
+
+Readiness (`/health/ready`) checks four dependencies in parallel — Soroban RPC `getHealth`, the
+network passphrase, the escrow contract's ledger entry and the store — and answers `200 ready` /
+`200 degraded` (only warnings) / `503 unready`. Results are cached for `HEALTH_CACHE_MS` with
+single-flight, so a burst of probes performs at most one round of RPC calls. Failure details are
+fixed strings and never include the RPC URL. `/health/live` never touches a dependency, and
+`/health` reports the summary of the last readiness run once one has happened.
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
