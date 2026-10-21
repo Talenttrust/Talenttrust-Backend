@@ -32,13 +32,41 @@ export const openapi = {
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
-        summary: 'List escrow contracts',
+        summary: 'List escrow contracts with cursor pagination, sorting and filters',
         parameters: [
-          { name: 'status', in: 'query', schema: { type: 'string' } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Page size' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
+          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] }, description: 'Comma-separated list of contract statuses' },
           { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
+          { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
+          { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
+          { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
+          { name: 'createdBefore', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 upper bound on createdAt' },
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
-        responses: ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
+        responses: {
+          200: {
+            description: 'Paginated contracts',
+            content: json({
+              type: 'object',
+              required: ['data', 'page'],
+              properties: {
+                data: { type: 'array', items: contractRef },
+                page: {
+                  type: 'object',
+                  required: ['limit', 'hasMore'],
+                  properties: {
+                    limit: { type: 'integer' },
+                    nextCursor: { type: ['string', 'null'] },
+                    hasMore: { type: 'boolean' },
+                  },
+                },
+              },
+            }),
+          },
+          400: { description: 'invalid_query or invalid_cursor' },
+        },
       },
       post: {
         tags: ['Contracts'],

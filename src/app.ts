@@ -1,8 +1,9 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError } from './store';
+import { EscrowStore, HttpError, type Cursor, type QueryFilters } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
@@ -17,6 +18,7 @@ declare global {
 
 const startedAt = Date.now();
 
+const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
 type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 
 type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
@@ -167,17 +169,13 @@ export function createApp(
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',
-    wrap((req) => {
-      let linked: boolean | undefined = undefined;
-      if (req.query.linked === 'true') linked = true;
-      else if (req.query.linked === 'false') linked = false;
-      return {
-        data: store.list({
-          status: typeof req.query.status === 'string' ? req.query.status : undefined,
-          party: typeof req.query.party === 'string' ? req.query.party : undefined,
-          linked,
-        }),
-      };
+    wrap((req, res) => {
+      const limit = parseLimit(req.query.limit);
+      const sort = parseSortParam(req.query.sort);
+      const after = parseCursorParam(req.query.cursor, sort);
+      const filters = parseFilters(req.query);
+      const result = store.query({ filters, sort, limit, after });
+      res.json({ data: result.data, page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore } });
     }),
   );
   v1.post(
@@ -237,6 +235,79 @@ export function createApp(
   });
 
   return app;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+function parseLimit(v: unknown): number {
+  if (v === undefined) return 20;
+  const n = Number(typeof v === 'string' ? v : String(v));
+  if (!Number.isInteger(n) || n < 1 || n > 100) {
+    throw new HttpError(400, 'invalid_query', 'limit must be an integer between 1 and 100');
+  }
+  return n;
+}
+
+function parseSortParam(v: unknown): string {
+  if (v === undefined) return '-createdAt';
+  const s = typeof v === 'string' ? v : String(v);
+  const field = s.startsWith('-') ? s.slice(1) : s;
+  if (!['createdAt', 'updatedAt', 'totalAmount'].includes(field)) {
+    throw new HttpError(400, 'invalid_query', 'invalid sort');
+  }
+  return s;
+}
+
+function parseCursorParam(cursor: unknown, sort: string): { sort: string; lastValue: string; lastId: number } | undefined {
+  if (cursor === undefined || cursor === null || cursor === '') return undefined;
+  const cursorStr = typeof cursor === 'string' ? cursor : String(cursor);
+  const parts = cursorStr.split('.');
+  if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  const [payload, sig] = parts;
+  let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
+  try {
+    obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch {
+    throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  }
+  const expectedSig = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  if (!constantTimeEqual(sig, expectedSig)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  if (obj.sort !== sort) throw new HttpError(400, 'invalid_cursor', 'cursor sort does not match requested sort');
+  return { sort: sort, lastValue: String(obj.lastValue ?? ''), lastId: Number(obj.lastId ?? 0) };
+}
+
+function parseFilters(q: Request['query']): QueryFilters {
+  const f: QueryFilters = {};
+  if (typeof q.status === 'string') {
+    f.status = q.status.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const status of f.status) {
+      if (!['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'].includes(status)) {
+        throw new HttpError(400, 'invalid_query', 'invalid status');
+      }
+    }
+  }
+  if (typeof q.party === 'string') f.party = q.party;
+  if (typeof q.role === 'string') {
+    if (f.party === undefined) throw new HttpError(400, 'invalid_query', 'role requires party');
+    if (q.role !== 'client' && q.role !== 'freelancer') throw new HttpError(400, 'invalid_query', 'invalid role');
+    f.role = q.role;
+  }
+  if (typeof q.token === 'string') f.token = q.token;
+  if (typeof q.createdAfter === 'string') f.createdAfter = q.createdAfter;
+  if (typeof q.createdBefore === 'string') f.createdBefore = q.createdBefore;
+  if (typeof q.linked === 'string') f.linked = q.linked === 'true';
+  return f;
+}
+
+function serializeCursor(cursor: Cursor): string {
+  const payload = Buffer.from(JSON.stringify({ sort: cursor.sort, lastValue: cursor.lastValue, lastId: cursor.lastId })).toString('base64url');
+  const sig = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
 }
 
 export default createApp;
