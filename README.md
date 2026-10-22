@@ -26,7 +26,7 @@ data is per-instance and resets on redeploy.
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | On-chain contract deployment info |
 | GET | `/api/v1/stats` | Aggregate statistics |
-| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
+| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
@@ -34,6 +34,8 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
+| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
+| GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
 | POST/GET | `/api/v1/webhook-subscriptions` | Create or list signed webhook subscriptions |
 | GET/PATCH/DELETE | `/api/v1/webhook-subscriptions/:id` | Manage a subscription without exposing its secret |
@@ -51,7 +53,7 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
-`STELLAR_RPC_URL`, `WEBHOOK_ADMIN_TOKEN`, `FRONTEND_URL`.
+`STELLAR_RPC_URL`, `CHAIN_READ_TTL_MS`, `WEBHOOK_ADMIN_TOKEN`, `FRONTEND_URL`.
 
 Webhook management is disabled when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
 requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
@@ -63,6 +65,21 @@ failures up to six attempts with exponential backoff and jitter, and retains bou
 history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
 `http://localhost` is allowed only for local development. DNS can still change after validation,
 so production deployments should use egress controls as defense in depth.
+`LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests) is also supported.
+
+Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
+`X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
+unexpected 500s are logged with a stack trace (never leaked to the client). Authorization, `x-api-key` and `Cookie` header values are redacted
+and request bodies are never logged.
+
+Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default 65000),
+`HEADERS_TIMEOUT_MS` (default 66000, must be > keep-alive), `REQUEST_TIMEOUT_MS` (default 30000).
+`SHUTDOWN_GRACE_MS` (default 10000) controls how long to wait for in-flight requests on shutdown.
+`PORT` is validated: non-integer or out-of-range (1–65535) values cause a fast fail with a clear message.
+
+On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
+returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
+the grace deadline, then force-closes remaining sockets and exits.
 
 ## Deployment
 
