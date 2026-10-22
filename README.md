@@ -39,6 +39,8 @@ with `demo: true` and are excluded from aggregate statistics by default. See
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
+| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
+| GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation (`demo` flag when entirely seeded) |
 
 Demo contracts are returned with `demo: true`; real contracts carry `demo: false`.
