@@ -66,6 +66,46 @@ export interface Reputation {
   averageRating: number;
 }
 
+export type DisputeStatusFilter = 'open' | 'resolved' | 'all';
+export type DisputeSort = 'oldest' | 'newest' | 'value';
+
+export interface DisputeView {
+  contractId: number;
+  title: string;
+  client: string;
+  freelancer: string;
+  raisedBy: string;
+  raisedByRole: 'client' | 'freelancer';
+  reason: string;
+  openedAt: string;
+  ageHours: number;
+  held: number;
+  slaDeadline: string;
+  overdue: boolean;
+  resolvedAt?: string;
+  freelancerBps?: number;
+}
+
+export interface DisputeQueue {
+  data: DisputeView[];
+  summary: { open: number; overdue: number; totalHeld: number };
+  page: { limit: number; count: number; nextCursor: string | null };
+}
+
+interface DisputeRecord {
+  view: DisputeView;
+  open: boolean;
+}
+
+interface DisputeCursor {
+  s: DisputeSort;
+  k: string | number;
+  i: number;
+}
+
+export const DEFAULT_DISPUTE_LIMIT = 20;
+export const MAX_DISPUTE_LIMIT = 100;
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -77,6 +117,36 @@ export class HttpError extends Error {
   }
 }
 
+/** Public projection of a contract: dispute reasons are only served by the admin dispute routes. */
+export function publicContract(
+  c: EscrowContract,
+): Omit<EscrowContract, 'dispute'> & { dispute?: Omit<Dispute, 'reason'> } {
+  if (!c.dispute) return c;
+  const { reason: _reason, ...disputeRest } = c.dispute;
+  return { ...c, dispute: disputeRest };
+}
+
+const encodeCursor = (c: DisputeCursor): string => Buffer.from(JSON.stringify(c)).toString('base64url');
+
+const decodeCursor = (raw: string): DisputeCursor => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch {
+    throw new HttpError(400, 'invalid_cursor', 'cursor is not a valid queue cursor');
+  }
+  const c = parsed as { s?: unknown; k?: unknown; i?: unknown };
+  if (
+    (c?.s !== 'oldest' && c?.s !== 'newest' && c?.s !== 'value') ||
+    (typeof c?.k !== 'string' && typeof c?.k !== 'number') ||
+    !Number.isInteger(c?.i) ||
+    (c.i as number) < 1
+  ) {
+    throw new HttpError(400, 'invalid_cursor', 'cursor is not a valid queue cursor');
+  }
+  return { s: c.s, k: c.k, i: c.i as number };
+};
+
 const MAX_MILESTONES = 20;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
@@ -84,6 +154,16 @@ export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
   private nextId = 1;
+  private readonly clock: () => Date;
+
+  constructor(clock?: () => Date) {
+    this.clock = clock ?? (() => new Date());
+  }
+
+  /** Current time according to the injected clock (or system clock). */
+  now(): Date {
+    return this.clock();
+  }
 
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
     return [...this.contracts.values()].filter(
@@ -175,7 +255,7 @@ export class EscrowStore {
   }
 
   private touch(c: EscrowContract) {
-    c.updatedAt = new Date().toISOString();
+    c.updatedAt = this.now().toISOString();
     return c;
   }
 
@@ -257,7 +337,7 @@ export class EscrowStore {
     c.dispute = {
       raisedBy,
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
-      openedAt: new Date().toISOString(),
+      openedAt: this.now().toISOString(),
     };
     return this.touch(c);
   }
@@ -271,13 +351,12 @@ export class EscrowStore {
     if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
       throw new HttpError(400, 'invalid_split', 'freelancerBps must be an integer between 0 and 10000');
     }
-    const remaining = Number(c.fundedAmount) - Number(c.releasedAmount);
-    const toFreelancer = Math.round((remaining * bps) / 10000);
-    c.releasedAmount = Number(c.releasedAmount) + toFreelancer;
+    // Full remaining amount is released upon resolution (split between parties per bps)
+    c.releasedAmount = c.fundedAmount;
     c.status = 'Resolved';
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
-      c.dispute.resolvedAt = new Date().toISOString();
+      c.dispute.resolvedAt = this.now().toISOString();
     }
     return this.touch(c);
   }
@@ -534,6 +613,113 @@ export class EscrowStore {
       totalRating: r.total,
       averageRating: r.completed ? Math.round((r.total / r.completed) * 100) / 100 : 0,
     };
+  }
+
+  private toDisputeView(c: EscrowContract, now: Date, slaHours: number): DisputeView {
+    const dispute = c.dispute;
+    if (!dispute) throw new HttpError(404, 'dispute_not_found', `No dispute for contract ${c.id}`);
+    const openedMs = Date.parse(dispute.openedAt);
+    const ageHours = Math.max(0, Math.round(((now.getTime() - openedMs) / 3_600_000) * 100) / 100);
+    const held = this.toNumber(c.fundedAmount) - this.toNumber(c.releasedAmount);
+    const view: DisputeView = {
+      contractId: c.id,
+      title: c.title,
+      client: c.client,
+      freelancer: c.freelancer,
+      raisedBy: dispute.raisedBy,
+      raisedByRole: dispute.raisedBy === c.client ? 'client' : 'freelancer',
+      reason: dispute.reason,
+      openedAt: dispute.openedAt,
+      ageHours,
+      held,
+      slaDeadline: new Date(openedMs + slaHours * 3_600_000).toISOString(),
+      overdue: c.status === 'Disputed' && now.getTime() > openedMs + slaHours * 3_600_000,
+    };
+    if (dispute.resolvedAt !== undefined) view.resolvedAt = dispute.resolvedAt;
+    if (dispute.freelancerBps !== undefined) view.freelancerBps = dispute.freelancerBps;
+    return view;
+  }
+
+  /** Convert a stored amount (number or bigint string) to a JavaScript number. */
+  private toNumber(amount: number | string): number {
+    return typeof amount === 'string' ? Number(amount) : amount;
+  }
+
+  private compareDisputes(sort: DisputeSort, a: DisputeRecord, b: DisputeRecord): number {
+    if (sort === 'value') {
+      return b.view.held - a.view.held || a.view.contractId - b.view.contractId;
+    }
+    const byOpened =
+      a.view.openedAt < b.view.openedAt ? -1 : a.view.openedAt > b.view.openedAt ? 1 : 0;
+    if (byOpened !== 0) return sort === 'newest' ? -byOpened : byOpened;
+    return sort === 'newest' ? b.view.contractId - a.view.contractId : a.view.contractId - b.view.contractId;
+  }
+
+  listDisputes(opts: {
+    status: DisputeStatusFilter;
+    sort: DisputeSort;
+    overdueOnly: boolean;
+    limit: number;
+    cursor?: string;
+    now: Date;
+    slaHours: number;
+  }): DisputeQueue {
+    const { status, sort, overdueOnly, limit, cursor, now, slaHours } = opts;
+    const records: DisputeRecord[] = [];
+    let open = 0;
+    let overdue = 0;
+    let totalHeld = 0;
+    for (const c of this.contracts.values()) {
+      if (!c.dispute) continue;
+      const record: DisputeRecord = { view: this.toDisputeView(c, now, slaHours), open: c.status === 'Disputed' };
+      records.push(record);
+      if (record.open) {
+        open += 1;
+        totalHeld += record.view.held;
+        if (record.view.overdue) overdue += 1;
+      }
+    }
+    records.sort((a, b) => this.compareDisputes(sort, a, b));
+    const filtered = records.filter(
+      (r) =>
+        (status === 'all' || (status === 'open' ? r.open : !r.open)) && (!overdueOnly || r.view.overdue),
+    );
+    let from = 0;
+    if (cursor !== undefined) {
+      const cur = decodeCursor(cursor);
+      if (cur.s !== sort) {
+        throw new HttpError(400, 'invalid_cursor', 'cursor does not match the requested sort');
+      }
+      const cursorRecord: DisputeRecord = {
+        open: true,
+        view: {
+          contractId: cur.i,
+          openedAt: typeof cur.k === 'string' ? cur.k : new Date(0).toISOString(),
+          held: typeof cur.k === 'number' ? cur.k : 0,
+        } as DisputeView,
+      };
+      const idx = filtered.findIndex((r) => this.compareDisputes(sort, r, cursorRecord) > 0);
+      from = idx === -1 ? filtered.length : idx;
+    }
+    const data = filtered.slice(from, from + limit).map((r) => r.view);
+    const last = data[data.length - 1];
+    const nextCursor =
+      last && from + limit < filtered.length
+        ? encodeCursor({
+            s: sort,
+            k: sort === 'value' ? last.held : last.openedAt,
+            i: last.contractId,
+          })
+        : null;
+    return { data, summary: { open, overdue, totalHeld }, page: { limit, count: data.length, nextCursor } };
+  }
+
+  getDispute(contractId: number, now: Date, slaHours: number): DisputeView {
+    const c = this.contracts.get(contractId);
+    if (!c || !c.dispute) {
+      throw new HttpError(404, 'dispute_not_found', `No dispute for contract ${contractId}`);
+    }
+    return this.toDisputeView(c, now, slaHours);
   }
 
   stats() {

@@ -10,6 +10,12 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const disputeViewRef = { $ref: '#/components/schemas/DisputeView' };
+const errorSchema = { $ref: '#/components/schemas/Error' };
+const err = (status: number, description: string) => ({
+  [status]: { description, content: json(errorSchema) },
+});
+const adminSecurity = [{ bearerAuth: [] }];
 
 export const openapi = {
   openapi: '3.0.3',
@@ -22,7 +28,12 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [
+    { name: 'System' },
+    { name: 'Contracts' },
+    { name: 'Reputation' },
+    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+  ],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -176,8 +187,75 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/v1/disputes': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'List the admin dispute queue',
+        security: adminSecurity,
+        description:
+          'Returns paginated dispute views plus queue-wide summary totals. The summary always ' +
+          'covers ALL disputes in the store (open = contracts currently in Disputed status, ' +
+          'overdue = open disputes past their SLA deadline, totalHeld = sum of held ' +
+          '(fundedAmount - releasedAmount) across open disputes), regardless of the query filters.',
+        parameters: [
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string', enum: ['open', 'resolved', 'all'], default: 'all' },
+            description: 'Filter by dispute state',
+          },
+          {
+            name: 'sort',
+            in: 'query',
+            schema: { type: 'string', enum: ['oldest', 'newest', 'value'], default: 'oldest' },
+            description:
+              'oldest/newest: by openedAt (ties broken by contractId); value: by held amount descending (ties broken by contractId)',
+          },
+          {
+            name: 'overdue',
+            in: 'query',
+            schema: { type: 'boolean' },
+            description: 'When true, only open disputes strictly past their SLA deadline are returned',
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            name: 'cursor',
+            in: 'query',
+            schema: { type: 'string' },
+            description: 'Opaque cursor from page.nextCursor of a previous request with the same sort',
+          },
+        ],
+        responses: {
+          ...ok('Dispute queue page', { $ref: '#/components/schemas/DisputeQueue' }),
+          ...err(400, 'Invalid status, sort, overdue, limit, or cursor'),
+          ...err(401, 'Missing or invalid admin bearer token'),
+          ...err(404, 'ADMIN_READ_TOKEN is not configured'),
+        },
+      },
+    },
+    '/api/v1/disputes/{contractId}': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'Get the dispute view for a contract',
+        security: adminSecurity,
+        parameters: [{ name: 'contractId', in: 'path', required: true, schema: { type: 'integer' } }],
+        responses: {
+          ...ok('Dispute view', disputeViewRef),
+          ...err(400, 'contractId must be a positive integer'),
+          ...err(401, 'Missing or invalid admin bearer token'),
+          ...err(404, 'Contract has never had a dispute, or ADMIN_READ_TOKEN is not configured'),
+        },
+      },
+    },
   },
   components: {
+    securitySchemes: {
+      bearerAuth: { type: 'http', scheme: 'bearer', description: 'Static ADMIN_READ_TOKEN value' },
+    },
     schemas: {
       DriftItem: {
         type: 'object',
@@ -250,6 +328,65 @@ export const openapi = {
           chain: { $ref: '#/components/schemas/ChainInfo' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      DisputeView: {
+        type: 'object',
+        required: [
+          'contractId',
+          'title',
+          'client',
+          'freelancer',
+          'raisedBy',
+          'raisedByRole',
+          'reason',
+          'openedAt',
+          'ageHours',
+          'held',
+          'slaDeadline',
+          'overdue',
+        ],
+        properties: {
+          contractId: { type: 'integer' },
+          title: { type: 'string' },
+          client: { type: 'string' },
+          freelancer: { type: 'string' },
+          raisedBy: { type: 'string', description: 'Address that opened the dispute' },
+          raisedByRole: { type: 'string', enum: ['client', 'freelancer'] },
+          reason: { type: 'string', description: 'Dispute reason; only exposed on these admin routes' },
+          openedAt: { type: 'string', format: 'date-time' },
+          ageHours: { type: 'number', description: 'Hours since openedAt at the time of the request' },
+          held: { type: 'number', description: 'fundedAmount - releasedAmount currently held in escrow' },
+          slaDeadline: { type: 'string', format: 'date-time', description: 'openedAt + DISPUTE_SLA_HOURS' },
+          overdue: {
+            type: 'boolean',
+            description: 'True only while open and strictly past slaDeadline',
+          },
+          resolvedAt: { type: 'string', format: 'date-time' },
+          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
+        },
+      },
+      DisputeQueue: {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: disputeViewRef },
+          summary: {
+            type: 'object',
+            description: 'Queue-wide totals across ALL disputes, ignoring query filters',
+            properties: {
+              open: { type: 'integer' },
+              overdue: { type: 'integer' },
+              totalHeld: { type: 'number' },
+            },
+          },
+          page: {
+            type: 'object',
+            properties: {
+              limit: { type: 'integer' },
+              count: { type: 'integer' },
+              nextCursor: { type: 'string', nullable: true },
+            },
+          },
         },
       },
     },

@@ -50,7 +50,7 @@ describe('TalentTrust API', () => {
     await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GX' }).expect(403);
     await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GD', reason: 'late' }).expect(200);
     const r = await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: 5000 }).expect(200);
-    expect(r.body.releasedAmount).toBe(100);
+    expect(r.body.releasedAmount).toBe(200);
     expect(r.body.status).toBe('Resolved');
   });
 });

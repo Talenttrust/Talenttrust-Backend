@@ -37,6 +37,15 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+| GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
+| GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
+
+The dispute queue returns `{ data, summary, page }`. `summary` (`open`, `overdue`, `totalHeld`) always
+covers **all** disputes in the store, regardless of the query filters; `page.nextCursor` is an opaque
+cursor for stable pagination (`limit` 1–100, default 20). Each `DisputeView` includes `ageHours`,
+`held` (= `fundedAmount - releasedAmount`), `slaDeadline` (`openedAt + DISPUTE_SLA_HOURS`, default 72h)
+and `overdue` (true only while open and strictly past the deadline), plus `resolvedAt`/`freelancerBps`
+once resolved. Dispute reasons are served only by these two authenticated routes.
 
 ## Development
 
