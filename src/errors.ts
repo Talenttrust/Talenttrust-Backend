@@ -26,6 +26,13 @@ export const ERRORS = {
   not_found: { status: 404, title: 'Not found', detail: 'No route found' },
   invalid_json: { status: 400, title: 'Invalid JSON', detail: 'Malformed JSON body' },
   internal_error: { status: 500, title: 'Internal error', detail: 'Unexpected error' },
+  invalid_escrow_id: { status: 400, title: 'Invalid escrow ID', detail: 'escrowId must be a non-empty string' },
+  already_linked: { status: 409, title: 'Already linked', detail: 'Contract is already linked to on-chain escrow' },
+  chain_escrow_taken: { status: 409, title: 'Chain escrow taken', detail: 'On-chain escrow is already linked to another contract' },
+  chain_unavailable: { status: 503, title: 'Chain unavailable', detail: 'Chain RPC service unavailable' },
+  chain_contract_not_found: { status: 404, title: 'Chain contract not found', detail: 'On-chain escrow not found' },
+  chain_mismatch: { status: 409, title: 'Chain mismatch', detail: 'API contract does not match on-chain escrow parameters' },
+  not_linked: { status: 409, title: 'Not linked', detail: 'Contract is not linked to any on-chain escrow' },
 } as const;
 
 export type ErrorKey = keyof typeof ERRORS;
@@ -67,7 +74,7 @@ export class HttpError extends Error {
       body.contractError = this.contractError;
     }
     if (this.details) {
-      body.details = this.details;
+      Object.assign(body, this.details);
     }
     return body;
   }

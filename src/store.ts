@@ -60,6 +60,7 @@ export interface EscrowContract {
 }
 
 import { HttpError, type ErrorKey } from './errors';
+export { HttpError, type ErrorKey };
 
 export interface Reputation {
   address: string;
