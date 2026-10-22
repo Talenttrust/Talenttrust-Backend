@@ -59,22 +59,14 @@ export interface EscrowContract {
   updatedAt: string;
 }
 
+import { HttpError, type ErrorKey } from './errors';
+export { HttpError, type ErrorKey };
+
 export interface Reputation {
   address: string;
   completedContracts: number;
   totalRating: number;
   averageRating: number;
-}
-
-export class HttpError extends Error {
-  constructor(
-    public status: number,
-    public code: string,
-    message: string,
-    public details?: Record<string, unknown>,
-  ) {
-    super(message);
-  }
 }
 
 const MAX_MILESTONES = 20;
@@ -96,7 +88,7 @@ export class EscrowStore {
 
   get(id: number): EscrowContract {
     const c = this.contracts.get(id);
-    if (!c) throw new HttpError(404, 'contract_not_found', `Contract ${id} not found`);
+    if (!c) throw new HttpError('contract_not_found', `Contract ${id} not found`);
     return c;
   }
 
@@ -109,16 +101,16 @@ export class EscrowStore {
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
-      throw new HttpError(400, 'invalid_parties', 'client and freelancer are required strings');
+      throw new HttpError('invalid_parties');
     }
     if (client === freelancer) {
-      throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
+      throw new HttpError('invalid_parties', 'client and freelancer must differ');
     }
     if (!Array.isArray(input.milestones) || input.milestones.length === 0) {
-      throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+      throw new HttpError('invalid_milestones');
     }
     if (input.milestones.length > MAX_MILESTONES) {
-      throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
+      throw new HttpError('invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
     }
     const milestones: Milestone[] = input.milestones.map((m: unknown, index: number) => {
       const raw = (typeof m === 'number' || typeof m === 'string' ? { amount: m } : m) as {
@@ -131,7 +123,7 @@ export class EscrowStore {
       } else {
         const num = Number(raw?.amount);
         if (!Number.isFinite(num) || num <= 0) {
-          throw new HttpError(400, 'invalid_amount', `milestone ${index} amount must be positive`);
+          throw new HttpError('invalid_amount', `milestone ${index} amount must be positive`);
         }
         amount = num;
       }
@@ -170,7 +162,7 @@ export class EscrowStore {
 
   private requireActive(c: EscrowContract) {
     if (!ACTIVE.includes(c.status)) {
-      throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
+      throw new HttpError('contract_not_active', `Contract is ${c.status}`);
     }
   }
 
@@ -191,15 +183,15 @@ export class EscrowStore {
       try {
         amount = BigInt(String(amountRaw));
       } catch {
-        throw new HttpError(400, 'invalid_amount', 'amount must be positive');
+        throw new HttpError('invalid_amount', 'amount must be positive');
       }
       if (amount <= 0n) {
-        throw new HttpError(400, 'invalid_amount', 'amount must be positive');
+        throw new HttpError('invalid_amount', 'amount must be positive');
       }
       const curFunded = BigInt(String(c.fundedAmount));
       const total = BigInt(String(c.totalAmount));
       if (curFunded + amount > total) {
-        throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
+        throw new HttpError('over_funded');
       }
       c.fundedAmount = (curFunded + amount).toString();
       if (BigInt(c.fundedAmount) === total) c.status = 'Funded';
@@ -208,10 +200,10 @@ export class EscrowStore {
 
     const amount = Number(amountRaw);
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new HttpError(400, 'invalid_amount', 'amount must be positive');
+      throw new HttpError('invalid_amount');
     }
     if (Number(c.fundedAmount) + amount > Number(c.totalAmount)) {
-      throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
+      throw new HttpError('over_funded');
     }
     c.fundedAmount = Number(c.fundedAmount) + amount;
     if (c.fundedAmount === c.totalAmount) c.status = 'Funded';
@@ -222,15 +214,15 @@ export class EscrowStore {
     const c = this.get(id);
     this.requireActive(c);
     const m = c.milestones[index];
-    if (!m) throw new HttpError(404, 'milestone_not_found', `Milestone ${index} not found`);
-    if (m.released) throw new HttpError(409, 'already_released', 'Milestone already released');
+    if (!m) throw new HttpError('milestone_not_found', `Milestone ${index} not found`);
+    if (m.released) throw new HttpError('already_released');
 
     const isBig = typeof c.totalAmount === 'string' || typeof m.amount === 'string';
     if (isBig) {
       const balance = BigInt(String(c.fundedAmount)) - BigInt(String(c.releasedAmount));
       const needed = BigInt(String(m.amount));
       if (balance < needed) {
-        throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
+        throw new HttpError('insufficient_funds');
       }
       m.released = true;
       c.releasedAmount = (BigInt(String(c.releasedAmount)) + needed).toString();
@@ -239,7 +231,7 @@ export class EscrowStore {
     }
 
     if (Number(c.fundedAmount) - Number(c.releasedAmount) < Number(m.amount)) {
-      throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
+      throw new HttpError('insufficient_funds');
     }
     m.released = true;
     c.releasedAmount = Number(c.releasedAmount) + Number(m.amount);
@@ -250,7 +242,7 @@ export class EscrowStore {
   openDispute(id: number, raisedBy: unknown, reason: unknown): EscrowContract {
     const c = this.get(id);
     if (raisedBy !== c.client && raisedBy !== c.freelancer) {
-      throw new HttpError(403, 'unauthorized', 'Only the client or freelancer can open a dispute');
+      throw new HttpError('forbidden');
     }
     this.requireActive(c);
     c.status = 'Disputed';
@@ -264,12 +256,12 @@ export class EscrowStore {
 
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
     const c = this.get(id);
-    if (c.status !== 'Disputed') {
-      throw new HttpError(409, 'invalid_status', 'Only disputed contracts can be resolved');
+    if (c.status !== 'Disputed' || !c.dispute) {
+      throw new HttpError('contract_not_disputed');
     }
     const bps = Number(freelancerBpsRaw);
-    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
-      throw new HttpError(400, 'invalid_split', 'freelancerBps must be an integer between 0 and 10000');
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) {
+      throw new HttpError('invalid_split');
     }
     const remaining = Number(c.fundedAmount) - Number(c.releasedAmount);
     const toFreelancer = Math.round((remaining * bps) / 10000);
@@ -292,14 +284,14 @@ export class EscrowStore {
   rate(id: number, ratingRaw: unknown): Reputation {
     const c = this.get(id);
     if (c.status !== 'Completed') {
-      throw new HttpError(409, 'invalid_status', 'Only completed contracts can issue reputation');
+      throw new HttpError('contract_not_completed');
     }
     if (c.reputationIssued) {
-      throw new HttpError(409, 'reputation_already_issued', 'Reputation already issued for this contract');
+      throw new HttpError('already_rated');
     }
     const rating = Number(ratingRaw);
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-      throw new HttpError(400, 'invalid_rating', 'rating must be an integer from 1 to 5');
+      throw new HttpError('invalid_rating');
     }
     const r = this.reputation.get(c.freelancer) ?? { completed: 0, total: 0 };
     r.completed += 1;
@@ -317,12 +309,11 @@ export class EscrowStore {
   ): Promise<EscrowContract> {
     const c = this.get(id);
     if (typeof escrowIdRaw !== 'string' || !escrowIdRaw.trim()) {
-      throw new HttpError(400, 'invalid_escrow_id', 'escrowId must be a non-empty string');
+      throw new HttpError('invalid_escrow_id', 'escrowId must be a non-empty string');
     }
     const escrowId = escrowIdRaw.trim();
     if (c.chain) {
       throw new HttpError(
-        409,
         'already_linked',
         `Contract ${id} is already linked to on-chain escrow ${c.chain.escrowId}`,
       );
@@ -332,7 +323,6 @@ export class EscrowStore {
     for (const other of this.contracts.values()) {
       if (other.id !== id && other.chain?.escrowId === escrowId) {
         throw new HttpError(
-          409,
           'chain_escrow_taken',
           `On-chain escrow ${escrowId} is already linked to contract ${other.id}`,
         );
@@ -344,12 +334,11 @@ export class EscrowStore {
       result = await chainReader.getContract(escrowId);
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError(503, 'chain_unavailable', 'Chain RPC service unavailable');
+      throw new HttpError('chain_unavailable', 'Chain RPC service unavailable');
     }
 
     if (!result || !result.contract) {
       throw new HttpError(
-        404,
         'chain_contract_not_found',
         `On-chain escrow ${escrowId} not found`,
       );
@@ -402,7 +391,6 @@ export class EscrowStore {
 
     if (mismatches.length > 0) {
       throw new HttpError(
-        409,
         'chain_mismatch',
         'API contract does not match on-chain escrow parameters',
         {
@@ -433,7 +421,7 @@ export class EscrowStore {
   }> {
     const c = this.get(id);
     if (!c.chain) {
-      throw new HttpError(409, 'not_linked', `Contract ${id} is not linked to any on-chain escrow`);
+      throw new HttpError('not_linked', `Contract ${id} is not linked to any on-chain escrow`);
     }
 
     let result: import('./chain').ChainReaderResult | null;
@@ -441,12 +429,11 @@ export class EscrowStore {
       result = await chainReader.getContract(c.chain.escrowId);
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError(503, 'chain_unavailable', 'Chain RPC service unavailable');
+      throw new HttpError('chain_unavailable', 'Chain RPC service unavailable');
     }
 
     if (!result || !result.contract) {
       throw new HttpError(
-        404,
         'chain_contract_not_found',
         `On-chain escrow ${c.chain.escrowId} not found`,
       );

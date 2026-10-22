@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
+import { ERRORS, type ErrorEntry } from './errors';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
@@ -31,7 +32,7 @@ const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunc
 
 const id = (req: Request) => {
   const n = Number(req.params.id);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
+  if (!Number.isInteger(n) || n < 1) throw new HttpError('invalid_id');
   return n;
 };
 
@@ -117,6 +118,8 @@ export function createApp(
         'GET  /health',
         'GET  /docs',
         'GET  /openapi.json',
+        'GET  /api/v1/errors',
+        'GET  /errors/:code',
         'GET  /api/v1/chain',
         'GET  /api/v1/stats',
         'GET  /api/v1/contracts',
@@ -150,6 +153,35 @@ export function createApp(
   });
 
   app.get('/openapi.json', wrap(() => openapi));
+
+  app.get('/api/v1/errors', (_req, res) => {
+    const catalog: Record<string, { status: number; title: string; detail?: string; contractError?: { name: string; code: number } }> = {};
+    for (const [key, entry] of Object.entries(ERRORS)) {
+      catalog[key] = {
+        status: entry.status,
+        title: entry.title,
+        detail: entry.detail,
+        ...('contractError' in entry ? { contractError: entry.contractError } : {}),
+      };
+    }
+    res.type('application/json').json(catalog);
+  });
+
+  app.get('/errors/:code', (req, res) => {
+    const { code } = req.params;
+    const entry = (ERRORS as Record<string, ErrorEntry>)[code];
+    if (!entry) {
+      res.status(404).type('application/json').json({ error: 'error_code_not_found', message: `Unknown error code: ${code}` });
+      return;
+    }
+    const acceptsHtml = (req.accepts(['html', 'json']) ?? 'json') === 'html';
+    if (acceptsHtml) {
+      res.type('html').send(`<!doctype html><html><body><h1>${entry.title}</h1><p>${entry.detail}</p><p>Status: ${entry.status}</p><p>Code: ${code}</p></body></html>`);
+      return;
+    }
+    res.type('application/json').json({ code, ...entry, type: `https://talenttrust-backend.vercel.app/errors/${code}` });
+  });
+
   app.get(['/docs', '/docs/'], (_req, res) => {
     res.type('html').send(docsHtml);
   });
@@ -210,19 +242,26 @@ export function createApp(
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
   app.use('/api/v1', v1);
 
-  app.use((req, res) => {
-    res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });
+  app.use((_req: Request, res: Response) => {
+    throw new HttpError('not_found', `No route for ${_req.method} ${_req.path}`);
   });
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = req.id;
+    const sendProblem = (error: HttpError, message?: string) => {
+      const body = error.toProblemBody(message);
+      if (requestId) {
+        body.requestId = requestId;
+      }
+      res.status(error.status).type('application/problem+json').json(body);
+    };
     if (err instanceof HttpError) {
-      res.status(err.status).json({ error: err.code, message: err.message, ...err.details, requestId });
+      sendProblem(err);
       return;
     }
     if (err && typeof err === 'object' && (err as { type?: string }).type === 'entity.parse.failed') {
-      res.status(400).json({ error: 'invalid_json', message: 'Malformed JSON body', requestId });
+      sendProblem(new HttpError('invalid_json'));
       return;
     }
     logger.error('unhandled_error', {
@@ -233,7 +272,7 @@ export function createApp(
         stack: (err as Error)?.stack,
       },
     });
-    res.status(500).json({ error: 'internal_error', message: 'Unexpected error', requestId });
+    sendProblem(new HttpError('internal_error'));
   });
 
   return app;
