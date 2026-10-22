@@ -99,6 +99,9 @@ describe('on-chain read-through routes', () => {
     }
     const limited = await request(app).get('/api/v1/chain/contracts/61').expect(429);
     expect(limited.headers['retry-after']).toBe('60');
-    expect(limited.body).toEqual({ error: 'chain_rate_limited', message: 'Too many chain read requests' });
+    expect(limited.body).toEqual(
+      expect.objectContaining({ error: 'chain_rate_limited', message: 'Too many chain read requests' }),
+    );
+    expect(limited.body.requestId).toEqual(expect.any(String));
   });
 });

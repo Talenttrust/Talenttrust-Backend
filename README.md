@@ -28,7 +28,7 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/chain/contracts/:chainId` | Read an escrow contract directly from Soroban |
 | GET | `/api/v1/chain/reputation/:address` | Read a freelancer's reputation directly from Soroban |
 | GET | `/api/v1/stats` | Aggregate statistics |
-| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
+| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
@@ -36,6 +36,8 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
+| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
+| GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
 
 ## Development
@@ -69,6 +71,21 @@ Example chain response:
   "status": "Created", "reputationIssued": false, "source": "chain", "latestLedger": 123
 }
 ```
+`LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests) is also supported.
+
+Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
+`X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
+unexpected 500s are logged with a stack trace (never leaked to the client). Authorization, `x-api-key` and `Cookie` header values are redacted
+and request bodies are never logged.
+
+Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default 65000),
+`HEADERS_TIMEOUT_MS` (default 66000, must be > keep-alive), `REQUEST_TIMEOUT_MS` (default 30000).
+`SHUTDOWN_GRACE_MS` (default 10000) controls how long to wait for in-flight requests on shutdown.
+`PORT` is validated: non-integer or out-of-range (1–65535) values cause a fast fail with a clear message.
+
+On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
+returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
+the grace deadline, then force-closes remaining sockets and exits.
 
 ## Deployment
 
