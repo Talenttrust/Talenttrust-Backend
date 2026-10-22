@@ -25,6 +25,8 @@ data is per-instance and resets on redeploy.
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | On-chain contract deployment info |
+| GET | `/api/v1/chain/contracts/:chainId` | Read an escrow contract directly from Soroban |
+| GET | `/api/v1/chain/reputation/:address` | Read a freelancer's reputation directly from Soroban |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
@@ -48,8 +50,28 @@ npm test
 npm run build && npm start
 ```
 
-Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
+`STELLAR_RPC_URL`, `CHAIN_READ_TTL_MS`, `FRONTEND_URL`. Chain reads are cached for 5 seconds by
+default and identical concurrent reads share one Soroban simulation. Chain read endpoints are also
+limited to 60 requests per minute per client. Amounts from the chain are returned as decimal
+strings so large `i128` values remain exact.
+
+The chain contract endpoint returns the escrow fields (`id`, parties, token, milestones, totals,
+status, and `reputationIssued`) together with `source: "chain"` and `latestLedger`. The reputation
+endpoint returns the completed-contract count, total rating, and the same two-decimal average used
+by the existing off-chain `/api/v1/reputation/:address` resource.
+
+Example chain response:
+
+```json
+{
+  "id": "1", "client": "G...", "freelancer": "G...", "token": "C...",
+  "milestones": [{ "index": 0, "amount": "1000000", "released": false }],
+  "totalAmount": "1000000", "fundedAmount": "0", "releasedAmount": "0",
+  "status": "Created", "reputationIssued": false, "source": "chain", "latestLedger": 123
+}
+```
+`LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests) is also supported.
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
