@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 
@@ -22,8 +23,10 @@ type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
 const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const out = await fn(req, res);
-    if (out !== undefined && !res.headersSent) res.json(out);
+    const out = fn(req, res);
+    Promise.resolve(out).then((value) => {
+      if (value !== undefined && !res.headersSent) res.json(value);
+    }, next);
   } catch (err) {
     next(err);
   }
@@ -66,6 +69,7 @@ export function createApp(
   const chainReader = fallbackChainReader ?? resolved.chainReader;
 
   const app = express();
+  const webhooks = new WebhookManager(store.events);
   app.disable('x-powered-by');
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
@@ -208,6 +212,46 @@ export function createApp(
     wrap(async (req) => store.checkParity(id(req), chainReader)),
   );
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+
+  const webhookAuth = (req: Request) => {
+    const configured = process.env.WEBHOOK_ADMIN_TOKEN;
+    if (!configured) throw new HttpError(404, 'not_found', 'Not found');
+    if (!isWebhookAdminTokenValid(configured, req.header('authorization'))) {
+      throw new HttpError(401, 'unauthorized', 'Webhook administration authentication is required');
+    }
+  };
+  const webhookRouter = express.Router();
+  webhookRouter.post('/', wrap(async (req, res) => {
+    webhookAuth(req);
+    const created = await webhooks.create(req.body ?? {});
+    res.status(201).json({ ...created.subscription, secret: created.secret });
+  }));
+  webhookRouter.get('/', wrap((req) => {
+    webhookAuth(req);
+    return { data: webhooks.list() };
+  }));
+  webhookRouter.get('/:id', wrap((req) => {
+    webhookAuth(req);
+    return webhooks.get(req.params.id);
+  }));
+  webhookRouter.patch('/:id', wrap(async (req) => {
+    webhookAuth(req);
+    return webhooks.update(req.params.id, req.body ?? {});
+  }));
+  webhookRouter.delete('/:id', wrap((req) => {
+    webhookAuth(req);
+    return webhooks.remove(req.params.id);
+  }));
+  webhookRouter.post('/:id/rotate-secret', wrap((req) => {
+    webhookAuth(req);
+    const rotated = webhooks.rotateSecret(req.params.id);
+    return { ...rotated.subscription, secret: rotated.secret };
+  }));
+  webhookRouter.get('/:id/deliveries', wrap((req) => {
+    webhookAuth(req);
+    return { data: webhooks.history(req.params.id) };
+  }));
+  v1.use('/webhook-subscriptions', webhookRouter);
   app.use('/api/v1', v1);
 
   app.use((req, res) => {

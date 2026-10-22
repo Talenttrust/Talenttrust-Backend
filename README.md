@@ -37,6 +37,10 @@ data is per-instance and resets on redeploy.
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
+| POST/GET | `/api/v1/webhook-subscriptions` | Create or list signed webhook subscriptions |
+| GET/PATCH/DELETE | `/api/v1/webhook-subscriptions/:id` | Manage a subscription without exposing its secret |
+| POST | `/api/v1/webhook-subscriptions/:id/rotate-secret` | Rotate a subscription secret |
+| GET | `/api/v1/webhook-subscriptions/:id/deliveries` | Bounded delivery history |
 
 ## Development
 
@@ -48,8 +52,20 @@ npm test
 npm run build && npm start
 ```
 
-Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
+`STELLAR_RPC_URL`, `CHAIN_READ_TTL_MS`, `WEBHOOK_ADMIN_TOKEN`, `FRONTEND_URL`.
+
+Webhook management is disabled when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
+requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
+"https://example.com/events", "events": ["milestone.released"] }`; the generated `whsec_`
+secret is returned only in that creation response and again when explicitly rotated. Delivery
+payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
+`X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
+failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
+history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
+`http://localhost` is allowed only for local development. DNS can still change after validation,
+so production deployments should use egress controls as defense in depth.
+`LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests) is also supported.
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and

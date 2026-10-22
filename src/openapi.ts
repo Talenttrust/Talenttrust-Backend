@@ -22,7 +22,7 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Webhooks' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -176,9 +176,32 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/v1/webhook-subscriptions': {
+      post: {
+        tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
+        security: [{ webhookAdmin: [] }],
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once' }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+      },
+      get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}': {
+      get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
+      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
+      post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}/deliveries': {
+      get: { tags: ['Webhooks'], summary: 'List bounded webhook delivery history', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Delivery history' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+    },
   },
   components: {
+    securitySchemes: { webhookAdmin: { type: 'http', scheme: 'bearer' } },
     schemas: {
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       DriftItem: {
         type: 'object',
         properties: {
