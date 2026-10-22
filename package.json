@@ -5,9 +5,9 @@
   "main": "dist/src/index.js",
   "private": true,
   "scripts": {
-    "build": "node api.js && tsc -p tsconfig.json",
-    "start": "node api.js && node dist/src/index.js",
-    "dev": "node api.js && ts-node src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "dev": "ts-node src/index.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "jest"
   },
