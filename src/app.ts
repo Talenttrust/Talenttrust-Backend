@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
@@ -33,6 +34,18 @@ const id = (req: Request) => {
   const n = Number(req.params.id);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
   return n;
+};
+
+const requireCronSecret = (req: Request) => {
+  const expected = process.env.CRON_SECRET;
+  if (!expected) throw new HttpError(404, 'not_found', 'Cron endpoint is not configured');
+  const supplied = req.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!supplied) throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
+  const expectedBytes = createHash('sha256').update(expected).digest();
+  const suppliedBytes = createHash('sha256').update(supplied).digest();
+  if (!timingSafeEqual(expectedBytes, suppliedBytes)) {
+    throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
+  }
 };
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
@@ -123,6 +136,7 @@ export function createApp(
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
         'POST /api/v1/contracts/:id/deposit',
+        'POST /api/v1/contracts/:id/extend-deadline',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
         'POST /api/v1/contracts/:id/resolve',
@@ -131,6 +145,7 @@ export function createApp(
         'POST /api/v1/contracts/:id/link',
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
+        'GET/POST /api/cron/expire-contracts',
       ],
     })),
   );
@@ -186,6 +201,10 @@ export function createApp(
       res.status(201).json(store.create(req.body ?? {}));
     }),
   );
+  v1.post(
+    '/contracts/:id/extend-deadline',
+    wrap((req) => store.extendDeadline(id(req), req.body?.client, req.body?.fundingDeadline)),
+  );
   v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
   v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
   v1.post(
@@ -209,6 +228,14 @@ export function createApp(
   );
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
   app.use('/api/v1', v1);
+
+  const expireContracts = wrap((req) => {
+    requireCronSecret(req);
+    const checkedAt = store.currentTime();
+    return { expired: store.sweepExpired(), checkedAt };
+  });
+  app.get('/api/cron/expire-contracts', expireContracts);
+  app.post('/api/cron/expire-contracts', expireContracts);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });

@@ -22,7 +22,7 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Cron' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
@@ -53,6 +53,11 @@ export const openapi = {
               client: { type: 'string' },
               freelancer: { type: 'string' },
               token: { type: 'string', default: 'XLM' },
+              fundingDeadline: {
+                type: 'string',
+                format: 'date-time',
+                description: 'ISO-8601 deadline, from 1 hour through 90 days after creation',
+              },
               milestones: {
                 type: 'array',
                 items: { type: 'object', properties: { title: { type: 'string' }, amount: { type: 'number' } } },
@@ -73,6 +78,30 @@ export const openapi = {
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
         responses: ok('Updated contract', contractRef),
+      },
+    },
+    '/api/v1/contracts/{id}/extend-deadline': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Extend a contract funding deadline',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client', 'fundingDeadline'],
+            properties: {
+              client: { type: 'string' },
+              fundingDeadline: { type: 'string', format: 'date-time' },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Deadline extended', content: json(contractRef) },
+          400: { description: 'Invalid deadline' },
+          403: { description: 'Caller is not the client' },
+          409: { description: 'Contract has expired' },
+        },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -176,6 +205,38 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/cron/expire-contracts': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Expire due unfunded contracts',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Sweep result',
+            content: json({
+              type: 'object',
+              required: ['expired', 'checkedAt'],
+              properties: {
+                expired: { type: 'array', items: { type: 'integer' } },
+                checkedAt: { type: 'string', format: 'date-time' },
+              },
+            }),
+          },
+          401: { description: 'Invalid or missing bearer secret' },
+          404: { description: 'Cron secret is not configured' },
+        },
+      },
+      post: {
+        tags: ['Cron'],
+        summary: 'Expire due unfunded contracts',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Sweep result', content: json({ type: 'object' }) },
+          401: { description: 'Invalid or missing bearer secret' },
+          404: { description: 'Cron secret is not configured' },
+        },
+      },
+    },
   },
   components: {
     schemas: {
@@ -245,11 +306,14 @@ export const openapi = {
           totalAmount: { type: 'number' },
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
-          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
           reputationIssued: { type: 'boolean' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+          fundingDeadline: { type: 'string', format: 'date-time' },
+          expiredAt: { type: 'string', format: 'date-time' },
+          refundableAmount: { type: 'number' },
         },
       },
     },

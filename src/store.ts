@@ -10,7 +10,8 @@ export type ContractStatus =
   | 'Completed'
   | 'Disputed'
   | 'Resolved'
-  | 'Cancelled';
+  | 'Cancelled'
+  | 'Expired';
 
 export interface Milestone {
   index: number;
@@ -57,6 +58,9 @@ export interface EscrowContract {
   chain?: ChainInfo;
   createdAt: string;
   updatedAt: string;
+  fundingDeadline: string;
+  expiredAt?: string;
+  refundableAmount?: number;
 }
 
 export interface Reputation {
@@ -79,14 +83,65 @@ export class HttpError extends Error {
 
 const MAX_MILESTONES = 20;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const DEFAULT_FUNDING_WINDOW_MS = 14 * DAY_MS;
+const MAX_FUNDING_WINDOW_MS = 90 * DAY_MS;
+
+export type Clock = () => Date;
+
+const parseIsoMillis = (value: unknown): number | undefined => {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  ) {
+    return undefined;
+  }
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : undefined;
+};
 
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
   private nextId = 1;
 
+  constructor(private readonly clock: Clock = () => new Date()) {}
+
+  private now(): Date {
+    return this.clock();
+  }
+
+  private nowIso(): string {
+    return this.now().toISOString();
+  }
+
+  currentTime(): string {
+    return this.nowIso();
+  }
+
+  private validateCreationDeadline(value: unknown, now: number): string {
+    if (value === undefined) return new Date(now + DEFAULT_FUNDING_WINDOW_MS).toISOString();
+    const deadline = parseIsoMillis(value);
+    if (deadline === undefined || deadline < now + HOUR_MS || deadline > now + MAX_FUNDING_WINDOW_MS) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be 1 hour to 90 days in the future');
+    }
+    return new Date(deadline).toISOString();
+  }
+
+  private expireIfDue(contract: EscrowContract, now = this.now()): EscrowContract {
+    if (contract.status === 'Created' && now.getTime() >= Date.parse(contract.fundingDeadline)) {
+      contract.status = 'Expired';
+      contract.expiredAt = now.toISOString();
+      contract.refundableAmount = Math.max(0, Number(contract.fundedAmount) - Number(contract.releasedAmount));
+      contract.fundedAmount = contract.releasedAmount;
+      contract.updatedAt = now.toISOString();
+    }
+    return contract;
+  }
+
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
-    return [...this.contracts.values()].filter(
+    return [...this.contracts.values()].map((c) => this.expireIfDue(c)).filter(
       (c) =>
         (!filter.status || c.status === filter.status) &&
         (!filter.party || c.client === filter.party || c.freelancer === filter.party) &&
@@ -97,7 +152,7 @@ export class EscrowStore {
   get(id: number): EscrowContract {
     const c = this.contracts.get(id);
     if (!c) throw new HttpError(404, 'contract_not_found', `Contract ${id} not found`);
-    return c;
+    return this.expireIfDue(c);
   }
 
   create(input: {
@@ -106,6 +161,7 @@ export class EscrowStore {
     freelancer?: unknown;
     token?: unknown;
     milestones?: unknown;
+    fundingDeadline?: unknown;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
@@ -142,13 +198,13 @@ export class EscrowStore {
         released: false,
       };
     });
-
+    const now = this.now();
+    const createdAt = now.toISOString();
     const hasBig = milestones.some((m) => typeof m.amount === 'string');
     const totalAmount = hasBig
       ? milestones.reduce((s, m) => s + BigInt(m.amount), 0n).toString()
       : milestones.reduce((s, m) => s + Number(m.amount), 0);
 
-    const now = new Date().toISOString();
     const c: EscrowContract = {
       id: this.nextId++,
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
@@ -161,21 +217,25 @@ export class EscrowStore {
       releasedAmount: hasBig ? '0' : 0,
       status: 'Created',
       reputationIssued: false,
-      createdAt: now,
-      updatedAt: now,
+      createdAt,
+      updatedAt: createdAt,
+      fundingDeadline: this.validateCreationDeadline(input.fundingDeadline, now.getTime()),
     };
     this.contracts.set(c.id, c);
     return c;
   }
 
   private requireActive(c: EscrowContract) {
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
     if (!ACTIVE.includes(c.status)) {
       throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
     }
   }
 
   private touch(c: EscrowContract) {
-    c.updatedAt = new Date().toISOString();
+    c.updatedAt = this.nowIso();
     return c;
   }
 
@@ -287,6 +347,38 @@ export class EscrowStore {
     this.requireActive(c);
     c.status = 'Cancelled';
     return this.touch(c);
+  }
+
+  extendDeadline(id: number, client: unknown, fundingDeadline: unknown): EscrowContract {
+    const c = this.get(id);
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
+    if (client !== c.client) {
+      throw new HttpError(403, 'unauthorized', 'Only the client can extend the funding deadline');
+    }
+    const deadline = parseIsoMillis(fundingDeadline);
+    const now = this.now().getTime();
+    if (
+      deadline === undefined ||
+      deadline <= Date.parse(c.fundingDeadline) ||
+      deadline > now + MAX_FUNDING_WINDOW_MS
+    ) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be later and no more than 90 days away');
+    }
+    c.fundingDeadline = new Date(deadline).toISOString();
+    return this.touch(c);
+  }
+
+  sweepExpired(): number[] {
+    const now = this.now();
+    const expired: number[] = [];
+    for (const contract of this.contracts.values()) {
+      const wasExpired = contract.status === 'Expired';
+      this.expireIfDue(contract, now);
+      if (!wasExpired && contract.status === 'Expired') expired.push(contract.id);
+    }
+    return expired;
   }
 
   rate(id: number, ratingRaw: unknown): Reputation {
