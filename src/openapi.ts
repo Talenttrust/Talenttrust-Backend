@@ -4,6 +4,10 @@ const json = (schema: object) => ({ 'application/json': { schema } });
 const ok = (description: string, schema: object = { type: 'object' }) => ({
   200: { description, content: json(schema) },
 });
+const errorResponse = (description: string, schema: object = { $ref: '#/components/schemas/ErrorResponse' }) => ({
+  description,
+  content: json(schema),
+});
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
@@ -32,6 +36,7 @@ export const openapi = {
         parameters: [
           { name: 'status', in: 'query', schema: { type: 'string' } },
           { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
+          { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
         responses: ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
       },
@@ -110,6 +115,59 @@ export const openapi = {
         responses: ok('Reputation'),
       },
     },
+    '/api/v1/contracts/{id}/link': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Link an API contract to an on-chain Soroban escrow',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['escrowId'],
+            properties: {
+              escrowId: { type: 'string', description: 'On-chain escrow identifier' },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Linked contract', content: json(contractRef) },
+          400: errorResponse('Invalid escrow ID'),
+          404: errorResponse('API contract or on-chain contract not found'),
+          409: errorResponse('Already linked, on-chain escrow taken, or parameters mismatch', {
+            $ref: '#/components/schemas/ChainMismatchError',
+          }),
+          503: errorResponse('Soroban RPC unavailable'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/parity': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Check state parity between API contract and linked on-chain escrow',
+        parameters: [idParam],
+        responses: {
+          200: {
+            description: 'Parity check results',
+            content: json({
+              type: 'object',
+              properties: {
+                status: { type: 'string', enum: ['in_sync', 'drift'] },
+                drift: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/DriftItem' },
+                },
+                checkedAt: { type: 'string', format: 'date-time' },
+                latestLedger: { type: 'integer' },
+              },
+            }),
+          },
+          404: errorResponse('Contract or on-chain escrow not found'),
+          409: errorResponse('Contract is not linked to an on-chain escrow'),
+          503: errorResponse('Soroban RPC unavailable'),
+        },
+      },
+    },
     '/api/v1/reputation/{address}': {
       get: {
         tags: ['Reputation'],
@@ -121,6 +179,49 @@ export const openapi = {
   },
   components: {
     schemas: {
+      DriftItem: {
+        type: 'object',
+        properties: {
+          field: { type: 'string', description: 'Field name that drifted' },
+          api: { description: 'Value in off-chain API record' },
+          chain: { description: 'Value in on-chain contract' },
+        },
+        required: ['field', 'api', 'chain'],
+      },
+      ChainInfo: {
+        type: 'object',
+        properties: {
+          escrowId: { type: 'string' },
+          linkedAt: { type: 'string', format: 'date-time' },
+          lastVerifiedAt: { type: 'string', format: 'date-time' },
+          status: { type: 'string', enum: ['in_sync', 'drift', 'unverified'] },
+          drift: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/DriftItem' },
+          },
+        },
+        required: ['escrowId', 'linkedAt', 'lastVerifiedAt', 'status', 'drift'],
+      },
+      ErrorResponse: {
+        type: 'object',
+        properties: {
+          error: { type: 'string' },
+          message: { type: 'string' },
+        },
+        required: ['error', 'message'],
+      },
+      ChainMismatchError: {
+        type: 'object',
+        properties: {
+          error: { type: 'string' },
+          message: { type: 'string' },
+          mismatches: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/DriftItem' },
+          },
+        },
+        required: ['error', 'message'],
+      },
       EscrowContract: {
         type: 'object',
         properties: {
@@ -145,6 +246,10 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          reputationIssued: { type: 'boolean' },
+          chain: { $ref: '#/components/schemas/ChainInfo' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
     },
