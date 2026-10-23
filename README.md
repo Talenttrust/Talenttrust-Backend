@@ -26,6 +26,7 @@ data is per-instance and resets on redeploy.
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | On-chain contract deployment info |
 | GET | `/api/v1/stats` | Aggregate statistics |
+| POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
@@ -49,7 +50,15 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`.
+
+`POST /api/v1/tx/build` assembles an unsigned `invokeHostFunction` transaction against the configured
+escrow contract (`ESCROW_CONTRACT_ID`), simulates it via `STELLAR_RPC_URL`, and returns the assembled XDR
+plus the addresses whose Soroban auth entries the wallet must sign. The server never holds or requires user
+secret keys. `source` must be the Stellar account that the contract will `require_auth` (client for
+create/deposit/release/cancel/issue_reputation, caller for open_dispute). `TX_TIMEOUT_SECONDS` (default 300)
+sets the transaction timebounds so a leaked unsigned XDR cannot be signed and submitted much later.
+`resolve_dispute` and `set_paused` are admin-only and not buildable.
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and

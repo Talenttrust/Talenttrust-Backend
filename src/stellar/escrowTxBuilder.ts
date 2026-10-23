@@ -40,33 +40,85 @@ const u64Schema = z.string().refine((value) => {
   return integer > 0n && integer <= U64_MAX;
 }, 'must be a positive decimal string within u64 range');
 
-const actionSchemas = {
-  create_contract: z.object({
-    client: addressSchema,
-    freelancer: addressSchema,
-    token: addressSchema,
-    milestoneAmounts: z.array(i128Schema).min(1).max(20),
-  }).strict(),
-  deposit_funds: z.object({ id: u64Schema, amount: i128Schema }).strict(),
-  release_milestone: z.object({
-    id: u64Schema,
-    index: z.number().int().nonnegative().max(0xffff_ffff),
-  }).strict(),
-  open_dispute: z.object({ id: u64Schema, caller: addressSchema }).strict(),
-  cancel_contract: z.object({ id: u64Schema }).strict(),
-  issue_reputation: z.object({
-    id: u64Schema,
-    rating: z.number().int().nonnegative().max(0xffff_ffff),
-  }).strict(),
-};
+/**
+ * Single declarative table mapping each buildable action to its:
+ *  - Zod schema (request validation / typed args)
+ *  - contract function name
+ *  - ScVal argument encoders
+ *  - auth party (the address the contract will `require_auth`), when known
+ *    without an RPC round-trip (only create_contract / open_dispute carry the
+ *    party in their args; the id-based actions are checked via simulation auth).
+ *
+ * To add a new buildable action, add one entry here — nothing else changes.
+ */
+const ACTION_TABLE = {
+  create_contract: {
+    schema: z.object({
+      client: addressSchema,
+      freelancer: addressSchema,
+      token: addressSchema,
+      milestoneAmounts: z.array(i128Schema).min(1).max(20),
+    }).strict(),
+    functionName: 'create_contract',
+    encode: (a: { client: string; freelancer: string; token: string; milestoneAmounts: string[] }) => [
+      asScAddress(a.client),
+      asScAddress(a.freelancer),
+      asScAddress(a.token),
+      nativeToScVal(a.milestoneAmounts.map(BigInt), { type: 'i128' }),
+    ],
+    authParty: (a: { client: string }) => a.client,
+  },
+  deposit_funds: {
+    schema: z.object({ id: u64Schema, amount: i128Schema }).strict(),
+    functionName: 'deposit_funds',
+    encode: (a: { id: string; amount: string }) => [
+      nativeToScVal(BigInt(a.id), { type: 'u64' }),
+      nativeToScVal(BigInt(a.amount), { type: 'i128' }),
+    ],
+  },
+  release_milestone: {
+    schema: z.object({
+      id: u64Schema,
+      index: z.number().int().nonnegative().max(0xffff_ffff),
+    }).strict(),
+    functionName: 'release_milestone',
+    encode: (a: { id: string; index: number }) => [
+      nativeToScVal(BigInt(a.id), { type: 'u64' }),
+      nativeToScVal(a.index, { type: 'u32' }),
+    ],
+  },
+  open_dispute: {
+    schema: z.object({ id: u64Schema, caller: addressSchema }).strict(),
+    functionName: 'open_dispute',
+    encode: (a: { id: string; caller: string }) => [
+      nativeToScVal(BigInt(a.id), { type: 'u64' }),
+      asScAddress(a.caller),
+    ],
+    authParty: (a: { caller: string }) => a.caller,
+  },
+  cancel_contract: {
+    schema: z.object({ id: u64Schema }).strict(),
+    functionName: 'cancel_contract',
+    encode: (a: { id: string }) => [nativeToScVal(BigInt(a.id), { type: 'u64' })],
+  },
+  issue_reputation: {
+    schema: z.object({
+      id: u64Schema,
+      rating: z.number().int().nonnegative().max(0xffff_ffff),
+    }).strict(),
+    functionName: 'issue_reputation',
+    encode: (a: { id: string; rating: number }) => [
+      nativeToScVal(BigInt(a.id), { type: 'u64' }),
+      nativeToScVal(a.rating, { type: 'u32' }),
+    ],
+  },
+} as const;
 
-export type BuildTransactionRequest =
-  | { action: 'create_contract'; source: string; args: z.infer<typeof actionSchemas.create_contract> }
-  | { action: 'deposit_funds'; source: string; args: z.infer<typeof actionSchemas.deposit_funds> }
-  | { action: 'release_milestone'; source: string; args: z.infer<typeof actionSchemas.release_milestone> }
-  | { action: 'open_dispute'; source: string; args: z.infer<typeof actionSchemas.open_dispute> }
-  | { action: 'cancel_contract'; source: string; args: z.infer<typeof actionSchemas.cancel_contract> }
-  | { action: 'issue_reputation'; source: string; args: z.infer<typeof actionSchemas.issue_reputation> };
+type ActionName = keyof typeof ACTION_TABLE;
+
+export type BuildTransactionRequest = {
+  [A in ActionName]: { action: A; source: string; args: z.infer<(typeof ACTION_TABLE)[A]['schema']> };
+}[ActionName];
 
 export class TxBuildError extends Error {
   constructor(
@@ -80,6 +132,7 @@ export class TxBuildError extends Error {
 }
 
 type RpcClient = Pick<rpc.Server, 'getAccount' | 'simulateTransaction'>;
+export type { RpcClient };
 
 export interface BuiltTransaction {
   xdr: string;
@@ -108,15 +161,15 @@ function validateRequest(input: unknown): BuildTransactionRequest {
     throw new TxBuildError(400, 'invalid_action', 'Request body contains unsupported fields');
   }
   const actionName = body.action;
-  if (typeof actionName !== 'string' || !Object.prototype.hasOwnProperty.call(actionSchemas, actionName)) {
+  if (typeof actionName !== 'string' || !Object.prototype.hasOwnProperty.call(ACTION_TABLE, actionName)) {
     throw new TxBuildError(400, 'invalid_action', 'action is not buildable');
   }
-  const action = actionName as keyof typeof actionSchemas;
+  const action = actionName as ActionName;
   const source = addressSchema.safeParse(body.source);
   if (!source.success) {
     throw new TxBuildError(400, 'invalid_source', source.error.issues.map((issue) => issue.message).join('; '));
   }
-  const args = actionSchemas[action].safeParse(body.args);
+  const args = ACTION_TABLE[action].schema.safeParse(body.args);
   if (!args.success) {
     throw new TxBuildError(
       400,
@@ -132,35 +185,8 @@ function asScAddress(value: string) {
 }
 
 function makeOperation(contract: Contract, request: BuildTransactionRequest) {
-  const { action, args } = request;
-  switch (action) {
-    case 'create_contract':
-      return contract.call(
-        action,
-        asScAddress(args.client),
-        asScAddress(args.freelancer),
-        asScAddress(args.token),
-        nativeToScVal(args.milestoneAmounts.map(BigInt), { type: 'i128' }),
-      );
-    case 'deposit_funds':
-      return contract.call(action, nativeToScVal(BigInt(args.id), { type: 'u64' }), nativeToScVal(BigInt(args.amount), { type: 'i128' }));
-    case 'release_milestone':
-      return contract.call(
-        action,
-        nativeToScVal(BigInt(args.id), { type: 'u64' }),
-        nativeToScVal(args.index, { type: 'u32' }),
-      );
-    case 'open_dispute':
-      return contract.call(action, nativeToScVal(BigInt(args.id), { type: 'u64' }), asScAddress(args.caller));
-    case 'cancel_contract':
-      return contract.call(action, nativeToScVal(BigInt(args.id), { type: 'u64' }));
-    case 'issue_reputation':
-      return contract.call(
-        action,
-        nativeToScVal(BigInt(args.id), { type: 'u64' }),
-        nativeToScVal(args.rating, { type: 'u32' }),
-      );
-  }
+  const def = ACTION_TABLE[request.action];
+  return contract.call(def.functionName, ...def.encode(request.args as never));
 }
 
 function authorizationDetails(entries: xdr.SorobanAuthorizationEntry[], source: string) {
@@ -199,11 +225,13 @@ export async function buildEscrowTransaction(
   if (!StrKey.isValidEd25519PublicKey(request.source)) {
     throw new TxBuildError(400, 'invalid_source', 'source must be a Stellar account address');
   }
-  if (request.action === 'create_contract' && request.source !== request.args.client) {
-    throw new TxBuildError(400, 'source_mismatch', 'source must match args.client for create_contract');
-  }
-  if (request.action === 'open_dispute' && request.source !== request.args.caller) {
-    throw new TxBuildError(400, 'source_mismatch', 'source must match args.caller for open_dispute');
+  // Pre-flight: when the required auth party is carried in the args (create_contract,
+  // open_dispute), reject a mismatch without an RPC round-trip.
+  const def = ACTION_TABLE[request.action] as {
+    authParty?: (args: never) => string;
+  };
+  if (def.authParty && def.authParty(request.args as never) !== request.source) {
+    throw new TxBuildError(400, 'source_mismatch', `source must match the party required by ${request.action}`);
   }
 
   const networkPassphrase = options.networkPassphrase ??

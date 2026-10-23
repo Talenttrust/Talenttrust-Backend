@@ -22,13 +22,47 @@ export const openapi = {
       `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
+  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Transaction' }],
   paths: {
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/api/v1/tx/build': {
+      post: {
+        tags: ['Transaction'],
+        summary: 'Build a simulated, unsigned Soroban transaction for an escrow action',
+        description:
+          'Assembles an unsigned invokeHostFunction transaction against the configured escrow contract, ' +
+          'simulates it via Soroban RPC, and returns the assembled XDR ready for a wallet (Freighter, xBull, …) ' +
+          'to sign. The server never holds or requires user secret keys. `source` must be the Stellar account ' +
+          'that the contract will `require_auth` (client for create/deposit/release/cancel/issue_reputation, ' +
+          'caller for open_dispute). `resolve_dispute` and `set_paused` are admin-only and not buildable.',
+        requestBody: {
+          required: true,
+          content: json({ $ref: '#/components/schemas/TxBuildRequest' }),
+        },
+        responses: {
+          200: { description: 'Simulated, assembled unsigned transaction', content: json({ $ref: '#/components/schemas/TxBuildResponse' }) },
+          400: errorResponse('Invalid action, source, or args; or source does not match the party the contract will require_auth (source_mismatch)', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          403: errorResponse('Admin-only action (resolve_dispute, set_paused) is not buildable', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          404: errorResponse('Source account not found on chain', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          422: errorResponse('Contract simulation failed (contract_error)', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          503: errorResponse('Stellar RPC unavailable', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+        },
+      },
+    },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
@@ -250,6 +284,140 @@ export const openapi = {
           chain: { $ref: '#/components/schemas/ChainInfo' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      TxBuildRequest: {
+        type: 'object',
+        required: ['action', 'source', 'args'],
+        properties: {
+          action: {
+            type: 'string',
+            enum: [
+              'create_contract',
+              'deposit_funds',
+              'release_milestone',
+              'open_dispute',
+              'cancel_contract',
+              'issue_reputation',
+            ],
+          },
+          source: { type: 'string', description: 'Stellar account (G…) that will sign the transaction' },
+          args: {
+            oneOf: [
+              {
+                type: 'object',
+                description: 'create_contract',
+                required: ['client', 'freelancer', 'token', 'milestoneAmounts'],
+                properties: {
+                  client: { type: 'string', description: 'Stellar address' },
+                  freelancer: { type: 'string', description: 'Stellar address' },
+                  token: { type: 'string', description: 'Stellar asset/token address' },
+                  milestoneAmounts: {
+                    type: 'array',
+                    items: { type: 'string', description: 'decimal string within i128 range' },
+                    minItems: 1,
+                    maxItems: 20,
+                  },
+                },
+              },
+              {
+                type: 'object',
+                description: 'deposit_funds',
+                required: ['id', 'amount'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  amount: { type: 'string', description: 'decimal string within i128 range' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'release_milestone',
+                required: ['id', 'index'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  index: { type: 'integer', minimum: 0, description: 'u32 milestone index' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'open_dispute',
+                required: ['id', 'caller'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  caller: { type: 'string', description: 'Stellar address opening the dispute' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'cancel_contract',
+                required: ['id'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'issue_reputation',
+                required: ['id', 'rating'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  rating: { type: 'integer', minimum: 0, description: 'u32 reputation rating' },
+                },
+              },
+            ],
+          },
+        },
+      },
+      TxBuildResponse: {
+        type: 'object',
+        properties: {
+          xdr: { type: 'string', description: 'Base64 unsigned transaction envelope XDR' },
+          networkPassphrase: { type: 'string' },
+          fee: {
+            type: 'object',
+            properties: {
+              inclusion: { type: 'string', description: 'Classic inclusion fee (stroops)' },
+              resource: { type: 'string', description: 'Soroban resource fee (stroops)' },
+              total: { type: 'string', description: 'Total fee (stroops)' },
+            },
+          },
+          minResourceFee: { type: 'string', description: 'Minimum resource fee from simulation (stroops)' },
+          latestLedger: { type: 'integer' },
+          expiresAt: { type: 'string', format: 'date-time', description: 'Approximate transaction expiry from timebounds' },
+          authRequired: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Addresses whose Soroban auth entries the wallet must sign',
+          },
+        },
+      },
+      TxBuildErrorResponse: {
+        type: 'object',
+        properties: {
+          error: {
+            type: 'string',
+            enum: [
+              'invalid_action',
+              'invalid_source',
+              'invalid_args',
+              'source_mismatch',
+              'admin_action_not_buildable',
+              'source_account_not_found',
+              'contract_error',
+              'simulation_failed',
+              'chain_unavailable',
+            ],
+          },
+          message: { type: 'string' },
+          contractError: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              code: { type: 'integer' },
+            },
+            description: 'Present only for contract_error responses',
+          },
+          requestId: { type: 'string' },
         },
       },
     },
