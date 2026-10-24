@@ -1,8 +1,8 @@
 import { config, explorerUrl } from './config';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
-const ok = (description: string, schema: object = { type: 'object' }) => ({
-  200: { description, content: json(schema) },
+const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
+  200: { description, ...(headers ? { headers } : {}), content: json(schema) },
 });
 const errorResponse = (description: string, schema: object = { $ref: '#/components/schemas/ErrorResponse' }) => ({
   description,
@@ -10,6 +10,48 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
+const preconditionFailedRef = { $ref: '#/components/schemas/PreconditionFailedResponse' };
+
+const etagHeader = {
+  ETag: {
+    description: 'Entity tag for cache validation and optimistic concurrency',
+    schema: { type: 'string' },
+  },
+};
+
+const ifNoneMatchHeader = {
+  name: 'If-None-Match',
+  in: 'header',
+  required: false,
+  description: 'Entity tag for conditional GET; returns 304 Not Modified if matched',
+  schema: { type: 'string' },
+};
+
+const ifMatchHeader = {
+  name: 'If-Match',
+  in: 'header',
+  required: false,
+  description: 'Current entity tag for optimistic concurrency precondition check (* or "<id>-<version>")',
+  schema: { type: 'string' },
+};
+
+const mutationResponses = {
+  200: {
+    description: 'Updated contract',
+    headers: etagHeader,
+    content: json(contractRef),
+  },
+  412: {
+    description: 'Precondition Failed - ETag mismatch',
+    headers: etagHeader,
+    content: json(preconditionFailedRef),
+  },
+  428: {
+    description: 'Precondition Required - If-Match header missing when required',
+    content: json(errorRef),
+  },
+};
 
 export const openapi = {
   openapi: '3.0.3',
@@ -37,8 +79,18 @@ export const openapi = {
           { name: 'status', in: 'query', schema: { type: 'string' } },
           { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
+          ifNoneMatchHeader,
         ],
-        responses: ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
+        responses: {
+          200: {
+            description: 'Contracts',
+            headers: etagHeader,
+            content: json({ type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
+          },
+          304: {
+            description: 'Not Modified - cached data is current',
+          },
+        },
       },
       post: {
         tags: ['Contracts'],
@@ -60,59 +112,92 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: {
+          201: {
+            description: 'Created',
+            headers: etagHeader,
+            content: json(contractRef),
+          },
+        },
       },
     },
     '/api/v1/contracts/{id}': {
-      get: { tags: ['Contracts'], summary: 'Get a contract', parameters: [idParam], responses: ok('Contract', contractRef) },
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get a contract',
+        parameters: [idParam, ifNoneMatchHeader],
+        responses: {
+          200: {
+            description: 'Contract',
+            headers: etagHeader,
+            content: json(contractRef),
+          },
+          304: {
+            description: 'Not Modified - cached contract is current',
+          },
+        },
+      },
     },
     '/api/v1/contracts/{id}/deposit': {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
-        parameters: [idParam],
+        parameters: [idParam, ifMatchHeader],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: mutationResponses,
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
       post: {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
-        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }, ifMatchHeader],
+        responses: mutationResponses,
       },
     },
     '/api/v1/contracts/{id}/dispute': {
       post: {
         tags: ['Contracts'],
         summary: 'Open a dispute',
-        parameters: [idParam],
+        parameters: [idParam, ifMatchHeader],
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: mutationResponses,
       },
     },
     '/api/v1/contracts/{id}/resolve': {
       post: {
         tags: ['Contracts'],
         summary: 'Resolve a dispute (admin)',
-        parameters: [idParam],
+        parameters: [idParam, ifMatchHeader],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: mutationResponses,
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: {
+        tags: ['Contracts'],
+        summary: 'Cancel and refund',
+        parameters: [idParam, ifMatchHeader],
+        responses: mutationResponses,
+      },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
         tags: ['Reputation'],
         summary: 'Rate the freelancer of a completed contract',
-        parameters: [idParam],
+        parameters: [idParam, ifMatchHeader],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: {
+          200: {
+            description: 'Reputation',
+            headers: etagHeader,
+            content: json({ $ref: '#/components/schemas/Reputation' }),
+          },
+          412: mutationResponses[412],
+          428: mutationResponses[428],
+        },
       },
     },
     '/api/v1/contracts/{id}/link': {
@@ -173,7 +258,7 @@ export const openapi = {
         tags: ['Reputation'],
         summary: 'Get freelancer reputation',
         parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: ok('Reputation'),
+        responses: ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
       },
     },
   },
@@ -209,6 +294,15 @@ export const openapi = {
           message: { type: 'string' },
         },
         required: ['error', 'message'],
+      },
+      PreconditionFailedResponse: {
+        type: 'object',
+        properties: {
+          error: { type: 'string' },
+          message: { type: 'string' },
+          currentVersion: { type: 'integer' },
+        },
+        required: ['error', 'message', 'currentVersion'],
       },
       ChainMismatchError: {
         type: 'object',
@@ -248,6 +342,7 @@ export const openapi = {
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
           reputationIssued: { type: 'boolean' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
+          version: { type: 'integer' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
         },

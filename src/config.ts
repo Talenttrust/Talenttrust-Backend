@@ -5,6 +5,7 @@ export const config = {
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
   version: '1.0.0',
+  requireIfMatch: process.env.REQUIRE_IF_MATCH === 'true',
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

@@ -18,6 +18,8 @@ data is per-instance and resets on redeploy.
 
 ## Endpoints
 
+All `GET` endpoints for contracts return strong `ETag` and `Cache-Control: no-cache` headers and support `If-None-Match` conditional requests (returning `304 Not Modified` when matched). All `POST /api/v1/contracts/:id/*` mutation endpoints support `If-Match` for optimistic concurrency control (returning `412 Precondition Failed` on mismatch and `428 Precondition Required` when mandatory).
+
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Service info and endpoint list (JSON) |

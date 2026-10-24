@@ -55,6 +55,7 @@ export interface EscrowContract {
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
+  version: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -161,6 +162,7 @@ export class EscrowStore {
       releasedAmount: hasBig ? '0' : 0,
       status: 'Created',
       reputationIssued: false,
+      version: 1,
       createdAt: now,
       updatedAt: now,
     };
@@ -175,6 +177,7 @@ export class EscrowStore {
   }
 
   private touch(c: EscrowContract) {
+    c.version += 1;
     c.updatedAt = new Date().toISOString();
     return c;
   }
