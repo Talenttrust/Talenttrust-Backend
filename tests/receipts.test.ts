@@ -1,7 +1,7 @@
 import request from 'supertest';
 import * as jose from 'jose';
 import crypto from 'crypto';
-import { Keypair } from '@stellar/stellar-base';
+import { Keypair } from '@stellar/stellar-sdk';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import {

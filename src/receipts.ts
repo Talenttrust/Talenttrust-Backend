@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { Keypair } from '@stellar/stellar-base';
+import { Keypair } from '@stellar/stellar-sdk';
 
 export interface ReceiptHeader {
   alg: 'EdDSA';
