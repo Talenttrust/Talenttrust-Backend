@@ -27,17 +27,78 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/chain` | On-chain contract deployment info |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
-| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
-| GET | `/api/v1/contracts/:id` | Get a contract |
+| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`, `?fields=`) / create escrow contracts |
+| GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
+| PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
+| DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
+| GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
-| POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
+| POST | `/api/v1/contracts/:id/reputation` | Client rates freelancer: `{ "rating": 5 }` (backward-compatible) |
+| POST | `/api/v1/contracts/:id/reviews` | Two-sided review: `{ "reviewer": "G...", "rating": 5, "comment": "..." }` |
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
-| GET | `/api/v1/reputation/:address` | Freelancer reputation |
+| GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
+| GET | `/api/v1/reputation/:address/reviews` | Reviews received (`?role=`, `?limit=`, `?cursor=`) |
+
+## Reviews
+
+Reviews are per-contract and two-sided: a client can rate a freelancer and a freelancer can
+rate a client. Each direction is allowed once per contract and only after the contract reaches
+`Completed` or `Resolved`. Reviews of `Resolved` contracts carry `context: 'disputed'`.
+
+- `role` is derived from the reviewer: client → freelancer is `client_to_freelancer`, freelancer → client is
+  `freelancer_to_client`.
+- `comment` is optional, trimmed, at most 1000 characters, and must not contain control characters.
+- Reviews are immutable (no edit/delete).
+
+The legacy `POST /api/v1/contracts/:id/reputation` endpoint is equivalent to a client review of the
+freelancer without a comment and still sets `reputationIssued`. A following client `POST /reviews` for the
+same contract returns `409 already_reviewed`.
+
+## Sparse fieldsets
+
+GET `/api/v1/contracts` and GET `/api/v1/contracts/:id` accept a `?fields=` query parameter so
+clients can download only the fields they need. `id` is always returned.
+
+```
+GET /api/v1/contracts?fields=title,status,totalAmount
+GET /api/v1/contracts/1?fields=milestones.amount
+```
+
+Allowed top-level fields: `title`, `client`, `freelancer`, `token`, `milestones`, `totalAmount`,
+`totalAmountUnits`, `fundedAmount`, `fundedAmountUnits`, `releasedAmount`, `releasedAmountUnits`,
+`status`, `reputationIssued`, `dispute`, `chain`, `revision`, `createdAt`, `updatedAt`.
+Use dot notation for milestone sub-fields: `milestones.index`, `milestones.title`,
+`milestones.amount`, `milestones.amountUnits`, `milestones.released`. Unknown fields return `400 invalid_fields`.
+
+## Response compression
+
+JSON responses larger than 1 KB are compressed with gzip or Brotli when the client sends
+`Accept-Encoding`. A `Vary: Accept-Encoding` header is set on compressed responses. Responses
+are not compressed when `Cache-Control: no-transform` is present or the content type is
+`text/event-stream`.
+### Idempotency
+
+Every `POST` under `/api/v1` accepts an optional `Idempotency-Key` header (1-255 printable ASCII
+characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a request with the same key
+and body replays the stored response with `Idempotent-Replayed: true` instead of applying it again.
+
+| Situation | Result |
+| --- | --- |
+| Same key, same body, first request finished | Stored status and body replayed, `Idempotent-Replayed: true` |
+| Same key, different body | `422 idempotency_key_reused` |
+| Same key while the first request is still running | `409 idempotency_request_in_progress`, `Retry-After: 1` |
+| Malformed key | `400 invalid_idempotency_key` |
+| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` (`400 idempotency_key_required`) |
+
+Keys are scoped by method, path and authenticated principal (if `req.user.id` is set). Responses with
+status below 500 are kept for 24h (max 10,000 entries, LRU eviction); 5xx responses are not stored, so the
+client can retry. Storage is in-memory and per-instance; the `IdempotencyStore` interface in
+`src/idempotency.ts` allows a shared store later.
 
 ## Development
 
@@ -50,7 +111,7 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`.
 
 `POST /api/v1/tx/build` assembles an unsigned `invokeHostFunction` transaction against the configured
 escrow contract (`ESCROW_CONTRACT_ID`), simulates it via `STELLAR_RPC_URL`, and returns the assembled XDR
