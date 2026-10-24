@@ -122,7 +122,7 @@ export function startServer({
           resolve({ forced: true });
           return;
         }
-        setTimeout(poll, 20);
+        setTimeout(poll, 20).unref();
       };
       poll();
     });
@@ -137,9 +137,15 @@ export function startServer({
   process.on('SIGTERM', handleSigTerm);
   process.on('SIGINT', handleSigTerm);
 
+  async function closeAndDetach(): Promise<{ forced: boolean }> {
+    process.off('SIGTERM', handleSigTerm);
+    process.off('SIGINT', handleSigTerm);
+    return close();
+  }
+
   return {
     server,
     port: (server.address() as AddressInfo).port,
-    close,
+    close: closeAndDetach,
   };
 }
