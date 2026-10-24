@@ -32,6 +32,7 @@
     "@types/node": "^20.17.0",
     "@types/supertest": "^6.0.2",
     "jest": "^29.7.0",
+    "jose": "^4.15.9",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",

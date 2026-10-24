@@ -2,8 +2,8 @@ import { config, explorerUrl } from './config';
 import { ALLOWED_FIELDS } from './utils/project';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
-const ok = (description: string, schema: object = { type: 'object' }) => ({
-  200: { description, content: json(schema) },
+const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
+  200: { description, ...(headers ? { headers } : {}), content: json(schema) },
 });
 const errorResponse = (description: string, schema: object = { $ref: '#/components/schemas/ErrorResponse' }) => ({
   description,
@@ -12,6 +12,19 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 const created = (description: string, schema: object = { type: 'object' }) => ({
   201: { description, content: json(schema) },
 });
+const receiptQueryParam = {
+  name: 'receipt',
+  in: 'query',
+  required: false,
+  schema: { type: 'boolean' },
+  description: 'When true, includes detached JWS Receipt header for the contract state',
+};
+const receiptHeaders = {
+  Receipt: {
+    schema: { type: 'string' },
+    description: 'Detached compact JWS receipt of post-mutation contract state',
+  },
+};
 
 const validationErrorResponse = {
   400: {
@@ -146,6 +159,7 @@ const spec = {
     { name: 'Contracts' },
     { name: 'Reputation' },
     { name: 'Transaction' },
+    { name: 'Receipts' },
   ],
   paths: {
     '/api/v1/auth/challenge': {
@@ -185,6 +199,13 @@ const spec = {
       },
     },
     '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/.well-known/talenttrust-receipts.json': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Published ed25519 public keys for offline JWS receipt verification',
+        responses: ok('Published keys', { $ref: '#/components/schemas/PublishedKeys' }),
+      },
+    },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
@@ -245,6 +266,7 @@ const spec = {
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        parameters: [receiptQueryParam],
         requestBody: {
           required: true,
           content: json({
@@ -340,6 +362,17 @@ const spec = {
           400: errorResponse('Invalid contract id'),
           404: errorResponse('Contract not found'),
         },
+      },
+    },
+    '/api/v1/contracts/{id}/receipt': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Get detached server-signed JWS receipt for a contract',
+        parameters: [idParam],
+        responses: ok('Contract receipt', {
+          type: 'object',
+          properties: { receipt: { type: 'string', description: 'Compact JWS receipt' } },
+        }),
       },
     },
     '/api/v1/contracts/{id}/deposit': {
@@ -512,6 +545,21 @@ const spec = {
         }),
       },
     },
+    '/api/v1/receipts/verify': {
+      post: {
+        tags: ['Receipts'],
+        summary: 'Verify a server-signed JWS receipt and check against current state',
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['receipt'],
+            properties: { receipt: { type: 'string', description: 'Compact JWS receipt string' } },
+          }),
+        },
+        responses: ok('Verification result', { $ref: '#/components/schemas/ReceiptVerification' }),
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -651,6 +699,40 @@ const spec = {
           },
         },
         required: ['error', 'message'],
+      },
+      PublishedKeys: {
+        type: 'object',
+        properties: {
+          keys: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                kid: { type: 'string' },
+                alg: { type: 'string', enum: ['EdDSA'] },
+                publicKey: { type: 'string' },
+                jwk: {
+                  type: 'object',
+                  properties: {
+                    kty: { type: 'string', enum: ['OKP'] },
+                    crv: { type: 'string', enum: ['Ed25519'] },
+                    x: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      ReceiptVerification: {
+        type: 'object',
+        properties: {
+          valid: { type: 'boolean' },
+          kid: { type: 'string', nullable: true },
+          iat: { type: 'integer', nullable: true },
+          contractId: { type: 'integer', nullable: true },
+          matchesCurrent: { type: 'boolean' },
+        },
       },
       Error: {
         type: 'object',
@@ -1014,7 +1096,33 @@ function withBearerAuth<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withBearerAuth(withIdempotency(spec));
+/** Mutations that accept `?receipt=true` and then return a signed `Receipt` header. */
+const RECEIPT_OPS = [
+  '/api/v1/contracts',
+  '/api/v1/contracts/{id}/deposit',
+  '/api/v1/contracts/{id}/milestones/{index}/release',
+  '/api/v1/contracts/{id}/dispute',
+  '/api/v1/contracts/{id}/resolve',
+  '/api/v1/contracts/{id}/cancel',
+  '/api/v1/contracts/{id}/reputation',
+];
+
+/** Documents the `receipt` query parameter and `Receipt` response header on receipt-capable mutations. */
+function withReceipts<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of RECEIPT_OPS) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    if (!(op.parameters ?? []).includes(receiptQueryParam)) op.parameters = [...(op.parameters ?? []), receiptQueryParam];
+    for (const code of ['200', '201']) {
+      const r = op.responses[code] as { $ref?: string; headers?: object } | undefined;
+      if (r && !r.$ref) r.headers = { ...(r.headers ?? {}), ...receiptHeaders };
+    }
+  }
+  return doc;
+}
+
+export const openapi = withBearerAuth(withIdempotency(withReceipts(spec)));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">

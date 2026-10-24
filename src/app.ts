@@ -29,6 +29,7 @@ import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
+import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
 
 declare global {
   namespace Express {
@@ -98,6 +99,8 @@ export type AppDeps = {
   authRequired?: boolean;
   /** Injectable clock for auth (tests). */
   now?: () => number;
+  /** Signs contract-state receipts; defaults to RECEIPT_SIGNING_SECRET or an ephemeral key. */
+  receiptManager?: ReceiptManager;
 };
 
 /**
@@ -136,20 +139,28 @@ function resolveStoreAndLogger(
 export interface AppOptions {
   idempotencyStore?: IdempotencyStore;
   idempotencyRequired?: boolean;
+  receiptManager?: ReceiptManager;
 }
 
 export function createApp(
   storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
-  fallbackChainReader?: ChainReader,
+  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager,
   options: AppOptions = {},
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
-  const chainReader = fallbackChainReader ?? resolved.chainReader;
+  const second = fallbackChainReaderOrReceiptManager;
+  const chainReader = second instanceof ReceiptManager ? resolved.chainReader : (second ?? resolved.chainReader);
   const txRpcServer = resolved.txRpcServer;
   const isDeps = !(storeOrOpts && typeof (storeOrOpts as EscrowStore).list === 'function');
-  const auth = resolveAuth(isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {});
+  const deps: AppDeps = isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {};
+  const auth = resolveAuth(deps);
+  // Created lazily so apps that never sign receipts don't generate a key (or warn).
+  let receiptManagerInstance: ReceiptManager | undefined =
+    second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
+  const receiptManager = () =>
+    (receiptManagerInstance ??= new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET));
   const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required);
 
   const app = express();
@@ -208,6 +219,17 @@ export function createApp(
     next();
   });
 
+  const getOrigin = (req: Request) => `${req.protocol}://${req.get('host') || 'localhost'}`;
+
+  /** With `?receipt=true`, attach a `Receipt` header: a JWS over the post-mutation contract state. */
+  const maybeAttachReceipt = (req: Request, res: Response, contract: unknown) => {
+    if (req.query.receipt === 'true' && contract && typeof contract === 'object') {
+      res.setHeader('Receipt', receiptManager().issueReceipt(contract as Record<string, unknown>, getOrigin(req)));
+    }
+  };
+
+  app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager().getPublishedKeys()));
+
   app.get(
     '/',
     wrap(() => ({
@@ -222,12 +244,14 @@ export function createApp(
         'GET  /health',
         'GET  /docs',
         'GET  /openapi.json',
+        'GET  /.well-known/talenttrust-receipts.json',
         'GET  /api/v1/chain',
         'GET  /api/v1/stats',
         'POST /api/v1/tx/build',
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
+        'GET  /api/v1/contracts/:id/receipt',
         'PATCH /api/v1/contracts/:id',
         'DELETE /api/v1/contracts/:id',
         'GET  /api/v1/contracts/:id/revisions',
@@ -244,6 +268,7 @@ export function createApp(
         'GET  /api/v1/reputation/:address/reviews',
         'GET  /api/v1/auth/challenge',
         'POST /api/v1/auth/token',
+        'POST /api/v1/receipts/verify',
       ],
     })),
   );
@@ -373,13 +398,22 @@ export function createApp(
     },
     validate({ body: CreateContractBody }),
     wrap((req, res) => {
-      res.status(201).json(store.create(req.body));
+      const created = store.create(req.body);
+      maybeAttachReceipt(req, res, created);
+      res.status(201).json(created);
     }),
   );
   v1.get(
     '/contracts/:id',
     validate({ params: IdParam }),
     wrap((req) => project(store.get(Number(req.params.id)), parseFields(req))),
+  );
+  v1.get(
+    '/contracts/:id/receipt',
+    wrap((req) => {
+      const contract = store.get(id(req));
+      return { receipt: receiptManager().issueReceipt(contract as unknown as Record<string, unknown>, getOrigin(req)) };
+    }),
   );
   // With wallet auth the authenticated address stands in for body.client.
   const clientOf = (req: Request): unknown => {
@@ -408,36 +442,61 @@ export function createApp(
     '/contracts/:id/deposit',
     requireAuth,
     validate({ params: IdParam, body: DepositBody }),
-    wrap((req) => store.deposit(Number(req.params.id), req.body.amount, callerOf(req))),
+    wrap((req, res) => {
+      const updated = store.deposit(Number(req.params.id), req.body.amount, callerOf(req));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/milestones/:index/release',
     requireAuth,
     validate({ params: MilestoneReleaseParams }),
-    wrap((req) => store.release(Number(req.params.id), Number(req.params.index), callerOf(req))),
+    wrap((req, res) => {
+      const updated = store.release(Number(req.params.id), Number(req.params.index), callerOf(req));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/dispute',
     requireAuth,
     validate({ params: IdParam, body: DisputeBody }),
-    wrap((req) => store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req))),
+    wrap((req, res) => {
+      const updated = store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/resolve',
     validate({ params: IdParam, body: ResolveBody }),
-    wrap((req) => store.resolveDispute(Number(req.params.id), req.body.freelancerBps)),
+    wrap((req, res) => {
+      const updated = store.resolveDispute(Number(req.params.id), req.body.freelancerBps);
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/cancel',
     requireAuth,
     validate({ params: IdParam, body: CancelBody }),
-    wrap((req) => store.cancel(Number(req.params.id), callerOf(req))),
+    wrap((req, res) => {
+      const updated = store.cancel(Number(req.params.id), callerOf(req));
+      maybeAttachReceipt(req, res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/reputation',
     requireAuth,
     validate({ params: IdParam, body: RateBody }),
-    wrap((req) => store.rate(Number(req.params.id), req.body.rating, callerOf(req))),
+    wrap((req, res) => {
+      const reputation = store.rate(Number(req.params.id), req.body.rating, callerOf(req));
+      // The receipt covers the contract (now reputationIssued), not the reputation summary.
+      maybeAttachReceipt(req, res, store.get(Number(req.params.id)));
+      return reputation;
+    }),
   );
   v1.get(
     '/reputation/:address',
@@ -478,6 +537,35 @@ export function createApp(
       });
     }),
   );
+  v1.post(
+    '/receipts/verify',
+    wrap((req) => {
+      const receipt = req.body?.receipt;
+      if (!receipt || typeof receipt !== 'string') {
+        throw new HttpError(400, 'invalid_receipt', 'receipt must be a non-empty JWS string');
+      }
+      const verified = verifyReceipt(receipt, receiptManager().publicKey);
+      if (!verified.valid) {
+        return {
+          valid: false,
+          kid: verified.kid ?? null,
+          iat: verified.iat ?? null,
+          contractId: verified.contractId ?? null,
+          matchesCurrent: false,
+        };
+      }
+      let matchesCurrent = false;
+      if (verified.contractId) {
+        try {
+          matchesCurrent = hashContractState(store.get(verified.contractId)) === verified.contractHash;
+        } catch {
+          matchesCurrent = false;
+        }
+      }
+      return { valid: true, kid: verified.kid, iat: verified.iat, contractId: verified.contractId, matchesCurrent };
+    }),
+  );
+
   app.use('/api/v1', v1);
 
   app.use((req, res) => {

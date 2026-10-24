@@ -45,6 +45,11 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
 | GET | `/api/v1/reputation/:address/reviews` | Reviews received (`?role=`, `?limit=`, `?cursor=`) |
+| GET | `/.well-known/talenttrust-receipts.json` | Published ed25519 public keys for offline verification |
+| GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
+| POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
+
+*Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
 
 ## Reviews
 
@@ -134,7 +139,8 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
+`RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed).
 
 `POST /api/v1/tx/build` assembles an unsigned `invokeHostFunction` transaction against the configured
 escrow contract (`ESCROW_CONTRACT_ID`), simulates it via `STELLAR_RPC_URL`, and returns the assembled XDR
