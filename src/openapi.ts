@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { config, explorerUrl } from './config';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
@@ -256,14 +257,35 @@ export const openapi = {
   },
 };
 
+const SWAGGER_VERSION = '5.17.14';
+const SWAGGER_CSS = `https://unpkg.com/swagger-ui-dist@${SWAGGER_VERSION}/swagger-ui.css`;
+const SWAGGER_JS = `https://unpkg.com/swagger-ui-dist@${SWAGGER_VERSION}/swagger-ui-bundle.js`;
+// Subresource Integrity hashes for the pinned unpkg assets above (sha384, verified against unpkg).
+const SWAGGER_CSS_SRI = 'sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn';
+const SWAGGER_JS_SRI = 'sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep';
+
+const docsInlineStyle =
+  'body{margin:0;background:#fafafa}.tt-bar{background:#0f172a;color:#fff;padding:14px 24px;' +
+  'font-family:system-ui,sans-serif;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.tt-bar a{color:#a5b4fc}';
+const docsInlineScript =
+  "window.onload=function(){window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'})}";
+
+const sha256Source = (source: string) => `'sha256-${createHash('sha256').update(source, 'utf8').digest('base64')}'`;
+
+/** CSP sources for the docs page's inline <style> and <script>, kept in sync with docsHtml. */
+export const docsCsp = {
+  style: sha256Source(docsInlineStyle),
+  script: sha256Source(docsInlineScript),
+};
+
 export const docsHtml = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TalentTrust API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css" />
-  <style>body{margin:0;background:#fafafa}.tt-bar{background:#0f172a;color:#fff;padding:14px 24px;font-family:system-ui,sans-serif;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.tt-bar a{color:#a5b4fc}</style>
+  <link rel="stylesheet" href="${SWAGGER_CSS}" integrity="${SWAGGER_CSS_SRI}" crossorigin="anonymous" />
+  <style>${docsInlineStyle}</style>
 </head>
 <body>
   <div class="tt-bar"><strong>TalentTrust API</strong>
@@ -273,7 +295,7 @@ export const docsHtml = `<!doctype html>
     <a href="${explorerUrl()}">Escrow contract on stellar.expert</a>
   </div>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" crossorigin></script>
-  <script>window.onload=function(){window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'})}</script>
+  <script src="${SWAGGER_JS}" integrity="${SWAGGER_JS_SRI}" crossorigin="anonymous"></script>
+  <script>${docsInlineScript}</script>
 </body>
 </html>`;
