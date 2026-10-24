@@ -6,7 +6,7 @@ describe('TalentTrust API', () => {
   const app = createApp(new EscrowStore());
 
   it('serves health and root', async () => {
-    const h = await request(app).get('health');
+    const h = await request(app).get('/health');
     expect(h.status).toBe(200);
     expect(h.body.status).toBe('ok');
     const root = await request(app).get('/');
@@ -120,7 +120,7 @@ describe('TalentTrust API', () => {
         .send({ client: 'GN', freelancer: 'GO', milestones: [{ amount: 100 }] });
       await request(app)
         .post(`/api/v1/contracts/${other.body.id}/dispute/evidence`)
-        .send({ submittedBy: client, kind: 'text', text: 'hi' })
+        .send({ submittedBy: 'GN', kind: 'text', text: 'hi' })
         .expect(409);
     });
 
