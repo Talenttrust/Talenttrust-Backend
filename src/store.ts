@@ -95,6 +95,33 @@ export interface Reputation {
   completedContracts: number;
   totalRating: number;
   averageRating: number;
+  score: number;
+  rank: number | null;
+  histogram: RatingHistogram;
+  lastRatedAt: string | null;
+}
+
+export interface ReputationPage {
+  data: Reputation[];
+  page: {
+    limit: number;
+    nextCursor: string | null;
+    hasMore: boolean;
+  };
+}
+
+interface ReputationRecord {
+  completed: number;
+  total: number;
+  histogram: RatingHistogram;
+  lastRatedAt: string | null;
+}
+
+interface LeaderboardCache {
+  priorWeight: number;
+  globalMean: number;
+  bySort: Record<ReputationSort, Reputation[]>;
+  byAddress: Map<string, Reputation>;
 }
 
 export type ReviewRole = 'client_to_freelancer' | 'freelancer_to_client';
@@ -140,6 +167,37 @@ interface InternalContract {
 const MAX_MILESTONES = 20;
 const MAX_REVISIONS = 50;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
+const REPUTATION_SORTS: ReputationSort[] = ['score', 'completed', 'average'];
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+const parsePriorWeight = (override?: number): number => {
+  if (override !== undefined) return override;
+  const raw = process.env.REPUTATION_PRIOR_WEIGHT;
+  if (raw === undefined || raw === '') return 5;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 5;
+};
+
+const encodeCursor = (sort: ReputationSort, address: string): string =>
+  Buffer.from(JSON.stringify({ sort, address }), 'utf8').toString('base64url');
+
+const decodeCursor = (cursor: string, expectedSort: ReputationSort): string => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
+  }
+  const { sort, address } = parsed as { sort?: unknown; address?: unknown };
+  if (sort !== expectedSort || typeof address !== 'string' || !address) {
+    throw new HttpError(400, 'invalid_cursor', 'cursor does not match query');
+  }
+  return address;
+};
 
 /** Validate a milestones array into internal (bigint) milestones. */
 function parseMilestones(input: unknown): InternalContract['milestones'] {
@@ -215,6 +273,11 @@ export class EscrowStore {
   private reviews: Review[] = [];
   private nextReviewId = 1;
   private nextId = 1;
+  private priorWeightOverride?: number;
+
+  constructor(options?: { priorWeight?: number }) {
+    this.priorWeightOverride = options?.priorWeight;
+  }
 
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
     return [...this.contracts.values()]
@@ -672,12 +735,84 @@ export class EscrowStore {
   }
 
   getReputation(address: string): Reputation {
-    const r = this.reputation.get(address) ?? { completed: 0, total: 0 };
+    const cache = this.getLeaderboardCache();
+    const cached = cache.byAddress.get(address);
+    if (cached) {
+      return this.cloneReputation(cached);
+    }
     return {
       address,
-      completedContracts: r.completed,
-      totalRating: r.total,
-      averageRating: r.completed ? Math.round((r.total / r.completed) * 100) / 100 : 0,
+      completedContracts: 0,
+      totalRating: 0,
+      averageRating: 0,
+      score: cache.priorWeight > 0 ? round2(cache.globalMean) : 0,
+      rank: null,
+      histogram: [0, 0, 0, 0, 0],
+      lastRatedAt: null,
+    };
+  }
+
+  listReputation(query: {
+    sort?: unknown;
+    minCompleted?: unknown;
+    limit?: unknown;
+    cursor?: unknown;
+  } = {}): ReputationPage {
+    const sortRaw = query.sort === undefined || query.sort === '' ? 'score' : query.sort;
+    if (typeof sortRaw !== 'string' || !REPUTATION_SORTS.includes(sortRaw as ReputationSort)) {
+      throw new HttpError(400, 'invalid_sort', 'sort must be one of score, completed, average');
+    }
+    const sort = sortRaw as ReputationSort;
+
+    let minCompleted = 1;
+    if (query.minCompleted !== undefined && query.minCompleted !== '') {
+      const n = Number(query.minCompleted);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new HttpError(400, 'invalid_min_completed', 'minCompleted must be a non-negative integer');
+      }
+      minCompleted = n;
+    }
+
+    let limit = 20;
+    if (query.limit !== undefined && query.limit !== '') {
+      const n = Number(query.limit);
+      if (!Number.isInteger(n) || n < 1 || n > 100) {
+        throw new HttpError(400, 'invalid_limit', 'limit must be an integer 1..100');
+      }
+      limit = n;
+    }
+
+    let cursorAddress: string | undefined;
+    if (query.cursor !== undefined && query.cursor !== '') {
+      if (typeof query.cursor !== 'string') {
+        throw new HttpError(400, 'invalid_cursor', 'cursor must be a string');
+      }
+      cursorAddress = decodeCursor(query.cursor, sort);
+    }
+
+    const cache = this.getLeaderboardCache();
+    const filtered = cache.bySort[sort].filter((r) => r.completedContracts >= minCompleted);
+
+    let startIndex = 0;
+    if (cursorAddress !== undefined) {
+      const idx = filtered.findIndex((r) => r.address === cursorAddress);
+      if (idx === -1) {
+        throw new HttpError(400, 'invalid_cursor', 'cursor not found in result set');
+      }
+      startIndex = idx + 1;
+    }
+
+    const slice = filtered.slice(startIndex, startIndex + limit);
+    const hasMore = startIndex + limit < filtered.length;
+    const nextCursor = hasMore && slice.length > 0 ? encodeCursor(sort, slice[slice.length - 1].address) : null;
+
+    return {
+      data: slice.map((r) => this.cloneReputation(r)),
+      page: {
+        limit,
+        nextCursor,
+        hasMore,
+      },
     };
   }
 
