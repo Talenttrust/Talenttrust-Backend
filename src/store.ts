@@ -4,6 +4,8 @@
  * for the lifetime of the process (or serverless instance).
  */
 
+import { EventEmitter } from 'node:events';
+
 export type ContractStatus =
   | 'Created'
   | 'Funded'
@@ -80,10 +82,50 @@ export class HttpError extends Error {
 const MAX_MILESTONES = 20;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
+export type ContractAction =
+  | 'created'
+  | 'deposited'
+  | 'released'
+  | 'dispute_opened'
+  | 'dispute_resolved'
+  | 'cancelled'
+  | 'rated';
+
+export interface ContractEvent {
+  id: number;
+  contractId: number;
+  action: ContractAction;
+  status: ContractStatus;
+  contract: EscrowContract;
+}
+
+export interface ContractEventListener {
+  (event: ContractEvent): void;
+}
+
+const MAX_EVENT_LISTENERS = 0;
+
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
   private nextId = 1;
+  eventSeq = 0;
+  readonly events = new EventEmitter();
+
+  constructor() {
+    this.events.setMaxListeners(MAX_EVENT_LISTENERS);
+  }
+
+  emit(action: ContractAction, contract: EscrowContract): void {
+    const event: ContractEvent = {
+      id: ++this.eventSeq,
+      contractId: contract.id,
+      action,
+      status: contract.status,
+      contract,
+    };
+    this.events.emit('contract', event);
+  }
 
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
     return [...this.contracts.values()].filter(
@@ -165,6 +207,7 @@ export class EscrowStore {
       updatedAt: now,
     };
     this.contracts.set(c.id, c);
+    this.emit('created', c);
     return c;
   }
 
@@ -215,7 +258,9 @@ export class EscrowStore {
     }
     c.fundedAmount = Number(c.fundedAmount) + amount;
     if (c.fundedAmount === c.totalAmount) c.status = 'Funded';
-    return this.touch(c);
+    this.touch(c);
+    this.emit('deposited', c);
+    return c;
   }
 
   release(id: number, index: number): EscrowContract {
@@ -244,7 +289,9 @@ export class EscrowStore {
     m.released = true;
     c.releasedAmount = Number(c.releasedAmount) + Number(m.amount);
     if (c.milestones.every((x) => x.released)) c.status = 'Completed';
-    return this.touch(c);
+    this.touch(c);
+    this.emit('released', c);
+    return c;
   }
 
   openDispute(id: number, raisedBy: unknown, reason: unknown): EscrowContract {
@@ -259,7 +306,9 @@ export class EscrowStore {
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
       openedAt: new Date().toISOString(),
     };
-    return this.touch(c);
+    this.touch(c);
+    this.emit('dispute_opened', c);
+    return c;
   }
 
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
@@ -279,14 +328,18 @@ export class EscrowStore {
       c.dispute.freelancerBps = bps;
       c.dispute.resolvedAt = new Date().toISOString();
     }
-    return this.touch(c);
+    this.touch(c);
+    this.emit('dispute_resolved', c);
+    return c;
   }
 
   cancel(id: number): EscrowContract {
     const c = this.get(id);
     this.requireActive(c);
     c.status = 'Cancelled';
-    return this.touch(c);
+    this.touch(c);
+    this.emit('cancelled', c);
+    return c;
   }
 
   rate(id: number, ratingRaw: unknown): Reputation {
@@ -307,6 +360,7 @@ export class EscrowStore {
     this.reputation.set(c.freelancer, r);
     c.reputationIssued = true;
     this.touch(c);
+    this.emit('rated', c);
     return this.getReputation(c.freelancer);
   }
 
