@@ -116,7 +116,8 @@ describe('unfunded contract edits and withdrawal', () => {
     await request(app)
       .patch(contractPath)
       .send({ client: 'GCLIENT', title: 'Too late' })
-      .expect(409, { error: 'contract_locked', message: 'Contract terms can only be edited before funding' });
+      .expect(409)
+      .expect((r) => expect(r.body).toMatchObject({ error: 'contract_locked', message: 'Contract terms can only be edited before funding' }));
 
     const unfunded = await createContract().expect(201);
     const unfundedPath = `/api/v1/contracts/${unfunded.body.id}`;
@@ -125,10 +126,11 @@ describe('unfunded contract edits and withdrawal', () => {
       .patch(unfundedPath)
       .send({ client: 'GCLIENT', milestones: [{ amount: 0 }] })
       .expect(400);
-    await request(app).patch(unfundedPath).send({ client: 'GCLIENT' }).expect(400, {
+    await request(app).patch(unfundedPath).send({ client: 'GCLIENT' }).expect(400)
+      .expect((r) => expect(r.body).toMatchObject({
       error: 'empty_patch',
       message: 'At least one of title or milestones must be provided',
-    });
+    }));
   });
 
   it('withdraws unfunded contracts from reads, lists, and stats', async () => {
@@ -149,7 +151,8 @@ describe('unfunded contract edits and withdrawal', () => {
     await request(app)
       .delete(contractPath)
       .send({ client: 'GCLIENT' })
-      .expect(409, { error: 'contract_locked', message: 'Contract can only be withdrawn before funding' });
+      .expect(409)
+      .expect((r) => expect(r.body).toMatchObject({ error: 'contract_locked', message: 'Contract can only be withdrawn before funding' }));
   });
 
   it('keeps only the most recent 50 revisions', async () => {
