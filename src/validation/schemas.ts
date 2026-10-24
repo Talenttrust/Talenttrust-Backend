@@ -24,13 +24,25 @@ export const MilestoneReleaseParams = z.object({
   index: z.string().regex(/^(?:[0-9]|1[0-9])$/, 'index must be an integer 0..19'),
 });
 
+/**
+ * Token base-unit amount: a positive safe integer, or a canonical decimal
+ * string (no sign, no leading zeros, no exponent) for values beyond 2^53.
+ * Mirrors parseAmount() in src/amount.ts; the store still enforces the i128 cap.
+ */
+export const Amount = z.union([
+  z.number().int().positive().refine(Number.isSafeInteger, 'amount must be a safe integer; use a decimal string for larger values'),
+  z.string().regex(/^[1-9][0-9]{0,38}$/, 'amount string must be a positive decimal integer without leading zeros'),
+]);
+
 export const MilestoneItem = z.union([
-    z.number().int().positive(),
-    z.object({
+  Amount,
+  z
+    .object({
       title: z.string().max(120).optional(),
-      amount: z.number().int().positive(),
-    }).strict(),
-  ]);
+      amount: Amount,
+    })
+    .strict(),
+]);
 
 export const CreateContractBody = z
   .object({
@@ -48,7 +60,7 @@ export const CreateContractBody = z
 
 export const DepositBody = z
   .object({
-    amount: z.number().int().positive(),
+    amount: Amount,
   })
   .strict();
 
@@ -77,6 +89,8 @@ export const ListQuery = z
   .object({
     status: ContractStatusEnum.optional(),
     party: z.string().max(64).optional(),
+    linked: z.enum(['true', 'false']).optional(),
+    fields: z.string().optional(),
   })
   .strict();
 

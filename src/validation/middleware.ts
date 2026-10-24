@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
-import { ZodError, ZodIssue, ZodTypeAny } from 'zod';
+import { ZodError, ZodTypeAny } from 'zod';
 import { HttpError } from '../store';
 
 export interface ValidationDetail {
@@ -7,74 +7,57 @@ export interface ValidationDetail {
   message: string;
 }
 
-function formatZodError(error: ZodError, prefix: string): ValidationDetail[] {
-  return error.issues.map((issue: ZodIssue) => {
-    const path = issue.path.length > 0 ? issue.path.join('.') : '';
-    return {
-      path: prefix ? `${prefix}.${path}` : path,
-      message: issue.message,
-    };
+type Location = 'params' | 'query' | 'body';
+
+function formatZodError(error: ZodError, prefix: Location): ValidationDetail[] {
+  return error.issues.map((issue) => {
+    const path = issue.path.map(String).join('.');
+    return { path: path ? `${prefix}.${path}` : prefix, message: issue.message };
   });
 }
 
-export function validate(
-  schemas: { params?: ZodTypeAny; query?: ZodTypeAny; body?: ZodTypeAny },
-): RequestHandler {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    try {
-      if (schemas.params) {
-        req.params = schemas.params.parse(req.params) as Record<string, string>;
-      }
-      if (schemas.query) {
-        req.query = schemas.query.parse(req.query) as Record<string, string>;
-      }
-      if (schemas.body) {
-        req.body = schemas.body.parse(req.body ?? {});
-      }
-      next();
-    } catch (err) {
-      if (err instanceof ZodError) {
-        const details: ValidationDetail[] = [];
-        if (schemas.params) {
-          try {
-            schemas.params.parse(req.params);
-          } catch (e) {
-            if (e instanceof ZodError) {
-              details.push(...formatZodError(e, 'params'));
-            }
-          }
-        }
-        if (schemas.query) {
-          try {
-            schemas.query.parse(req.query);
-          } catch (e) {
-            if (e instanceof ZodError) {
-              details.push(...formatZodError(e, 'query'));
-            }
-          }
-        }
-        if (schemas.body) {
-          try {
-            schemas.body.parse(req.body ?? {});
-          } catch (e) {
-            if (e instanceof ZodError) {
-              details.push(...formatZodError(e, 'body'));
-            }
-          }
-        }
-        const message = details.map((d) => `${d.path}: ${d.message}`).join('; ');
-        res.status(400).json({
-          error: 'validation_failed',
-          message,
-          details,
-        });
-        return;
-      }
-      next(err);
-    }
-  };
+/**
+ * True when an issue is about a token amount (`amount`, or a bare milestone
+ * amount at `milestones.<n>`). Amount-only failures keep the established
+ * `invalid_amount` error code so existing clients are unaffected.
+ */
+function isAmountIssue(path: readonly PropertyKey[]): boolean {
+  const last = path[path.length - 1];
+  if (last === 'amount') return true;
+  return path.length >= 2 && path[path.length - 2] === 'milestones' && typeof last === 'number';
 }
 
-export function createValidationError(message: string, details: ValidationDetail[]): HttpError {
-  return new HttpError(400, 'validation_failed', message);
+/**
+ * Validate params, query and body against strict Zod schemas. On failure the
+ * request is rejected with 400 `validation_failed` and a `details` array that
+ * lists every problem across all three locations. Errors go through the app
+ * error handler so the response still carries `requestId`.
+ */
+export function validate(schemas: { params?: ZodTypeAny; query?: ZodTypeAny; body?: ZodTypeAny }): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    const details: ValidationDetail[] = [];
+    let amountOnly = true;
+    const parsed: Partial<Record<Location, unknown>> = {};
+    for (const loc of ['params', 'query', 'body'] as const) {
+      const schema = schemas[loc];
+      if (!schema) continue;
+      const input = loc === 'body' ? (req.body ?? {}) : req[loc];
+      const result = schema.safeParse(input);
+      if (result.success) {
+        parsed[loc] = result.data;
+      } else {
+        details.push(...formatZodError(result.error, loc));
+        if (loc !== 'body' || !result.error.issues.every((i) => isAmountIssue(i.path))) amountOnly = false;
+      }
+    }
+    if (details.length > 0) {
+      const message = details.map((d) => `${d.path}: ${d.message}`).join('; ');
+      next(new HttpError(400, amountOnly ? 'invalid_amount' : 'validation_failed', message, { details }));
+      return;
+    }
+    if (parsed.params) req.params = parsed.params as Record<string, string>;
+    if (parsed.query) req.query = parsed.query as Request['query'];
+    if (parsed.body !== undefined) req.body = parsed.body;
+    next();
+  };
 }
