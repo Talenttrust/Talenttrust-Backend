@@ -62,7 +62,7 @@ describe('TalentTrust API', () => {
       keypair.sign(Buffer.from(profileSigningMessage(address, nonce, profile as any))).toString('base64');
 
     it('reproduces the committed signing-message test vector', () => {
-      const msg = profileSigningMessage('GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 1, {
+      const msg = profileSigningMessage('GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 1, {
         displayName: 'Ada',
         skills: ['rust'],
       } as any);

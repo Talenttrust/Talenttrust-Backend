@@ -161,7 +161,7 @@ export function createApp(
   });
 
   const expandParties = (req: Request) => req.query.expand === 'parties';
-  const expandContract = (req: Request, contract: Record<string, unknown>) => {
+  const expandContract = (req: Request, contract: Record<string, unknown>): Record<string, unknown> => {
     if (!expandParties(req)) return contract;
     const client = contract.client as string | undefined;
     const freelancer = contract.freelancer as string | undefined;
@@ -194,29 +194,29 @@ export function createApp(
         party: typeof req.query.party === 'string' ? req.query.party : undefined,
         linked,
       });
-      return { data: data.map((c) => expandContract(req, c as Record<string, unknown>)) };
+      return { data: data.map((c) => expandContract(req, c as unknown as Record<string, unknown>)) };
     }),
   );
   v1.post(
     '/contracts',
     wrap((req, res) => {
       const created = store.create(req.body ?? {});
-      res.status(201).json(expandContract(req, created as Record<string, unknown>));
+      res.status(201).json(expandContract(req, created as unknown as Record<string, unknown>));
     }),
   );
-  v1.get('/contracts/:id', wrap((req) => expandContract(req, store.get(id(req)) as Record<string, unknown>)));
-  v1.post('/contracts/:id/deposit', wrap((req) => expandContract(req, store.deposit(id(req), req.body?.amount) as Record<string, unknown>)));
+  v1.get('/contracts/:id', wrap((req) => expandContract(req, store.get(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/deposit', wrap((req) => expandContract(req, store.deposit(id(req), req.body?.amount) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/milestones/:index/release',
-    wrap((req) => expandContract(req, store.release(id(req), Number(req.params.index)) as Record<string, unknown>)),
+    wrap((req) => expandContract(req, store.release(id(req), Number(req.params.index)) as unknown as Record<string, unknown>)),
   );
   v1.post(
     '/contracts/:id/dispute',
-    wrap((req) => expandContract(req, store.openDispute(id(req), req.body?.raisedBy, req.body?.reason) as Record<string, unknown>)),
+    wrap((req) => expandContract(req, store.openDispute(id(req), req.body?.raisedBy, req.body?.reason) as unknown as Record<string, unknown>)),
   );
-  v1.post('/contracts/:id/resolve', wrap((req) => expandContract(req, store.resolveDispute(id(req), req.body?.freelancerBps) as Record<string, unknown>)));
-  v1.post('/contracts/:id/cancel', wrap((req) => expandContract(req, store.cancel(id(req)) as Record<string, unknown>)));
-  v1.post('/contracts/:id/reputation', wrap((req) => expandContract(req, store.rate(id(req), req.body?.rating) as Record<string, unknown>)));
+  v1.post('/contracts/:id/resolve', wrap((req) => expandContract(req, store.resolveDispute(id(req), req.body?.freelancerBps) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/cancel', wrap((req) => expandContract(req, store.cancel(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/reputation', wrap((req) => expandContract(req, store.rate(id(req), req.body?.rating) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/link',
     wrap(async (req) => store.linkEscrow(id(req), req.body?.escrowId, chainReader)),
@@ -258,9 +258,9 @@ export function createApp(
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
     }
-    const result = profileStore.searchBySkill(skill, limit, cursor, (a) => store.getReputation(a));
+    const result = profileStore.searchBySkill(skill, limit, cursor, (a: string) => store.getReputation(a));
     return {
-      data: result.data.map((p) => ({ ...p, reputation: store.getReputation(p.address) })),
+      data: result.data.map((p: { address: string }) => ({ ...p, reputation: store.getReputation(p.address) })),
       nextCursor: result.nextCursor,
     };
   }));
