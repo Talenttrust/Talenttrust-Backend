@@ -61,7 +61,7 @@ describe('unfunded contract edits and withdrawal', () => {
     app = createApp(new EscrowStore());
   });
 
-  const createContract = async () =>
+  const createContract = () =>
     request(app)
       .post('/api/v1/contracts')
       .send({
