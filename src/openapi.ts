@@ -10,28 +10,22 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
-const errorResponse = (description: string) => ({
-  description,
-  content: json({
-    type: 'object',
-    properties: {
-      error: { type: 'string' },
-      message: { type: 'string' },
-    },
-  }),
-});
+const amountSchema = {
+  oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$' }],
+  description: 'Amount in token base units. Must be a positive integer.',
+};
 const milestonesSchema = {
   type: 'array',
   minItems: 1,
   maxItems: 20,
   items: {
     oneOf: [
-      { type: 'number', minimum: 0, exclusiveMinimum: true },
+      amountSchema,
       {
         type: 'object',
         properties: {
           title: { type: 'string' },
-          amount: { type: 'number', minimum: 0, exclusiveMinimum: true },
+          amount: amountSchema,
         },
         required: ['amount'],
       },
@@ -39,7 +33,7 @@ const milestonesSchema = {
   },
 };
 
-export const openapi = {
+const spec = {
   openapi: '3.0.3',
   info: {
     title: 'TalentTrust API',
@@ -56,7 +50,7 @@ export const openapi = {
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
@@ -170,7 +164,7 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
+        requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
         responses: ok('Updated contract', contractRef),
       },
     },
@@ -277,6 +271,36 @@ export const openapi = {
     },
   },
   components: {
+    parameters: {
+      IdempotencyKey: {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: false,
+        description:
+          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
+          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+        schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
+      },
+    },
+    responses: {
+      InvalidIdempotencyKey: {
+        description: 'Idempotency-Key is malformed (`invalid_idempotency_key`) or missing while required (`idempotency_key_required`)',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyConflict: {
+        description:
+          '`idempotency_request_in_progress`: a request with this key is still running (see `Retry-After`). ' +
+          'Other 409 codes are business-rule conflicts such as `over_funded`.',
+        headers: { 'Retry-After': { schema: { type: 'integer' }, description: 'Seconds to wait before retrying' } },
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyKeyReused: {
+        description: '`idempotency_key_reused`: the key was already used with a different request body',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+    },
     schemas: {
       DriftItem: {
         type: 'object',
@@ -321,6 +345,10 @@ export const openapi = {
         },
         required: ['error', 'message'],
       },
+      Error: {
+        type: 'object',
+        properties: { error: { type: 'string' }, message: { type: 'string' } },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
@@ -336,24 +364,94 @@ export const openapi = {
               properties: {
                 index: { type: 'integer' },
                 title: { type: 'string' },
-                amount: { type: 'number' },
+                amount: {
+                  description: 'DEPRECATED — lossy above 2^53. Use amountUnits.',
+                  oneOf: [{ type: 'number' }, { type: 'string' }],
+                },
+                amountUnits: {
+                  type: 'string',
+                  description: 'Canonical decimal string amount in token base units (e.g. stroops).',
+                },
                 released: { type: 'boolean' },
               },
             },
           },
-          totalAmount: { type: 'number' },
-          fundedAmount: { type: 'number' },
-          releasedAmount: { type: 'number' },
+          totalAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          totalAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string total in token base units.',
+          },
+          fundedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          fundedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string funded amount in token base units.',
+          },
+          releasedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          releasedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string released amount in token base units.',
+          },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
           reputationIssued: { type: 'boolean' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
+          revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ContractRevision: {
+        type: 'object',
+        required: ['revision', 'at', 'changes'],
+        properties: {
+          revision: { type: 'integer', minimum: 2 },
+          at: { type: 'string', format: 'date-time' },
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['field', 'from', 'to'],
+              properties: {
+                field: { type: 'string', enum: ['title', 'milestones'] },
+                from: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'object' } }] },
+                to: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'object' } }] },
+              },
+            },
+          },
         },
       },
     },
   },
 };
+
+type Operation = { parameters?: object[]; responses: Record<string, object> };
+
+/** Documents Idempotency-Key and its error statuses on every POST operation. */
+function withIdempotency<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const item of Object.values(paths)) {
+    const op = item.post;
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+    op.responses = {
+      ...op.responses,
+      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+      409: { $ref: '#/components/responses/IdempotencyConflict' },
+      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+    };
+  }
+  return doc;
+}
+
+export const openapi = withIdempotency(spec);
 
 export const docsHtml = `<!doctype html>
 <html lang="en">

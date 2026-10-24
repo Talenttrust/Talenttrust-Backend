@@ -6,6 +6,7 @@ import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
+import { bigIntReplacer } from './amount';
 
 declare global {
   namespace Express {
@@ -14,6 +15,7 @@ declare global {
     }
   }
 }
+import { idempotency, IdempotencyStore, MemoryIdempotencyStore } from './idempotency';
 
 const startedAt = Date.now();
 
@@ -23,7 +25,12 @@ type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
 const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
   try {
     const out = await fn(req, res);
-    if (out !== undefined && !res.headersSent) res.json(out);
+    if (out !== undefined && !res.headersSent) {
+      // Use bigIntReplacer so bigint amounts serialise as decimal strings
+      // and JSON.stringify never throws on a response. Go through res.json so
+      // middleware that wraps it (idempotency replay) still sees the body.
+      res.json(JSON.parse(JSON.stringify(out, bigIntReplacer)));
+    }
   } catch (err) {
     next(err);
   }
@@ -56,9 +63,15 @@ function resolveStoreAndLogger(
   };
 }
 
+export interface AppOptions {
+  idempotencyStore?: IdempotencyStore;
+  idempotencyRequired?: boolean;
+}
+
 export function createApp(
   storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
   fallbackChainReader?: ChainReader,
+  options: AppOptions = {},
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
@@ -158,6 +171,11 @@ export function createApp(
   });
 
   const v1 = express.Router();
+  v1.use(
+    idempotency(options.idempotencyStore ?? new MemoryIdempotencyStore(), {
+      required: options.idempotencyRequired ?? process.env.IDEMPOTENCY_REQUIRED === 'true',
+    }),
+  );
   v1.get(
     '/chain',
     wrap(() => ({

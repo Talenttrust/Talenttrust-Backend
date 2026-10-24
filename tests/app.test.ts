@@ -84,9 +84,10 @@ describe('unfunded contract edits and withdrawal', () => {
 
     expect(updated.body.title).toBe('Revised terms');
     expect(updated.body.totalAmount).toBe(150);
+    expect(updated.body.totalAmountUnits).toBe('150');
     expect(updated.body.revision).toBe(2);
     expect(updated.body.milestones).toEqual([
-      { index: 0, title: 'Specification', amount: 150, released: false },
+      { index: 0, title: 'Specification', amount: 150, amountUnits: '150', released: false },
     ]);
     const revisions = await request(app).get(`/api/v1/contracts/${created.body.id}/revisions`).expect(200);
     expect(revisions.body).toEqual([
@@ -98,10 +99,10 @@ describe('unfunded contract edits and withdrawal', () => {
           {
             field: 'milestones',
             from: [
-              { index: 0, title: 'Design', amount: 100, released: false },
-              { index: 1, title: 'Build', amount: 200, released: false },
+              { index: 0, title: 'Design', amount: 100, amountUnits: '100', released: false },
+              { index: 1, title: 'Build', amount: 200, amountUnits: '200', released: false },
             ],
-            to: [{ index: 0, title: 'Specification', amount: 150, released: false }],
+            to: [{ index: 0, title: 'Specification', amount: 150, amountUnits: '150', released: false }],
           },
         ],
       },
