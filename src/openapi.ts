@@ -10,6 +10,20 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 });
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
+const bodyErrors = {
+  400: {
+    description:
+      'Malformed JSON (invalid_json), a body that is not a JSON object or has an invalid size (invalid_body), an aborted request (request_aborted) or invalid input',
+    content: json(errorRef),
+  },
+  413: { description: 'Request body exceeds BODY_LIMIT (payload_too_large)', content: json(errorRef) },
+  415: {
+    description:
+      'Content-Type is not application/json, or the charset or content encoding is unsupported (unsupported_media_type)',
+    content: json(errorRef),
+  },
+};
 
 const spec = {
   openapi: '3.0.3',
@@ -60,7 +74,7 @@ const spec = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: { 201: { description: 'Created', content: json(contractRef) }, ...bodyErrors },
       },
     },
     '/api/v1/contracts/{id}': {
@@ -72,7 +86,7 @@ const spec = {
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...bodyErrors },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -91,7 +105,7 @@ const spec = {
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...bodyErrors },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
@@ -100,7 +114,7 @@ const spec = {
         summary: 'Resolve a dispute (admin)',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...bodyErrors },
       },
     },
     '/api/v1/contracts/{id}/cancel': {
@@ -112,7 +126,7 @@ const spec = {
         summary: 'Rate the freelancer of a completed contract',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: { ...ok('Reputation'), ...bodyErrors },
       },
     },
     '/api/v1/contracts/{id}/link': {
@@ -132,7 +146,7 @@ const spec = {
         },
         responses: {
           200: { description: 'Linked contract', content: json(contractRef) },
-          400: errorResponse('Invalid escrow ID'),
+          ...bodyErrors,
           404: errorResponse('API contract or on-chain contract not found'),
           409: errorResponse('Already linked, on-chain escrow taken, or parameters mismatch', {
             $ref: '#/components/schemas/ChainMismatchError',

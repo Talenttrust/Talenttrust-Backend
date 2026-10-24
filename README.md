@@ -68,7 +68,8 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`.
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`,
+`BODY_LIMIT` (maximum request body size, default `100kb`).
 
 Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
 `X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
@@ -83,6 +84,18 @@ Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default
 On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
 returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
 the grace deadline, then force-closes remaining sockets and exits.
+
+## Request bodies
+
+Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
+
+| Situation | Status | Error code |
+| --- | --- | --- |
+| Body larger than `BODY_LIMIT` | 413 | `payload_too_large` |
+| Non-JSON content type, unsupported charset or content encoding | 415 | `unsupported_media_type` |
+| JSON body whose top level is not an object | 400 | `invalid_body` |
+| Malformed JSON | 400 | `invalid_json` |
+| Request aborted before the body was received | 400 | `request_aborted` |
 
 ## Deployment
 
