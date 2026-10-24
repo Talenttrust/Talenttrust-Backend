@@ -38,14 +38,22 @@ const id = (req: Request) => {
 const parseBool = (value: unknown, defaultValue: boolean) => {
   if (value === undefined) return defaultValue;
   if (value === 'true') return true;
-  if (value === 'false') return false;
-  throw new HttpError(400, 'invalid_boolean', "includeDemo must be 'true' or 'false'");
+  if (value === 'false') return false;throw new HttpError(400, 'invalid_boolean', "includeDemo must be 'true' or 'false'");
 };
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
 
+export type AppOptions = {
+  logger?: Logger;
+  store?: EscrowStore;
+  chainReader?: ChainReader;
+  seedDemoData?: boolean;
+};
+
+export type CreateAppOptions = AppOptions;
+
 function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = shouldSeedDemoData()
+  storeOrOpts: EscrowStore | AppOptions = shouldSeedDemoData()
     ? new EscrowStore().seed()
     : new EscrowStore(),
 ): { store: EscrowStore; logger: Logger; chainReader: ChainReader } {
@@ -57,16 +65,23 @@ function resolveStoreAndLogger(
   ) {
     return { store: storeOrOpts as EscrowStore, logger: createLogger(), chainReader: new SorobanRpcChainReader() };
   }
-  const opts = (storeOrOpts as { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } | undefined) ?? {};
+  const opts = (storeOrOpts as AppOptions | undefined) ?? {};
+  let store: EscrowStore;
+  if (opts.store) {
+    store = opts.store;
+  } else {
+    const seed = opts.seedDemoData ?? shouldSeedDemoData();
+    store = seed ? new EscrowStore().seed() : new EscrowStore();
+  }
   return {
-    store: opts.store ?? (shouldSeedDemoData() ? new EscrowStore().seed() : new EscrowStore()),
+    store,
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
   };
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = shouldSeedDemoData()
+  storeOrOpts: EscrowStore | AppOptions = shouldSeedDemoData()
     ? new EscrowStore().seed()
     : new EscrowStore(),
   fallbackChainReader?: ChainReader,
@@ -123,7 +138,7 @@ export function createApp(
       docs: '/docs',
       openapi: '/openapi.json',
       website: config.frontendUrl,
-      demoData: store.hasDemoData(),
+      demoData: store.hasDemoData,
       chain: { network: config.network, contractId: config.contractId, explorer: explorerUrl() },
       endpoints: [
         'GET  /health',
@@ -157,7 +172,7 @@ export function createApp(
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
-      demoData: store.hasDemoData(),
+      demoData: store.hasDemoData,
       timestamp: new Date().toISOString(),
     });
   });
@@ -177,7 +192,7 @@ export function createApp(
       explorer: explorerUrl(),
     })),
   );
-  v1.get('/stats', wrap((req) => store.stats(parseBool(req.query.includeDemo, false))));
+  v1.get('/stats', wrap((req) => store.stats({ includeDemo: parseBool(req.query.includeDemo, false) })));
   v1.get(
     '/contracts',
     wrap((req) => {

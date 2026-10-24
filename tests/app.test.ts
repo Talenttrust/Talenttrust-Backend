@@ -1,9 +1,12 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
+import type { AppOptions } from '../src/app';
 import { EscrowStore } from '../src/store';
 
+const opts = (seedDemoData: boolean): AppOptions => ({ seedDemoData });
+
 describe('TalentTrust API', () => {
-  const app = createApp(new EscrowStore(), { seedDemoData: false });
+  const app = createApp(new EscrowStore(), opts(false));
 
   it('serves health and root', async () => {
     const h = await request(app).get('/health');
@@ -58,13 +61,13 @@ describe('TalentTrust API', () => {
   });
 
   it('starts empty with seeding disabled', async () => {
-    const emptyApp = createApp(new EscrowStore(), { seedDemoData: false });
+    const emptyApp = createApp(new EscrowStore(), opts(false));
     const list = await request(emptyApp).get('/api/v1/contracts');
     expect(list.body.data).toHaveLength(0);
   });
 
   it('marks seeded contracts as demo and excludes them from stats by default', async () => {
-    const seededApp = createApp(new EscrowStore(), { seedDemoData: true });
+    const seededApp = createApp(new EscrowStore(), opts(true));
     const list = await request(seededApp).get('/api/v1/contracts');
     expect(list.body.data).toHaveLength(2);
     for (const c of list.body.data) {
