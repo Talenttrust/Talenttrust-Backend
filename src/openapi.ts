@@ -24,11 +24,57 @@ export const openapi = {
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/': {
+      get: {
+        tags: ['System'],
+        summary: 'Endpoint index',
+        responses: ok('Service info', {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            version: { type: 'string' },
+            demoData: { type: 'boolean', description: 'True when demo seed data is present' },
+            endpoints: { type: 'object' },
+          },
+        }),
+      },
+    },
+    '/health': {
+      get: {
+        tags: ['System'],
+        summary: 'Health check',
+        responses: ok('Service is healthy', {
+          type: 'object',
+          properties: { status: { type: 'string' }, demoData: { type: 'boolean' } },
+        }),
+      },
+    },
     '/api/v1/chain': {
       get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/api/v1/stats': {
+      get: {
+        tags: ['System'],
+        summary: 'Aggregate escrow statistics',
+        parameters: [
+          {
+            name: 'includeDemo',
+            in: 'query',
+            schema: { type: 'boolean', default: false },
+            description: 'Include seeded demo data in aggregates (default false)',
+          },
+        ],
+        responses: ok('Stats', {
+          type: 'object',
+          properties: {
+            contracts: { type: 'integer' },
+            totalEscrowed: { type: 'number' },
+            totalReleased: { type: 'number' },
+            includeDemo: { type: 'boolean' },
+          },
+        }),
+      },
+    },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
@@ -36,6 +82,12 @@ export const openapi = {
         parameters: [
           { name: 'status', in: 'query', schema: { type: 'string' } },
           { name: 'party', in: 'query', schema: { type: 'string' }, description: 'Client or freelancer address' },
+          {
+            name: 'includeDemo',
+            in: 'query',
+            schema: { type: 'boolean', default: true },
+            description: 'Include seeded demo contracts (default true)',
+          },
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
         responses: ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
@@ -112,7 +164,15 @@ export const openapi = {
         summary: 'Rate the freelancer of a completed contract',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: ok('Reputation', {
+          type: 'object',
+          properties: {
+            address: { type: 'string' },
+            rating: { type: 'number' },
+            count: { type: 'integer' },
+            demo: { type: 'boolean', description: 'True when all reputation data for this address comes from the demo seed' },
+          },
+        }),
       },
     },
     '/api/v1/contracts/{id}/link': {
@@ -173,7 +233,15 @@ export const openapi = {
         tags: ['Reputation'],
         summary: 'Get freelancer reputation',
         parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: ok('Reputation'),
+        responses: ok('Reputation', {
+          type: 'object',
+          properties: {
+            address: { type: 'string' },
+            rating: { type: 'number' },
+            count: { type: 'integer' },
+            demo: { type: 'boolean', description: 'True when all reputation data for this address comes from the demo seed' },
+          },
+        }),
       },
     },
   },
@@ -246,6 +314,7 @@ export const openapi = {
           fundedAmount: { type: 'number' },
           releasedAmount: { type: 'number' },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          demo: { type: 'boolean', description: 'True when the record was created by the demo seed' },
           reputationIssued: { type: 'boolean' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           createdAt: { type: 'string', format: 'date-time' },
@@ -262,7 +331,7 @@ export const docsHtml = `<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TalentTrust API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css" />
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@55.17.14/swagger-ui.css" />
   <style>body{margin:0;background:#fafafa}.tt-bar{background:#0f172a;color:#fff;padding:14px 24px;font-family:system-ui,sans-serif;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.tt-bar a{color:#a5b4fc}</style>
 </head>
 <body>
@@ -273,7 +342,7 @@ export const docsHtml = `<!doctype html>
     <a href="${explorerUrl()}">Escrow contract on stellar.expert</a>
   </div>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" crossorigin></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" oncrossorigin></script>
   <script>window.onload=function(){window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'})}</script>
 </body>
 </html>`;
