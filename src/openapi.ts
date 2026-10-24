@@ -11,6 +11,19 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
+const paused503Response = {
+  503: {
+    description: 'Contract mutations are currently paused',
+    headers: {
+      'Retry-After': {
+        description: 'Estimated seconds before retrying',
+        schema: { type: 'integer', example: 60 },
+      },
+    },
+    content: json({ $ref: '#/components/schemas/PausedErrorResponse' }),
+  },
+};
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
@@ -24,9 +37,40 @@ export const openapi = {
   servers: [{ url: '/' }],
   tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/health': {
+      get: {
+        tags: ['System'],
+        summary: 'Health check',
+        responses: ok('Service is healthy', {
+          type: 'object',
+          properties: {
+            status: { type: 'string' },
+            version: { type: 'string' },
+            uptimeSeconds: { type: 'number' },
+            storage: { type: 'string' },
+            paused: { type: 'boolean' },
+            pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+            timestamp: { type: 'string' },
+          },
+        }),
+      },
+    },
     '/api/v1/chain': {
-      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
+      get: {
+        tags: ['System'],
+        summary: 'On-chain escrow contract deployment info',
+        responses: ok('Deployment', {
+          type: 'object',
+          properties: {
+            network: { type: 'string' },
+            rpcUrl: { type: 'string' },
+            contractId: { type: 'string' },
+            explorer: { type: 'string' },
+            paused: { type: 'boolean' },
+            pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+          },
+        }),
+      },
     },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
     '/api/v1/contracts': {
@@ -60,7 +104,10 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: {
+          201: { description: 'Created', content: json(contractRef) },
+          ...paused503Response,
+        },
       },
     },
     '/api/v1/contracts/{id}': {
@@ -72,7 +119,10 @@ export const openapi = {
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...paused503Response,
+        },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -80,7 +130,10 @@ export const openapi = {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
         parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...paused503Response,
+        },
       },
     },
     '/api/v1/contracts/{id}/dispute': {
@@ -91,7 +144,10 @@ export const openapi = {
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...paused503Response,
+        },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
@@ -104,7 +160,15 @@ export const openapi = {
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: {
+        tags: ['Contracts'],
+        summary: 'Cancel and refund',
+        parameters: [idParam],
+        responses: {
+          ...ok('Updated contract', contractRef),
+          ...paused503Response,
+        },
+      },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -179,6 +243,21 @@ export const openapi = {
   },
   components: {
     schemas: {
+      PausedErrorResponse: {
+        type: 'object',
+        properties: {
+          error: { type: 'string', example: 'contract_paused' },
+          message: { type: 'string', example: 'Contract mutations are currently paused' },
+          source: { type: 'string', enum: ['chain', 'env', 'none'] },
+          contractError: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', example: 'Paused' },
+              code: { type: 'integer', example: 4 },
+            },
+          },
+        },
+      },
       DriftItem: {
         type: 'object',
         properties: {
