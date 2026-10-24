@@ -1,8 +1,10 @@
-/**
+/*
  * In-memory escrow store. Mirrors the state machine of the on-chain Soroban
  * escrow contract so the API can be used without a database. Data lives only
  * for the lifetime of the process (or serverless instance).
  */
+
+import { createHash } from 'node:crypto';
 
 export type ContractStatus =
   | 'Created'
@@ -66,6 +68,35 @@ export interface Reputation {
   averageRating: number;
 }
 
+export interface ProfileLinks {
+  website?: string;
+  github?: string;
+}
+
+export interface Profile {
+  address: string;
+  displayName: string;
+  bio?: string;
+  skills: string[];
+  links: ProfileLinks;
+  updatedAt: string;
+  nonce: number;
+}
+
+export interface ProfileInput {
+  displayName?: unknown;
+  bio?: unknown;
+  skills?: unknown;
+  links?: unknown;
+}
+
+const MAX_DISPLAY_NAME = 60;
+const MAX_BIO = 1000;
+const MAX_SKILLS = 20;
+const MAX_SKILL_LEN = 30;
+const SKILL_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const HTTPS_URL = /^https:\/\/[^\s]+$/;
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -83,6 +114,7 @@ const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 export class EscrowStore {
   private contracts = new Map<number, EscrowContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
+  private profiles = new Map<string, Profile>();
   private nextId = 1;
 
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
@@ -536,6 +568,102 @@ export class EscrowStore {
     };
   }
 
+  getProfile(address: string): Profile {
+    const p = this.profiles.get(address);
+    if (!p) throw new HttpError(404, 'profile_not_found', `Profile ${address} not found`);
+    return p;
+  }
+
+  findProfile(address: string): Profile | null {
+    return this.profiles.get(address) ?? null;
+  }
+
+  private validateProfile(input: ProfileInput): Omit<Profile, 'address' | 'updatedAt' | 'nonce'> {
+    const { displayName, bio, skills, links } = input;
+    if (typeof displayName !== 'string') {
+      throw new HttpError(400, 'invalid_display_name', 'displayName must be a string');
+    }
+    const trimmedName = displayName.trim();
+    if (trimmedName.length < 1 || trimmedName.length > MAX_DISPLAY_NAME) {
+      throw new HttpError(400, 'invalid_display_name', `displayName must be 1..${MAX_DISPLAY_NAME} chars`);
+    }
+    let cleanBio: string | undefined;
+    if (bio !== undefined && bio !== null) {
+      if (typeof bio !== 'string') {
+        throw new HttpError(400, 'invalid_bio', 'bio must be a string');
+      }
+      if (bio.length > MAX_BIO) {
+        throw new HttpError(400, 'invalid_bio', `bio must be at most ${MAX_BIO} chars`);
+      }
+      cleanBio = bio;
+    }
+    if (!Array.isArray(skills)) {
+      throw new HttpError(400, 'invalid_skills', 'skills must be an array');
+    }
+    if (skills.length > MAX_SKILLS) {
+      throw new HttpError(400, 'invalid_skills', `at most ${MAX_SKILLS} skills`);
+    }
+    const cleanSkills: string[] = [];
+    for (const s of skills) {
+      if (typeof s !== 'string' || s.length < 1 || s.length > MAX_SKILL_LEN || !SKILL_SLUG.test(s)) {
+        throw new HttpError(400, 'invalid_skill', `invalid skill slug: ${String(s)}`);
+      }
+      if (!cleanSkills.includes(s)) cleanSkills.push(s);
+    }
+    const rawLinks = (links ?? {}) as Record<string, unknown>;
+    if (typeof rawLinks !== 'object' || Array.isArray(rawLinks)) {
+      throw new HttpError(400, 'invalid_links', 'links must be an object');
+    }
+    const cleanLinks: ProfileLinks = {};
+    for (const key of ['website', 'github'] as const) {
+      const v = rawLinks[key];
+      if (v === undefined || v === null || v === '') continue;
+      if (typeof v !== 'string' || !HTTPS_URL.test(v)) {
+        throw new HttpError(400, 'invalid_link', `${key} must be an https URL`);
+      }
+      cleanLinks[key] = v;
+    }
+    return { displayName: trimmedName, bio: cleanBio, skills: cleanSkills, links: cleanLinks };
+  }
+
+  setProfile(address: string, input: ProfileInput, nonce: number): Profile {
+    const existing = this.profiles.get(address);
+    if (existing && nonce <= existing.nonce) {
+      throw new HttpError(409, 'stale_nonce', 'nonce must be strictly greater than stored nonce');
+    }
+    const clean = this.validateProfile(input);
+    const profile: Profile = {
+      address,
+      ...clean,
+      updatedAt: new Date().toISOString(),
+      nonce,
+    };
+    this.profiles.set(address, profile);
+    return profile;
+  }
+
+  searchProfiles(filter: { skill?: string; limit?: number; cursor?: string } = {}): {
+    items: Profile[];
+    nextCursor: string | null;
+  } {
+    const limit = filter.limit && filter.limit > 0 ? Math.min(filter.limit, 100) : 20;
+    let all = [...this.profiles.values()];
+    if (filter.skill) all = all.filter((p) => p.skills.includes(filter.skill as string));
+    all.sort((a, b) => {
+      const diff = this.getReputation(b.address).averageRating - this.getReputation(a.address).averageRating;
+      if (diff !== 0) return diff;
+      return a.address.localeCompare(b.address);
+    });
+    let start = 0;
+    if (filter.cursor) {
+      const idx = all.findIndex((p) => p.address === filter.cursor);
+      start = idx >= 0 ? idx + 1 : 0;
+    }
+    const page = all.slice(start, start + limit);
+    const nextCursor = start + limit < all.length ? page[page.length - 1].address : null;
+    return { items: page, nextCursor };
+  }
+
   stats() {
     const all = this.list();
     const byStatus: Record<string, number> = {};
@@ -578,4 +706,21 @@ export class EscrowStore {
     this.rate(b.id, 5);
     return this;
   }
+}
+
+export function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map((v) => canonicalize(v)).join(',') + ']';
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(obj[k])).join(',') + '}';
+}
+
+export function profileSigningMessage(address: string, nonce: number, profile: unknown): string {
+  const hash = createHash('sha256').update(canonicalize(profile)).digest('hex');
+  return `talenttrust-profile:v1:${address}:${nonce}:${hash}`;
 }

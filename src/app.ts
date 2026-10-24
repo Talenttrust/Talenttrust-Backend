@@ -1,9 +1,11 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
+
 import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
 import { openapi, docsHtml } from './openapi';
+import { ProfileStore, profileSigningMessage } from './profiles';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 
@@ -58,6 +60,7 @@ function resolveStoreAndLogger(
 
 export function createApp(
   storeOrOpts: EscrowStore | { logger?: Logger; store?: EscrowStore; chainReader?: ChainReader } = new EscrowStore().seed(),
+  profileStore: ProfileStore = new ProfileStore(),
   fallbackChainReader?: ChainReader,
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
@@ -131,6 +134,9 @@ export function createApp(
         'POST /api/v1/contracts/:id/link',
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
+        'GET  /api/v1/profiles/:address',
+        'PUT  /api/v1/profiles/:address',
+        'GET  /api/v1/profiles',
       ],
     })),
   );
@@ -154,6 +160,18 @@ export function createApp(
     res.type('html').send(docsHtml);
   });
 
+  const expandParties = (req: Request) => req.query.expand === 'parties';
+  const expandContract = (req: Request, contract: Record<string, unknown>): Record<string, unknown> => {
+    if (!expandParties(req)) return contract;
+    const client = contract.client as string | undefined;
+    const freelancer = contract.freelancer as string | undefined;
+    return {
+      ...contract,
+      clientProfile: client ? profileStore.find(client) ?? null : null,
+      freelancerProfile: freelancer ? profileStore.find(freelancer) ?? null : null,
+    };
+  };
+
   const v1 = express.Router();
   v1.get(
     '/chain',
@@ -171,34 +189,34 @@ export function createApp(
       let linked: boolean | undefined = undefined;
       if (req.query.linked === 'true') linked = true;
       else if (req.query.linked === 'false') linked = false;
-      return {
-        data: store.list({
-          status: typeof req.query.status === 'string' ? req.query.status : undefined,
-          party: typeof req.query.party === 'string' ? req.query.party : undefined,
-          linked,
-        }),
-      };
+      const data = store.list({
+        status: typeof req.query.status === 'string' ? req.query.status : undefined,
+        party: typeof req.query.party === 'string' ? req.query.party : undefined,
+        linked,
+      });
+      return { data: data.map((c) => expandContract(req, c as unknown as Record<string, unknown>)) };
     }),
   );
   v1.post(
     '/contracts',
     wrap((req, res) => {
-      res.status(201).json(store.create(req.body ?? {}));
+      const created = store.create(req.body ?? {});
+      res.status(201).json(expandContract(req, created as unknown as Record<string, unknown>));
     }),
   );
-  v1.get('/contracts/:id', wrap((req) => store.get(id(req))));
-  v1.post('/contracts/:id/deposit', wrap((req) => store.deposit(id(req), req.body?.amount)));
+  v1.get('/contracts/:id', wrap((req) => expandContract(req, store.get(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/deposit', wrap((req) => expandContract(req, store.deposit(id(req), req.body?.amount) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/milestones/:index/release',
-    wrap((req) => store.release(id(req), Number(req.params.index))),
+    wrap((req) => expandContract(req, store.release(id(req), Number(req.params.index)) as unknown as Record<string, unknown>)),
   );
   v1.post(
     '/contracts/:id/dispute',
-    wrap((req) => store.openDispute(id(req), req.body?.raisedBy, req.body?.reason)),
+    wrap((req) => expandContract(req, store.openDispute(id(req), req.body?.raisedBy, req.body?.reason) as unknown as Record<string, unknown>)),
   );
-  v1.post('/contracts/:id/resolve', wrap((req) => store.resolveDispute(id(req), req.body?.freelancerBps)));
-  v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req))));
-  v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
+  v1.post('/contracts/:id/resolve', wrap((req) => expandContract(req, store.resolveDispute(id(req), req.body?.freelancerBps) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/cancel', wrap((req) => expandContract(req, store.cancel(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/reputation', wrap((req) => expandContract(req, store.rate(id(req), req.body?.rating) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/link',
     wrap(async (req) => store.linkEscrow(id(req), req.body?.escrowId, chainReader)),
@@ -208,6 +226,44 @@ export function createApp(
     wrap(async (req) => store.checkParity(id(req), chainReader)),
   );
   v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+
+  v1.get('/profiles/:address', wrap((req) => {
+    const address = profileStore.validateAddress(req.params.address);
+    const profile = profileStore.find(address);
+    if (!profile) throw new HttpError(404, 'profile_not_found', 'Profile not found');
+    return { ...profile, reputation: store.getReputation(address) };
+  }));
+  v1.put('/profiles/:address', wrap((req) => {
+    const address = profileStore.validateAddress(req.params.address);
+    const body = req.body ?? {};
+    const nonce = body.nonce;
+    const signature = body.signature;
+    if (typeof nonce !== 'number' || !Number.isInteger(nonce) || nonce < 1) {
+      throw new HttpError(400, 'invalid_nonce', 'nonce must be a positive integer');
+    }
+    if (typeof signature !== 'string' || signature.length === 0) {
+      throw new HttpError(400, 'invalid_signature', 'signature is required');
+    }
+    const profileInput = profileStore.normalizeInput(body.profile);
+    const message = profileSigningMessage(address, nonce, profileInput);
+    profileStore.verifySignature(address, message, signature);
+    const updated = profileStore.upsert(address, profileInput, nonce);
+    return { ...updated, reputation: store.getReputation(address) };
+  }));
+  v1.get('/profiles', wrap((req) => {
+    const skill = typeof req.query.skill === 'string' ? req.query.skill : undefined;
+    const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    const limit = limitRaw === undefined ? 20 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+    }
+    const result = profileStore.searchBySkill(skill, limit, cursor, (a: string) => store.getReputation(a));
+    return {
+      data: result.data.map((p: { address: string }) => ({ ...p, reputation: store.getReputation(p.address) })),
+      nextCursor: result.nextCursor,
+    };
+  }));
   app.use('/api/v1', v1);
 
   app.use((req, res) => {
