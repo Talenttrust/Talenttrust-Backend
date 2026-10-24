@@ -6,7 +6,7 @@ describe('TalentTrust API', () => {
   const app = createApp(new EscrowStore());
 
   it('serves health and root', async () => {
-    const h = await request(app).get('health');
+    const h = await request(app).get('/health');
     expect(h.status).toBe(200);
     expect(h.body.status).toBe('ok');
     const root = await request(app).get('/');

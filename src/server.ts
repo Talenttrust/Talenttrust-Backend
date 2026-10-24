@@ -81,6 +81,7 @@ export function startServer({
     const addr = server.address() as AddressInfo;
     log(`TalentTrust API listening on http://localhost:${addr.port}`);
   });
+  const boundPort = (server.address() as AddressInfo | null)?.port ?? port;
 
   server.keepAliveTimeout = resolved.keepAliveTimeoutMs;
   server.headersTimeout = resolved.headersTimeoutMs;
@@ -130,6 +131,8 @@ export function startServer({
 
   function handleSigTerm() {
     void close().then((result) => {
+      process.off('SIGTERM', handleSigTerm);
+      process.off('SIGINT', handleSigTerm);
       process.exit(result.forced ? 1 : 0);
     });
   }
@@ -139,7 +142,7 @@ export function startServer({
 
   return {
     server,
-    port: (server.address() as AddressInfo).port,
+    port: boundPort,
     close,
   };
 }

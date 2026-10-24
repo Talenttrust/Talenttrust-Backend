@@ -69,11 +69,10 @@ export class StreamLimits {
 
   tryAcquire(ip: string): 'ok' | 'rate' | 'global' {
     if (this.total >= this.opts.maxGlobal) return 'global';
-    const cur = this.perIp.set(ip, (this.perIp.get(ip) ?? 0) + 1);
-    if (cur > this.opts.maxPerIp) {
-      this.perIp.set(ip, cur - 1);
-      return 'rate';
-    }
+    const current = this.perIp.get(ip) ?? 0;
+    const next = current + 1;
+    if (next > this.opts.maxPerIp) return 'rate';
+    this.perIp.set(ip, next);
     this.total += 1;
     return 'ok';
   }
