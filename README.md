@@ -6,8 +6,8 @@
 - Docs: https://talenttrust-frontend.vercel.app/docs
 - API: https://talenttrust-backend.vercel.app
 - API docs (Swagger UI): https://talenttrust-backend.vercel.app/docs
-- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W)
-
+- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFWWJEOKCH2IFJBZGBKTXK5WH](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFWWJEOKCH2IFJBZGBKTXK5WHY
+ 
 Express + TypeScript API for TalentTrust, a milestone-based freelancer escrow protocol on Stellar.
 The API mirrors the state machine of the Soroban escrow contract
 ([Talenttrust-Contracts](https://github.com/Talenttrust/Talenttrust-Contracts)) so clients and
@@ -41,6 +41,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
 | GET | `/api/v1/contracts/:id/actions?as=<address>` | Allowed actions now, with error codes/reasons, releasable indexes and remaining deposit capacity |
 | GET | `/api/v1/stats` | Aggregate statistics |
+| GET | `/api/v1/accounts/:address/readiness` | Check whether an account can fund an escrow (`token`, `amount` in base units) |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
@@ -272,6 +273,27 @@ npm test
 npm run build && npm start
 ```
 
+Configuration (all optional, see `.env.example`): `PORT`, `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`,
+`STELLAR_RPC_URL`, `HORIZON_URL`, `FRONTEND_URL`, `ACCOUNT_READINESS_FEE_HEADROOM_XLM`,
+`ACCOUNT_READINESS_CACHE_TTL_MS`.
+
+## Account readiness
+
+GET /api/v1/accounts/:address/readiness?token=<native | C...>&amount=<base units> inspects a
+
+Stellar account via Horizon (and, for non-classic tokens, the token contract via Soroban RPC)
+and reports whether it can fund a given amount before the user signs a deposit transaction.
+
+Example:
+
+```bash
+curl -s 'localhost:3001/api/v1/accounts/GB.../readiness?token=native&amount=1000000000' | jq '{canFund, problems}'
+```
+
+Response fields: `address`, `exists`, `xlmBalance`, `minimumBalance`, `availableXlm`, `token`
+`{contractId, kind, trustline, balance, authorized}`, `canFund`, `problems`. Problem codes are
+`account_not_found`, `missing_trustline`, `not_authorized`, `insufficient_balance`, `insufficient_xlm_for_fees`.
+
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
@@ -326,7 +348,8 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+vercel.json
+rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod
