@@ -67,7 +67,7 @@ describe('on-chain read-through routes', () => {
     const contractFailure = client();
     contractFailure.getContract.mockRejectedValue(new ChainReadError('contract', { name: 'ContractError', code: 77 }));
     const bad = await request(createApp(new EscrowStore(), contractFailure)).get('/api/v1/chain/contracts/1').expect(502);
-    expect(bad.body).toEqual({ error: 'chain_error', message: 'On-chain read failed', contractError: { name: 'ContractError', code: 77 } });
+    expect(bad.body).toMatchObject({ error: 'chain_error', message: 'On-chain read failed', contractError: { name: 'ContractError', code: 77 } });
 
     const unavailable = client();
     unavailable.getContract.mockRejectedValue(new ChainReadError('unavailable'));

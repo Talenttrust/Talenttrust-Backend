@@ -3,7 +3,6 @@ import {
   Address,
   Contract,
   Keypair,
-  Networks,
   nativeToScVal,
   rpc,
   scValToNative,
@@ -40,7 +39,7 @@ export class SorobanChainReadClient implements ChainReadClient {
     try {
       const account = new Account(this.source.publicKey(), '0');
       const operationArgs = args.map(([value, type]) => nativeToScVal(value, type as never));
-      const tx = new TransactionBuilder(account, { fee: '100', networkPassphrase: Networks.TESTNET })
+      const tx = new TransactionBuilder(account, { fee: '100', networkPassphrase: config.networkPassphrase })
         .addOperation(new Contract(config.contractId).call(method, ...operationArgs))
         .setTimeout(30)
         .build();
