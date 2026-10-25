@@ -1,12 +1,30 @@
 import { config, explorerUrl } from './config';
+import { ALLOWED_FIELDS } from './utils/project';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
-const ok = (description: string, schema: object = { type: 'object' }) => ({
-  200: { description, content: json(schema) },
+const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
+  200: { description, ...(headers ? { headers } : {}), content: json(schema) },
+});
+const errorResponse = (description: string, schema: object = { $ref: '#/components/schemas/ErrorResponse' }) => ({
+  description,
+  content: json(schema),
 });
 const created = (description: string, schema: object = { type: 'object' }) => ({
   201: { description, content: json(schema) },
 });
+const receiptQueryParam = {
+  name: 'receipt',
+  in: 'query',
+  required: false,
+  schema: { type: 'boolean' },
+  description: 'When true, includes detached JWS Receipt header for the contract state',
+};
+const receiptHeaders = {
+  Receipt: {
+    schema: { type: 'string' },
+    description: 'Detached compact JWS receipt of post-mutation contract state',
+  },
+};
 
 const validationErrorResponse = {
   400: {
@@ -45,13 +63,6 @@ const idParam = {
   schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
   description: 'Contract ID (positive integer)',
 };
-const templateIdParam = {
-  name: 'id',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
-  description: 'Template ID (positive integer)',
-};
 const indexParam = {
   name: 'index',
   in: 'path',
@@ -67,10 +78,62 @@ const addressParam = {
   description: 'Stellar address',
 };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const reviewRef = { $ref: '#/components/schemas/Review' };
+const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
 const reputationRef = { $ref: '#/components/schemas/Reputation' };
-const templateRef = { $ref: '#/components/schemas/Template' };
 
-export const openapi = {
+/**
+ * `?fields=` query parameter shared by GET /contracts and GET /contracts/:id.
+ * Clients may request a subset of EscrowContract fields to reduce payload
+ * size.  `id` is always returned.  Use dot notation for milestone sub-fields
+ * (e.g. `milestones.amount`).  Unknown fields yield a 400 error.
+ */
+const fieldsParam = {
+  name: 'fields',
+  in: 'query',
+  required: false,
+  description:
+    'Comma-separated list of fields to include in the response. ' +
+    '`id` is always returned. Use `milestones.amount` style notation for ' +
+    'nested milestone fields. Unknown fields return 400. ' +
+    `Allowed values: ${ALLOWED_FIELDS.join(', ')}.`,
+  schema: {
+    type: 'string',
+    example: 'title,status,totalAmount',
+  },
+};
+
+const fieldsError = {
+  400: {
+    description: 'Invalid `?fields=` value. The response body lists valid field names.',
+    content: json(errorRef),
+  },
+};
+
+const amountSchema = {
+  oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$' }],
+  description: 'Amount in token base units. Must be a positive integer.',
+};
+const milestonesSchema = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 20,
+  items: {
+    oneOf: [
+      amountSchema,
+      {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          amount: amountSchema,
+        },
+        required: ['amount'],
+      },
+    ],
+  },
+};
+
+const spec = {
   openapi: '3.0.3',
   info: {
     title: 'TalentTrust API',
@@ -78,52 +141,507 @@ export const openapi = {
     description:
       'Milestone-based escrow API for freelancers and clients. State mirrors the TalentTrust ' +
       `Soroban escrow contract on Stellar ${config.network} (${config.contractId}). ` +
-      `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.`,
+      `Explorer: ${explorerUrl()}. Data is held in memory and resets on redeploy.\n\n` +
+      '**Response compression**: The API compresses JSON responses ≥ 1 KB with gzip or Brotli ' +
+      'when the client sends an `Accept-Encoding` header. A `Vary: Accept-Encoding` header is ' +
+      'included on compressed responses.\n\n' +
+      '**Sparse fieldsets**: GET /contracts and GET /contracts/:id accept a `?fields=` query ' +
+      'parameter so clients can download only the fields they need.\n\n' +
+      '**Authentication**: mutating routes accept a bearer token obtained via the auth endpoints. ' +
+      'Call `GET /api/v1/auth/challenge?address=G…`, sign the returned challenge string with your ' +
+      'Stellar ed25519 private key, then `POST /api/v1/auth/token` to receive a short-lived JWT. ' +
+      'Tokens are required when the server runs with `AUTH_SECRET` set (or `AUTH_REQUIRED=true`).',
   },
   servers: [{ url: '/' }],
-  tags: [{ name: 'System' }, { name: 'Contracts' }, { name: 'Reputation' }, { name: 'Templates' }],
+  tags: [
+    { name: 'System' },
+    { name: 'Auth', description: 'Wallet-signature authentication (SEP-10 style)' },
+    { name: 'Contracts' },
+    { name: 'Reputation' },
+    { name: 'Transaction' },
+    { name: 'Receipts' },
+    { name: 'Cron' },
+    { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
+    { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
+    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+  ],
   paths: {
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
-    '/api/v1/chain': {
-      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
+    '/api/v1/templates': {
+      post: {
+        tags: ['Templates'],
+        summary: 'Create a milestone template (fixed amounts or percent of a budget)',
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        responses: { 201: { description: 'Created', content: json({ $ref: '#/components/schemas/Template' }) }, 400: errorResponse('Invalid template') },
+      },
+      get: {
+        tags: ['Templates'],
+        summary: 'List templates of an owner',
+        parameters: [{ name: 'owner', in: 'query', required: true, schema: { type: 'string' } }],
+        responses: { ...ok('Templates', { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } }), 400: errorResponse('owner is required') },
+      },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats') } },
+    '/api/v1/templates/{id}': {
+      get: {
+        tags: ['Templates'],
+        summary: 'Get a template',
+        parameters: [idParam],
+        responses: { ...ok('Template', { $ref: '#/components/schemas/Template' }), 404: errorResponse('Template not found') },
+      },
+      put: {
+        tags: ['Templates'],
+        summary: 'Update a template (owner only; bumps version)',
+        parameters: [idParam],
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        responses: {
+          ...ok('Updated template', { $ref: '#/components/schemas/Template' }),
+          400: errorResponse('Invalid template'),
+          403: errorResponse('Not the owner'),
+          404: errorResponse('Template not found'),
+        },
+      },
+      delete: {
+        tags: ['Templates'],
+        summary: 'Delete a template (owner only; existing contracts are unaffected)',
+        parameters: [idParam],
+        requestBody: { required: true, content: json({ type: 'object', required: ['owner'], properties: { owner: { type: 'string' } } }) },
+        responses: {
+          ...ok('Deleted', { type: 'object', properties: { success: { type: 'boolean' } } }),
+          403: errorResponse('Not the owner'),
+          404: errorResponse('Template not found'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/history': {
+      get: {
+        tags: ['Audit'],
+        summary: 'Get the audit history (successful state transitions) of a contract',
+        parameters: [
+          idParam,
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 }, description: 'Maximum number of entries to return' },
+          { name: 'cursor', in: 'query', schema: { type: 'integer' }, description: 'Sequence number to start after (from nextCursor)' },
+        ],
+        responses: {
+          ...ok('Audit history', {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/AuditEntry' } },
+              nextCursor: { type: 'integer', description: 'Absent on the last page' },
+            },
+          }),
+          400: errorResponse('Invalid id, limit or cursor'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
+    '/api/v1/audit/verify': {
+      get: {
+        tags: ['Audit'],
+        summary: 'Verify the integrity of the hash-chained audit log',
+        responses: ok('Verification result', {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            entries: { type: 'integer' },
+            brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
+          },
+        }),
+      },
+    },
+    '/api/v1/disputes': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'List the admin dispute queue',
+        security: [{ adminToken: [] }],
+        description:
+          'Returns paginated dispute views plus queue-wide summary totals. The summary always ' +
+          'covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes ' +
+          'past their SLA deadline, totalHeld = escrow held across open disputes), regardless of the filters. ' +
+          'Dispute reasons are only exposed here and on /api/v1/disputes/{contractId}.',
+        parameters: [
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'resolved', 'all'], default: 'all' } },
+          {
+            name: 'sort',
+            in: 'query',
+            schema: { type: 'string', enum: ['oldest', 'newest', 'value'], default: 'oldest' },
+            description: 'oldest/newest: by openedAt; value: by held amount descending (ties broken by contractId)',
+          },
+          { name: 'overdue', in: 'query', schema: { type: 'boolean' }, description: 'Only open disputes past their SLA deadline' },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor of a previous request with the same sort' },
+        ],
+        responses: {
+          ...ok('Dispute queue page', { $ref: '#/components/schemas/DisputeQueue' }),
+          400: errorResponse('Invalid status, sort, overdue, limit, or cursor'),
+          401: errorResponse('Missing or invalid admin bearer token'),
+          404: errorResponse('ADMIN_READ_TOKEN is not configured (admin_not_configured)'),
+        },
+      },
+    },
+    '/api/v1/disputes/{contractId}': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'Get the dispute view for a contract',
+        security: [{ adminToken: [] }],
+        parameters: [{ name: 'contractId', in: 'path', required: true, schema: { type: 'integer' } }],
+        responses: {
+          ...ok('Dispute view', { $ref: '#/components/schemas/DisputeView' }),
+          400: errorResponse('contractId must be a positive integer'),
+          401: errorResponse('Missing or invalid admin bearer token'),
+          404: errorResponse('Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured'),
+        },
+      },
+    },
+    '/api/v1/errors': {
+      get: {
+        tags: ['System'],
+        summary: 'Error catalog: every error code with its HTTP status and title',
+        responses: ok('Catalog keyed by error code', { type: 'object', additionalProperties: { type: 'object' } }),
+      },
+    },
+    '/errors/{code}': {
+      get: {
+        tags: ['System'],
+        summary: 'Describe one error code (problem `type` URI); HTML or JSON by Accept',
+        parameters: [{ name: 'code', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Error description'),
+          404: errorResponse('Unknown error code (error_code_not_found)'),
+        },
+      },
+    },
+    '/metrics': {
+      get: {
+        tags: ['System'],
+        summary: 'Prometheus metrics endpoint',
+        description:
+          'Returns Prometheus exposition format text (HTTP RED metrics by route pattern, escrow gauges, ' +
+          '`escrow_mutations_total{action,result}`, process metrics). Requires `Authorization: Bearer <METRICS_TOKEN>`. ' +
+          'Returns 404 when METRICS_TOKEN is unset (endpoint disabled).',
+        security: [{ metricsToken: [] }],
+        responses: {
+          200: { description: 'Prometheus exposition format', content: { 'text/plain': { schema: { type: 'string' } } } },
+          401: errorResponse('Invalid or missing metrics token'),
+          404: errorResponse('Metrics endpoint disabled (METRICS_TOKEN not set)'),
+        },
+      },
+    },
+    '/api/cron/expire-contracts': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Expire due unfunded contracts',
+        description:
+          'Daily sweep (Vercel cron) that moves still-unfunded `Created` contracts past their funding deadline ' +
+          'to `Expired`, refunding any partial funding. Also accepts POST. Requires `Authorization: Bearer ' +
+          '<CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Sweep result', {
+            type: 'object',
+            required: ['expired', 'checkedAt'],
+            properties: {
+              expired: { type: 'array', items: { type: 'integer' } },
+              checkedAt: { type: 'string', format: 'date-time' },
+            },
+          }),
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/extend-deadline': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Extend a contract funding deadline (client only)',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client', 'fundingDeadline'],
+            properties: {
+              client: { type: 'string' },
+              fundingDeadline: { type: 'string', format: 'date-time', description: 'Later than the current deadline, at most 90 days from now' },
+            },
+          }),
+        },
+        responses: {
+          ...ok('Deadline extended', contractRef),
+          400: errorResponse('Invalid deadline (invalid_deadline)'),
+          403: errorResponse('Caller is not the client'),
+          409: errorResponse('Contract has expired (contract_expired)'),
+        },
+      },
+    },
+    '/api/v1/auth/challenge': {
+      get: {
+        tags: ['Auth'],
+        summary: 'Request a sign challenge for a Stellar address',
+        description:
+          'Returns a short-lived HMAC-signed challenge string. ' +
+          'Sign it with the ed25519 private key corresponding to `address` and pass it to `POST /api/v1/auth/token`.',
+        parameters: [
+          {
+            name: 'address',
+            in: 'query',
+            required: true,
+            description: 'Stellar G… ed25519 public key.',
+            schema: { type: 'string' },
+          },
+        ],
+        responses: {
+          ...ok('Challenge issued.', { $ref: '#/components/schemas/ChallengeResponse' }),
+          400: errorResponse('Invalid Stellar address (invalid_address).'),
+        },
+      },
+    },
+    '/api/v1/auth/token': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Exchange a signed challenge for a bearer token',
+        description:
+          'Verifies the HMAC, challenge expiry, address match, and ed25519 signature. ' +
+          'Returns an HS256 JWT (≤ 1 h) to use as `Authorization: Bearer <token>` on protected routes.',
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TokenRequest' }) },
+        responses: {
+          ...ok('Token issued.', { $ref: '#/components/schemas/TokenResponse' }),
+          401: errorResponse('invalid_challenge / challenge_expired / challenge_replayed / invalid_signature.'),
+        },
+      },
+    },
+    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/.well-known/talenttrust-receipts.json': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Published ed25519 public keys for offline JWS receipt verification',
+        responses: ok('Published keys', { $ref: '#/components/schemas/PublishedKeys' }),
+      },
+    },
+    '/api/v1/chain': {
+      get: {
+        tags: ['System'],
+        summary: 'On-chain escrow contract deployment info',
+        responses: ok('Deployment', {
+          type: 'object',
+          properties: {
+            network: { type: 'string' },
+            rpcUrl: { type: 'string' },
+            contractId: { type: 'string' },
+            explorer: { type: 'string' },
+            paused: { type: 'boolean' },
+            pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+          },
+        }),
+      },
+    },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
+    '/api/v1/tx/build': {
+      post: {
+        tags: ['Transaction'],
+        summary: 'Build a simulated, unsigned Soroban transaction for an escrow action',
+        description:
+          'Assembles an unsigned invokeHostFunction transaction against the configured escrow contract, ' +
+          'simulates it via Soroban RPC, and returns the assembled XDR ready for a wallet (Freighter, xBull, …) ' +
+          'to sign. The server never holds or requires user secret keys. `source` must be the Stellar account ' +
+          'that the contract will `require_auth` (client for create/deposit/release/cancel/issue_reputation, ' +
+          'caller for open_dispute). `resolve_dispute` and `set_paused` are admin-only and not buildable.',
+        requestBody: {
+          required: true,
+          content: json({ $ref: '#/components/schemas/TxBuildRequest' }),
+        },
+        responses: {
+          200: { description: 'Simulated, assembled unsigned transaction', content: json({ $ref: '#/components/schemas/TxBuildResponse' }) },
+          400: errorResponse('Invalid action, source, or args; or source does not match the party the contract will require_auth (source_mismatch)', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          403: errorResponse('Admin-only action (resolve_dispute, set_paused) is not buildable', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          404: errorResponse('Source account not found on chain', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          422: errorResponse('Contract simulation failed (contract_error)', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+          503: errorResponse('Stellar RPC unavailable', {
+            $ref: '#/components/schemas/TxBuildErrorResponse',
+          }),
+        },
+      },
+    },
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
-        summary: 'List escrow contracts',
+        summary: 'List escrow contracts with cursor pagination, sorting and filters',
+        description:
+          'Returns a page of contracts (`data`) plus `page: { limit, nextCursor, hasMore }`. Pass ' +
+          '`page.nextCursor` back as `cursor` (with the same `sort`) for the next page; ties are broken by id. ' +
+          'Use `?fields=` to request a sparse response — only the listed fields are included, ' +
+          'reducing payload size for list views.',
         parameters: [
-          { name: 'status', in: 'query', schema: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Page size' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
+          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
+          { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
           { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
+          { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
+          { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
+          { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
+          { name: 'createdBefore', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 upper bound on createdAt' },
+          fieldsParam,
+          { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
         responses: {
-          200: { description: 'Contracts', content: json({ type: 'object', properties: { data: { type: 'array', items: contractRef } } }) },
-          ...validationErrorResponse,
+          ...ok('Paginated contracts', {
+            type: 'object',
+            required: ['data', 'page'],
+            properties: {
+              data: { type: 'array', items: contractRef },
+              page: {
+                type: 'object',
+                required: ['limit', 'hasMore'],
+                properties: {
+                  limit: { type: 'integer' },
+                  nextCursor: { type: 'string', nullable: true },
+                  hasMore: { type: 'boolean' },
+                },
+              },
+            },
+          }),
+          400: errorResponse('invalid_query, invalid_cursor or invalid `?fields=` value'),
         },
       },
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        parameters: [receiptQueryParam],
         requestBody: {
           required: true,
-          content: json({ $ref: '#/components/schemas/CreateContractRequest' }),
+          content: json({
+            type: 'object',
+            required: ['client', 'freelancer'],
+            properties: {
+              title: { type: 'string' },
+              client: { type: 'string' },
+              freelancer: { type: 'string' },
+              token: { type: 'string', default: 'XLM' },
+              fundingDeadline: {
+                type: 'string',
+                format: 'date-time',
+                description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)',
+              },
+              templateId: {
+                type: 'integer',
+                description: 'Create from a milestone template instead of `milestones` (exactly one of the two is required)',
+              },
+              budget: {
+                ...amountSchema,
+                description: 'Total budget in base units; required for percent templates, forbidden otherwise',
+              },
+              milestones: milestonesSchema,
+            },
+          }),
         },
         responses: {
           201: { description: 'Created', content: json(contractRef) },
-          ...errorResponses,
+          400: errorResponse('Invalid contract input'),
         },
       },
     },
     '/api/v1/contracts/{id}': {
-      get: { tags: ['Contracts'], summary: 'Get a contract', parameters: [idParam], responses: { 200: { description: 'Contract', content: json(contractRef) }, ...errorResponses } },
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get a contract',
+        description:
+          'Returns a single contract by numeric ID. ' +
+          'Use `?fields=` to request only a subset of fields.',
+        parameters: [idParam, fieldsParam],
+        responses: {
+          ...ok('Contract', contractRef),
+          400: errorResponse('Invalid contract id or invalid `?fields=` value'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+      patch: {
+        tags: ['Contracts'],
+        summary: 'Edit an unfunded contract',
+        description: 'Only the matching client can edit a contract while it is Created and has received no funds.',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client'],
+            minProperties: 2,
+            properties: {
+              client: { type: 'string' },
+              title: { type: 'string' },
+              milestones: milestonesSchema,
+            },
+          }),
+        },
+        responses: {
+          ...ok('Updated contract', contractRef),
+          400: errorResponse('Empty patch, invalid contract id, or invalid milestones'),
+          403: errorResponse('Client does not own the contract'),
+          404: errorResponse('Contract not found'),
+          409: errorResponse('Contract is funded or no longer editable'),
+        },
+      },
+      delete: {
+        tags: ['Contracts'],
+        summary: 'Withdraw an unfunded contract',
+        description: 'Only the matching client can withdraw a contract while it is Created and has received no funds.',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client'],
+            properties: { client: { type: 'string' } },
+          }),
+        },
+        responses: {
+          204: { description: 'Contract withdrawn' },
+          400: errorResponse('Invalid contract id'),
+          403: errorResponse('Client does not own the contract'),
+          404: errorResponse('Contract not found'),
+          409: errorResponse('Contract is funded or no longer withdrawable'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/revisions': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get contract term revision history',
+        parameters: [idParam],
+        responses: {
+          ...ok('Revision history', {
+            type: 'array',
+            items: { $ref: '#/components/schemas/ContractRevision' },
+          }),
+          400: errorResponse('Invalid contract id'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/receipt': {
+      get: {
+        tags: ['Receipts'],
+        summary: 'Get detached server-signed JWS receipt for a contract',
+        parameters: [idParam],
+        responses: ok('Contract receipt', {
+          type: 'object',
+          properties: { receipt: { type: 'string', description: 'Compact JWS receipt' } },
+        }),
+      },
     },
     '/api/v1/contracts/{id}/deposit': {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/DepositRequest' }) },
-        responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses },
+        requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
+        responses: ok('Updated contract', contractRef),
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -159,63 +677,476 @@ export const openapi = {
       post: {
         tags: ['Reputation'],
         summary: 'Rate the freelancer of a completed contract',
+        description:
+          'Backward-compatible endpoint. Creates a client-to-freelancer review without a comment ' +
+          'and sets the contract reputationIssued flag.',
         parameters: [idParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/RateRequest' }) },
-        responses: { 200: { description: 'Reputation', content: json(reputationRef) }, ...errorResponses },
+        requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
+        responses: {
+          ...ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
+          400: { description: 'invalid_rating', content: json(errorRef) },
+          409: { description: 'already_rated or invalid_status', content: json(errorRef) },
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/reviews': {
+      post: {
+        tags: ['Reputation'],
+        summary: 'Create a review for a contract (client or freelancer)',
+        description:
+          'One review per direction per contract. The reviewer must be a party to the contract, ' +
+          'the contract must be Completed or Resolved. Reviews of Resolved contracts carry ' +
+          "context: 'disputed'.",
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['reviewer', 'rating'],
+            properties: {
+              reviewer: { type: 'string', description: 'Client or freelancer address of the contract' },
+              rating: { type: 'integer', minimum: 1, maximum: 5 },
+              comment: { type: 'string', maxLength: 1000, description: 'Trimmed; control characters rejected' },
+            },
+          }),
+        },
+        responses: {
+          201: { description: 'Created', content: json(reviewRef) },
+          400: { description: 'invalid_rating or invalid_comment', content: json(errorRef) },
+          403: { description: 'forbidden', content: json(errorRef) },
+          404: { description: 'not_found', content: json(errorRef) },
+          409: { description: 'invalid_status or already_reviewed', content: json(errorRef) },
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/link': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Link an API contract to an on-chain Soroban escrow',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['escrowId'],
+            properties: {
+              escrowId: { type: 'string', description: 'On-chain escrow identifier' },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Linked contract', content: json(contractRef) },
+          400: errorResponse('Invalid escrow ID'),
+          404: errorResponse('API contract or on-chain contract not found'),
+          409: errorResponse('Already linked, on-chain escrow taken, or parameters mismatch', {
+            $ref: '#/components/schemas/ChainMismatchError',
+          }),
+          503: errorResponse('Soroban RPC unavailable'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/parity': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Check state parity between API contract and linked on-chain escrow',
+        parameters: [idParam],
+        responses: {
+          200: {
+            description: 'Parity check results',
+            content: json({
+              type: 'object',
+              properties: {
+                status: { type: 'string', enum: ['in_sync', 'drift'] },
+                drift: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/DriftItem' },
+                },
+                checkedAt: { type: 'string', format: 'date-time' },
+                latestLedger: { type: 'integer' },
+              },
+            }),
+          },
+          404: errorResponse('Contract or on-chain escrow not found'),
+          409: errorResponse('Contract is not linked to an on-chain escrow'),
+          503: errorResponse('Soroban RPC unavailable'),
+        },
       },
     },
     '/api/v1/reputation/{address}': {
       get: {
         tags: ['Reputation'],
-        summary: 'Get freelancer reputation',
+        summary: 'Get reputation for an address (freelancer and client)',
         parameters: [addressParam],
-        responses: { 200: { description: 'Reputation', content: json(reputationRef) }, ...errorResponses },
+        responses: ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
       },
     },
-    '/api/v1/templates': {
-      post: {
-        tags: ['Templates'],
-        summary: 'Create a milestone template',
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/CreateTemplateRequest' }) },
-        responses: { 201: { description: 'Created', content: json(templateRef) }, ...errorResponses },
-      },
+    '/api/v1/reputation/{address}/reviews': {
       get: {
-        tags: ['Templates'],
-        summary: 'List milestone templates',
+        tags: ['Reputation'],
+        summary: 'List reviews received by an address, newest first',
         parameters: [
-          { name: 'owner', in: 'query', required: true, schema: { type: 'string', minLength: 1 }, description: 'Template owner address' },
+          addressParam,
+          {
+            name: 'role',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['client_to_freelancer', 'freelancer_to_client'] },
+            description: 'Filter by review direction',
+          },
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', required: false, schema: { type: 'integer' }, description: 'Pagination cursor (the previous page nextCursor)' },
         ],
-        responses: {
-          200: { description: 'Templates', content: json({ type: 'object', properties: { data: { type: 'array', items: templateRef } } }) },
-          ...validationErrorResponse,
-        },
+        responses: ok('Reviews', {
+          type: 'object',
+          properties: {
+            reviews: { type: 'array', items: reviewRef },
+            nextCursor: { type: 'integer', nullable: true },
+          },
+        }),
       },
     },
-    '/api/v1/templates/{id}': {
-      get: {
-        tags: ['Templates'],
-        summary: 'Get a milestone template',
-        parameters: [templateIdParam],
-        responses: { 200: { description: 'Template', content: json(templateRef) }, ...errorResponses },
-      },
-      put: {
-        tags: ['Templates'],
-        summary: 'Update a milestone template (owner only)',
-        parameters: [templateIdParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/UpdateTemplateRequest' }) },
-        responses: { 200: { description: 'Updated template', content: json(templateRef) }, ...errorResponses },
-      },
-      delete: {
-        tags: ['Templates'],
-        summary: 'Delete a milestone template (owner only)',
-        parameters: [templateIdParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/DeleteTemplateRequest' }) },
-        responses: { 200: { description: 'Deleted', content: json({ type: 'object', properties: { success: { type: 'boolean' } } }) }, ...errorResponses },
+    '/api/v1/receipts/verify': {
+      post: {
+        tags: ['Receipts'],
+        summary: 'Verify a server-signed JWS receipt and check against current state',
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['receipt'],
+            properties: { receipt: { type: 'string', description: 'Compact JWS receipt string' } },
+          }),
+        },
+        responses: ok('Verification result', { $ref: '#/components/schemas/ReceiptVerification' }),
       },
     },
   },
   components: {
+    securitySchemes: {
+      adminToken: { type: 'http', scheme: 'bearer', description: 'Static ADMIN_READ_TOKEN value' },
+      metricsToken: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
+      bearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description: 'HS256 JWT obtained via POST /api/v1/auth/token after signing a challenge.',
+      },
+    },
+    parameters: {
+      IdempotencyKey: {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: false,
+        description:
+          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
+          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+        schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
+      },
+    },
+    responses: {
+      InvalidIdempotencyKey: {
+        description: 'Idempotency-Key is malformed (`invalid_idempotency_key`) or missing while required (`idempotency_key_required`)',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyConflict: {
+        description:
+          '`idempotency_request_in_progress`: a request with this key is still running (see `Retry-After`). ' +
+          'Other 409 codes are business-rule conflicts such as `over_funded`.',
+        headers: { 'Retry-After': { schema: { type: 'integer' }, description: 'Seconds to wait before retrying' } },
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+      IdempotencyKeyReused: {
+        description: '`idempotency_key_reused`: the key was already used with a different request body',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
+    },
     schemas: {
+      Template: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          owner: { type: 'string' },
+          name: { type: 'string', maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                amount: { type: 'number', description: 'fixed mode (DEPRECATED — lossy above 2^53; use amountUnits)' },
+                amountUnits: { type: 'string', description: 'fixed mode amount in base units' },
+                percentBps: { type: 'integer', description: 'percent mode share; all shares sum to 10000' },
+              },
+            },
+          },
+          version: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      TemplateInput: {
+        type: 'object',
+        required: ['owner'],
+        properties: {
+          owner: { type: 'string' },
+          name: { type: 'string', maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            items: {
+              oneOf: [
+                { type: 'object', required: ['amount'], properties: { title: { type: 'string' }, amount: amountSchema } },
+                { type: 'object', required: ['percentBps'], properties: { title: { type: 'string' }, percentBps: { type: 'integer', minimum: 1, maximum: 10000 } } },
+              ],
+            },
+          },
+        },
+      },
+      AuditEntry: {
+        type: 'object',
+        description:
+          'hash = sha256(prevHash + canonicalJSON(entry without hash/prevHash)); the first entry chains from 64 zeros. ' +
+          'Dispute reasons are never recorded.',
+        properties: {
+          seq: { type: 'integer' },
+          contractId: { type: 'integer' },
+          action: { type: 'string', enum: ['create', 'deposit', 'release', 'dispute', 'resolve', 'cancel', 'rate'] },
+          actor: { type: 'string', nullable: true, description: 'Authenticated wallet address (or the dispute raiser)' },
+          requestId: { type: 'string', nullable: true },
+          at: { type: 'string', format: 'date-time' },
+          before: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.' },
+              releasedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.' },
+              fundedAmountUnits: { type: 'string' },
+              releasedAmountUnits: { type: 'string' },
+            },
+          },
+          after: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.' },
+              releasedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.' },
+              fundedAmountUnits: { type: 'string' },
+              releasedAmountUnits: { type: 'string' },
+            },
+          },
+          details: { type: 'object' },
+          prevHash: { type: 'string' },
+          hash: { type: 'string' },
+        },
+      },
+      DisputeView: {
+        type: 'object',
+        required: ['contractId', 'title', 'client', 'freelancer', 'raisedBy', 'raisedByRole', 'reason', 'openedAt', 'ageHours', 'held', 'heldUnits', 'slaDeadline', 'overdue'],
+        properties: {
+          contractId: { type: 'integer' },
+          title: { type: 'string' },
+          client: { type: 'string' },
+          freelancer: { type: 'string' },
+          raisedBy: { type: 'string', description: 'Address that opened the dispute' },
+          raisedByRole: { type: 'string', enum: ['client', 'freelancer'] },
+          reason: { type: 'string', description: 'Dispute reason; only exposed on the admin routes' },
+          openedAt: { type: 'string', format: 'date-time' },
+          ageHours: { type: 'number', description: 'Hours since openedAt at the time of the request' },
+          held: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use heldUnits.' },
+          heldUnits: { type: 'string', description: 'Escrow held while the dispute is open (base units); 0 once resolved' },
+          slaDeadline: { type: 'string', format: 'date-time', description: 'openedAt + DISPUTE_SLA_HOURS' },
+          overdue: { type: 'boolean', description: 'True only while open and strictly past slaDeadline' },
+          resolvedAt: { type: 'string', format: 'date-time' },
+          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
+        },
+      },
+      DisputeQueue: {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { $ref: '#/components/schemas/DisputeView' } },
+          summary: {
+            type: 'object',
+            description: 'Queue-wide totals across ALL disputes, ignoring query filters',
+            properties: { open: { type: 'integer' }, overdue: { type: 'integer' }, totalHeld: { type: 'number' } },
+          },
+          page: {
+            type: 'object',
+            properties: { limit: { type: 'integer' }, count: { type: 'integer' }, nextCursor: { type: 'string', nullable: true } },
+          },
+        },
+      },
+      Problem: {
+        type: 'object',
+        description: 'RFC 9457 problem details. `error`/`message` duplicate the code/detail for older clients.',
+        required: ['type', 'title', 'status', 'error', 'message'],
+        properties: {
+          type: { type: 'string', format: 'uri', description: 'https://talenttrust-backend.vercel.app/errors/<code>' },
+          title: { type: 'string' },
+          status: { type: 'integer' },
+          detail: { type: 'string' },
+          error: { type: 'string', description: 'Machine-readable code (see GET /api/v1/errors)' },
+          message: { type: 'string' },
+          requestId: { type: 'string' },
+          contractError: {
+            type: 'object',
+            properties: { name: { type: 'string' }, code: { type: 'integer' } },
+            description: 'Matching Soroban contract error, when there is one',
+          },
+        },
+      },
+      PreconditionFailedResponse: {
+        type: 'object',
+        required: ['error', 'message', 'currentVersion'],
+        properties: {
+          error: { type: 'string', enum: ['precondition_failed'] },
+          message: { type: 'string' },
+          currentVersion: { type: 'integer' },
+        },
+      },
+      ChallengeResponse: {
+        type: 'object',
+        required: ['address', 'challenge', 'expiresAt'],
+        properties: {
+          address: { type: 'string' },
+          challenge: { type: 'string', description: 'Sign these exact UTF-8 bytes with the wallet key.' },
+          expiresAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      TokenRequest: {
+        type: 'object',
+        required: ['address', 'challenge', 'signature'],
+        properties: {
+          address: { type: 'string' },
+          challenge: { type: 'string' },
+          signature: { type: 'string', description: 'Base64 ed25519 signature over the challenge string.' },
+        },
+      },
+      TokenResponse: {
+        type: 'object',
+        properties: {
+          token: { type: 'string' },
+          tokenType: { type: 'string', enum: ['Bearer'] },
+          expiresAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      DriftItem: {
+        type: 'object',
+        properties: {
+          field: { type: 'string', description: 'Field name that drifted' },
+          api: { description: 'Value in off-chain API record' },
+          chain: { description: 'Value in on-chain contract' },
+        },
+        required: ['field', 'api', 'chain'],
+      },
+      ChainInfo: {
+        type: 'object',
+        properties: {
+          escrowId: { type: 'string' },
+          linkedAt: { type: 'string', format: 'date-time' },
+          lastVerifiedAt: { type: 'string', format: 'date-time' },
+          status: { type: 'string', enum: ['in_sync', 'drift', 'unverified'] },
+          drift: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/DriftItem' },
+          },
+        },
+        required: ['escrowId', 'linkedAt', 'lastVerifiedAt', 'status', 'drift'],
+      },
+      ErrorResponse: {
+        type: 'object',
+        properties: {
+          error: { type: 'string' },
+          message: { type: 'string' },
+        },
+        required: ['error', 'message'],
+      },
+      Review: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          contractId: { type: 'integer' },
+          reviewer: { type: 'string' },
+          reviewee: { type: 'string' },
+          role: { type: 'string', enum: ['client_to_freelancer', 'freelancer_to_client'] },
+          rating: { type: 'integer', minimum: 1, maximum: 5 },
+          comment: { type: 'string', maxLength: 1000 },
+          context: { type: 'string', enum: ['disputed'], description: 'Present only for reviews of Resolved contracts' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      Reputation: {
+        type: 'object',
+        properties: {
+          address: { type: 'string' },
+          completedContracts: { type: 'integer' },
+          totalRating: { type: 'integer' },
+          averageRating: { type: 'number' },
+          asClient: {
+            type: 'object',
+            properties: {
+              completedContracts: { type: 'integer' },
+              averageRating: { type: 'number' },
+            },
+          },
+        },
+      },
+      ChainMismatchError: {
+        type: 'object',
+        properties: {
+          error: { type: 'string' },
+          message: { type: 'string' },
+          mismatches: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/DriftItem' },
+          },
+        },
+        required: ['error', 'message'],
+      },
+      PublishedKeys: {
+        type: 'object',
+        properties: {
+          keys: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                kid: { type: 'string' },
+                alg: { type: 'string', enum: ['EdDSA'] },
+                publicKey: { type: 'string' },
+                jwk: {
+                  type: 'object',
+                  properties: {
+                    kty: { type: 'string', enum: ['OKP'] },
+                    crv: { type: 'string', enum: ['Ed25519'] },
+                    x: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      ReceiptVerification: {
+        type: 'object',
+        properties: {
+          valid: { type: 'boolean' },
+          kid: { type: 'string', nullable: true },
+          iat: { type: 'integer', nullable: true },
+          contractId: { type: 'integer', nullable: true },
+          matchesCurrent: { type: 'boolean' },
+        },
+      },
+      Error: {
+        type: 'object',
+        properties: { error: { type: 'string' }, message: { type: 'string' } },
+      },
       EscrowContract: {
         type: 'object',
         properties: {
@@ -231,35 +1162,221 @@ export const openapi = {
               properties: {
                 index: { type: 'integer' },
                 title: { type: 'string' },
-                amount: { type: 'number' },
+                amount: {
+                  description: 'DEPRECATED — lossy above 2^53. Use amountUnits.',
+                  oneOf: [{ type: 'number' }, { type: 'string' }],
+                },
+                amountUnits: {
+                  type: 'string',
+                  description: 'Canonical decimal string amount in token base units (e.g. stroops).',
+                },
                 released: { type: 'boolean' },
               },
             },
           },
-          totalAmount: { type: 'number' },
-          fundedAmount: { type: 'number' },
-          releasedAmount: { type: 'number' },
-          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
-          templateId: { type: 'integer', nullable: true },
-          templateVersion: { type: 'integer', nullable: true },
+          totalAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          totalAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string total in token base units.',
+          },
+          fundedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          fundedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string funded amount in token base units.',
+          },
+          releasedAmount: {
+            description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          releasedAmountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string released amount in token base units.',
+          },
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          reputationIssued: { type: 'boolean' },
+          fundingDeadline: { type: 'string', format: 'date-time' },
+          expiredAt: { type: 'string', format: 'date-time' },
+          refundableAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use refundableAmountUnits.' },
+          refundableAmountUnits: { type: 'string', description: 'Partial funding returned to the client on expiry (base units).' },
+          dispute: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              raisedBy: { type: 'string' },
+              reason: { type: 'string' },
+              openedAt: { type: 'string', format: 'date-time' },
+              freelancerBps: { type: 'integer' },
+              resolvedAt: { type: 'string', format: 'date-time' },
+            },
+          },
+          chain: { $ref: '#/components/schemas/ChainInfo' },
+          revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
+          templateId: { type: 'integer', description: 'Template the milestones were generated from' },
+          templateVersion: { type: 'integer', description: 'Template version used at creation' },
+          version: { type: 'integer', minimum: 1, description: 'Entity version behind the ETag; increments on every state change.' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
-      Reputation: {
+      TxBuildRequest: {
         type: 'object',
+        required: ['action', 'source', 'args'],
         properties: {
-          address: { type: 'string' },
-          completedContracts: { type: 'integer' },
-          totalRating: { type: 'number' },
-          averageRating: { type: 'number' },
+          action: {
+            type: 'string',
+            enum: [
+              'create_contract',
+              'deposit_funds',
+              'release_milestone',
+              'open_dispute',
+              'cancel_contract',
+              'issue_reputation',
+            ],
+          },
+          source: { type: 'string', description: 'Stellar account (G…) that will sign the transaction' },
+          args: {
+            oneOf: [
+              {
+                type: 'object',
+                description: 'create_contract',
+                required: ['client', 'freelancer', 'token', 'milestoneAmounts'],
+                properties: {
+                  client: { type: 'string', description: 'Stellar address' },
+                  freelancer: { type: 'string', description: 'Stellar address' },
+                  token: { type: 'string', description: 'Stellar asset/token address' },
+                  milestoneAmounts: {
+                    type: 'array',
+                    items: { type: 'string', description: 'decimal string within i128 range' },
+                    minItems: 1,
+                    maxItems: 20,
+                  },
+                },
+              },
+              {
+                type: 'object',
+                description: 'deposit_funds',
+                required: ['id', 'amount'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  amount: { type: 'string', description: 'decimal string within i128 range' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'release_milestone',
+                required: ['id', 'index'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  index: { type: 'integer', minimum: 0, description: 'u32 milestone index' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'open_dispute',
+                required: ['id', 'caller'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  caller: { type: 'string', description: 'Stellar address opening the dispute' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'cancel_contract',
+                required: ['id'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                },
+              },
+              {
+                type: 'object',
+                description: 'issue_reputation',
+                required: ['id', 'rating'],
+                properties: {
+                  id: { type: 'string', description: 'u64 escrow id as decimal string' },
+                  rating: { type: 'integer', minimum: 0, description: 'u32 reputation rating' },
+                },
+              },
+            ],
+          },
         },
       },
-      ErrorResponse: {
+      TxBuildResponse: {
         type: 'object',
         properties: {
-          error: { type: 'string' },
+          xdr: { type: 'string', description: 'Base64 unsigned transaction envelope XDR' },
+          networkPassphrase: { type: 'string' },
+          fee: {
+            type: 'object',
+            properties: {
+              inclusion: { type: 'string', description: 'Classic inclusion fee (stroops)' },
+              resource: { type: 'string', description: 'Soroban resource fee (stroops)' },
+              total: { type: 'string', description: 'Total fee (stroops)' },
+            },
+          },
+          minResourceFee: { type: 'string', description: 'Minimum resource fee from simulation (stroops)' },
+          latestLedger: { type: 'integer' },
+          expiresAt: { type: 'string', format: 'date-time', description: 'Approximate transaction expiry from timebounds' },
+          authRequired: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Addresses whose Soroban auth entries the wallet must sign',
+          },
+        },
+      },
+      TxBuildErrorResponse: {
+        type: 'object',
+        properties: {
+          error: {
+            type: 'string',
+            enum: [
+              'invalid_action',
+              'invalid_source',
+              'invalid_args',
+              'source_mismatch',
+              'admin_action_not_buildable',
+              'source_account_not_found',
+              'contract_error',
+              'simulation_failed',
+              'chain_unavailable',
+            ],
+          },
           message: { type: 'string' },
+          contractError: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              code: { type: 'integer' },
+            },
+            description: 'Present only for contract_error responses',
+          },
+          requestId: { type: 'string' },
         },
-        required: ['error', 'message'],
+      },
+      ContractRevision: {
+        type: 'object',
+        required: ['revision', 'at', 'changes'],
+        properties: {
+          revision: { type: 'integer', minimum: 2 },
+          at: { type: 'string', format: 'date-time' },
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['field', 'from', 'to'],
+              properties: {
+                field: { type: 'string', enum: ['title', 'milestones'] },
+                from: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'object' } }] },
+                to: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'object' } }] },
+              },
+            },
+          },
+        },
       },
       ValidationError: {
         type: 'object',
@@ -280,148 +1397,48 @@ export const openapi = {
         },
         required: ['error', 'message', 'details'],
       },
-      Template: {
-        type: 'object',
-        properties: {
-          id: { type: 'integer' },
-          owner: { type: 'string' },
-          name: { type: 'string', maxLength: 80 },
-          description: { type: 'string', maxLength: 500, nullable: true },
-          mode: { type: 'string', enum: ['fixed', 'percent'] },
-          milestones: {
-            type: 'array',
-            items: { $ref: '#/components/schemas/TemplateMilestone' },
-            minItems: 1,
-            maxItems: 20,
-          },
-          version: { type: 'integer' },
-          createdAt: { type: 'string', format: 'date-time' },
-          updatedAt: { type: 'string', format: 'date-time' },
-        },
-        required: ['id', 'owner', 'name', 'mode', 'milestones', 'version', 'createdAt', 'updatedAt'],
-      },
-      TemplateMilestone: {
-        type: 'object',
-        oneOf: [
-          {
-            type: 'object',
-            properties: {
-              title: { type: 'string', maxLength: 120 },
-              amount: { type: 'integer', minimum: 1 },
-            },
-            required: ['amount'],
-            additionalProperties: false,
-          },
-          {
-            type: 'object',
-            properties: {
-              title: { type: 'string', maxLength: 120 },
-              percentBps: { type: 'integer', minimum: 1, maximum: 10000 },
-            },
-            required: ['percentBps'],
-            additionalProperties: false,
-          },
-        ],
-      },
-      CreateTemplateRequest: {
-        type: 'object',
-        required: ['owner', 'name', 'mode', 'milestones'],
-        properties: {
-          owner: { type: 'string', minLength: 1 },
-          name: { type: 'string', minLength: 1, maxLength: 80 },
-          description: { type: 'string', maxLength: 500 },
-          mode: { type: 'string', enum: ['fixed', 'percent'] },
-          milestones: {
-            type: 'array',
-            items: { $ref: '#/components/schemas/TemplateMilestone' },
-            minItems: 1,
-            maxItems: 20,
-          },
-        },
-        additionalProperties: false,
-      },
-      UpdateTemplateRequest: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', minLength: 1, maxLength: 80 },
-          description: { type: 'string', maxLength: 500 },
-          mode: { type: 'string', enum: ['fixed', 'percent'] },
-          milestones: {
-            type: 'array',
-            items: { $ref: '#/components/schemas/TemplateMilestone' },
-            minItems: 1,
-            maxItems: 20,
-          },
-        },
-        additionalProperties: false,
-        minProperties: 1,
-      },
-      DeleteTemplateRequest: {
-        type: 'object',
-        required: ['owner'],
-        properties: {
-          owner: { type: 'string', minLength: 1 },
-        },
-        additionalProperties: false,
-      },
       CreateContractRequest: {
-        oneOf: [
-          {
-            type: 'object',
-            required: ['client', 'freelancer', 'milestones'],
-            properties: {
-              title: { type: 'string', maxLength: 120 },
-              client: { type: 'string', minLength: 1 },
-              freelancer: { type: 'string', minLength: 1 },
-              token: { type: 'string', maxLength: 64 },
-              milestones: {
-                type: 'array',
-                minItems: 1,
-                maxItems: 20,
-                items: {
-                  oneOf: [
-                    { type: 'integer', minimum: 1 },
-                    {
-                      type: 'object',
-                      properties: {
-                        title: { type: 'string', maxLength: 120 },
-                        amount: { type: 'integer', minimum: 1 },
-                      },
-                      required: ['amount'],
-                      additionalProperties: false,
-                    },
-                  ],
+        type: 'object',
+        required: ['client', 'freelancer', 'milestones'],
+        properties: {
+          title: { type: 'string', maxLength: 120 },
+          client: { type: 'string', minLength: 1 },
+          freelancer: { type: 'string', minLength: 1 },
+          token: { type: 'string', maxLength: 64 },
+          fundingDeadline: { type: 'string', format: 'date-time' },
+          milestones: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            items: {
+              oneOf: [
+                amountSchema,
+                {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string', maxLength: 120 },
+                    amount: amountSchema,
+                  },
+                  required: ['amount'],
+                  additionalProperties: false,
                 },
-              },
+              ],
             },
-            additionalProperties: false,
           },
-          {
-            type: 'object',
-            required: ['client', 'freelancer', 'templateId', 'budget'],
-            properties: {
-              title: { type: 'string', maxLength: 120 },
-              client: { type: 'string', minLength: 1 },
-              freelancer: { type: 'string', minLength: 1 },
-              token: { type: 'string', maxLength: 64 },
-              templateId: { type: 'integer', minimum: 1 },
-              budget: { type: 'integer', minimum: 1 },
-            },
-            additionalProperties: false,
-          },
-        ],
+        },
+        additionalProperties: false,
       },
       DepositRequest: {
         type: 'object',
         required: ['amount'],
         properties: {
-          amount: { type: 'integer', minimum: 1 },
+          amount: amountSchema,
         },
         additionalProperties: false,
       },
       DisputeRequest: {
         type: 'object',
-        required: ['raisedBy', 'reason'],
+        required: ['raisedBy'],
         properties: {
           raisedBy: { type: 'string', minLength: 1 },
           reason: { type: 'string', minLength: 1, maxLength: 1000 },
@@ -447,6 +1464,224 @@ export const openapi = {
     },
   },
 };
+
+type Operation = { parameters?: object[]; responses: Record<string, object> };
+
+/** Documents Idempotency-Key and its error statuses on every POST operation. */
+function withIdempotency<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const item of Object.values(paths)) {
+    const op = item.post;
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+    op.responses = {
+      ...op.responses,
+      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+      409: { $ref: '#/components/responses/IdempotencyConflict' },
+      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+    };
+  }
+  return doc;
+}
+
+/** Operations that accept (and, when enabled, require) a wallet bearer token. */
+const PROTECTED: Array<[string, string]> = [
+  ['/api/v1/contracts', 'post'],
+  ['/api/v1/contracts/{id}', 'patch'],
+  ['/api/v1/contracts/{id}', 'delete'],
+  ['/api/v1/contracts/{id}/deposit', 'post'],
+  ['/api/v1/contracts/{id}/extend-deadline', 'post'],
+  ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
+  ['/api/v1/contracts/{id}/dispute', 'post'],
+  ['/api/v1/contracts/{id}/cancel', 'post'],
+  ['/api/v1/contracts/{id}/reputation', 'post'],
+  ['/api/v1/contracts/{id}/reviews', 'post'],
+];
+
+/** Adds bearerAuth security plus 401/403 responses to every protected operation. */
+function withBearerAuth<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, Record<string, (Operation & { security?: object[] }) | undefined>>;
+  for (const [path, method] of PROTECTED) {
+    const op = paths[path]?.[method];
+    if (!op) continue;
+    op.security = [{ bearerAuth: [] }];
+    op.responses = {
+      ...op.responses,
+      401: errorResponse('Missing or invalid bearer token.'),
+      403: errorResponse('Authenticated caller is not the required party for this operation.'),
+    };
+  }
+  return doc;
+}
+
+/** Mutations that accept `?receipt=true` and then return a signed `Receipt` header. */
+const RECEIPT_OPS = [
+  '/api/v1/contracts',
+  '/api/v1/contracts/{id}/deposit',
+  '/api/v1/contracts/{id}/milestones/{index}/release',
+  '/api/v1/contracts/{id}/dispute',
+  '/api/v1/contracts/{id}/resolve',
+  '/api/v1/contracts/{id}/cancel',
+  '/api/v1/contracts/{id}/reputation',
+];
+
+/** Documents the `receipt` query parameter and `Receipt` response header on receipt-capable mutations. */
+function withReceipts<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of RECEIPT_OPS) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    if (!(op.parameters ?? []).includes(receiptQueryParam)) op.parameters = [...(op.parameters ?? []), receiptQueryParam];
+    for (const code of ['200', '201']) {
+      const r = op.responses[code] as { $ref?: string; headers?: object } | undefined;
+      if (r && !r.$ref) r.headers = { ...(r.headers ?? {}), ...receiptHeaders };
+    }
+  }
+  return doc;
+}
+
+const etagHeader = {
+  ETag: { description: 'Strong entity tag (`"<id>-<version>"` for a contract)', schema: { type: 'string' } },
+};
+const ifNoneMatchHeader = {
+  name: 'If-None-Match',
+  in: 'header',
+  required: false,
+  description: 'Entity tag(s) from a previous response; returns 304 Not Modified when current',
+  schema: { type: 'string' },
+};
+const ifMatchHeader = {
+  name: 'If-Match',
+  in: 'header',
+  required: false,
+  description:
+    'Current entity tag (`"<id>-<version>"` or `*`) for optimistic concurrency. Required when the server runs ' +
+    'with REQUIRE_IF_MATCH=true.',
+  schema: { type: 'string' },
+};
+
+/** Documents ETag/If-None-Match on contract reads and If-Match (412/428) on contract mutations. */
+function withEtags<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, Record<string, Operation | undefined>>;
+  for (const path of ['/api/v1/contracts', '/api/v1/contracts/{id}']) {
+    const op = paths[path]?.get;
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), ifNoneMatchHeader];
+    const r = op.responses['200'] as { headers?: object } | undefined;
+    if (r) r.headers = { ...(r.headers ?? {}), ...etagHeader };
+    op.responses = { ...op.responses, 304: { description: 'Not Modified - cached representation is current' } };
+  }
+  const mutations: Array<[string, string]> = [
+    ['/api/v1/contracts/{id}', 'patch'],
+    ['/api/v1/contracts/{id}', 'delete'],
+    ['/api/v1/contracts/{id}/extend-deadline', 'post'],
+    ['/api/v1/contracts/{id}/deposit', 'post'],
+    ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
+    ['/api/v1/contracts/{id}/dispute', 'post'],
+    ['/api/v1/contracts/{id}/resolve', 'post'],
+    ['/api/v1/contracts/{id}/cancel', 'post'],
+    ['/api/v1/contracts/{id}/reputation', 'post'],
+  ];
+  for (const [path, method] of mutations) {
+    const op = paths[path]?.[method];
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), ifMatchHeader];
+    const r = op.responses['200'] as { $ref?: string; headers?: object } | undefined;
+    if (r && !r.$ref) r.headers = { ...(r.headers ?? {}), ...etagHeader };
+    op.responses = {
+      ...op.responses,
+      412: {
+        description: 'Precondition Failed - If-Match does not match the current ETag',
+        headers: etagHeader,
+        content: json({ $ref: '#/components/schemas/PreconditionFailedResponse' }),
+      },
+      428: errorResponse('Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true'),
+    };
+  }
+  const created = (paths['/api/v1/contracts']?.post?.responses['201'] ?? undefined) as { headers?: object } | undefined;
+  if (created) created.headers = { ...(created.headers ?? {}), ...etagHeader };
+  return doc;
+}
+
+const problemContent = { 'application/problem+json': { schema: { $ref: '#/components/schemas/Problem' } } };
+
+/**
+ * Error responses are RFC 9457 problem+json: rewrite every inline 4xx/5xx
+ * response (and the shared component responses) to the Problem schema, and give
+ * every operation at least the generic 500.
+ */
+function withProblems<T extends { paths: object; components: object }>(doc: T): T {
+  const toProblem = (r: { $ref?: string; content?: Record<string, { schema?: object }> }) => {
+    if (r.$ref) return;
+    const schema = r.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    // Keep a more specific error schema (e.g. ChainMismatchError) next to the Problem fields.
+    r.content = schema?.$ref && !/ErrorResponse$/.test(schema.$ref)
+      ? { 'application/problem+json': { schema: { allOf: [{ $ref: '#/components/schemas/Problem' }, schema] } } }
+      : problemContent;
+  };
+  const paths = doc.paths as Record<string, Record<string, Operation>>;
+  for (const item of Object.values(paths)) {
+    for (const op of Object.values(item)) {
+      for (const [code, r] of Object.entries(op.responses)) {
+        if (/^[45]/.test(code)) toProblem(r as Parameters<typeof toProblem>[0]);
+      }
+      if (!op.responses['500']) op.responses = { ...op.responses, 500: { description: 'Unexpected error (internal_error)', content: problemContent } };
+    }
+  }
+  const responses = (doc.components as { responses?: Record<string, Parameters<typeof toProblem>[0]> }).responses ?? {};
+  for (const r of Object.values(responses)) toProblem(r);
+  return doc;
+}
+
+/** Mutations rejected with 503 contract_paused while the escrow contract is paused. */
+function withPauseGuard<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of [
+    '/api/v1/contracts',
+    '/api/v1/contracts/{id}/deposit',
+    '/api/v1/contracts/{id}/milestones/{index}/release',
+    '/api/v1/contracts/{id}/dispute',
+    '/api/v1/contracts/{id}/cancel',
+  ]) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    op.responses = {
+      ...op.responses,
+      503: {
+        description:
+          'contract_paused — the escrow contract is paused on-chain or by API_PAUSED (`Retry-After: 60`, ' +
+          '`contractError: { name: "Paused", code: 4 }`)',
+        headers: { 'Retry-After': { schema: { type: 'integer' } } },
+        content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+      },
+    };
+  }
+  return doc;
+}
+
+/** 413/415 (and invalid_body) on the routes that take a JSON body. */
+function withBodyErrors<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of [
+    '/api/v1/contracts',
+    '/api/v1/contracts/{id}/deposit',
+    '/api/v1/contracts/{id}/dispute',
+    '/api/v1/contracts/{id}/resolve',
+    '/api/v1/contracts/{id}/reputation',
+    '/api/v1/contracts/{id}/link',
+  ]) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    op.responses = {
+      ...op.responses,
+      413: errorResponse('Request body exceeds BODY_LIMIT (payload_too_large)'),
+      415: errorResponse('Content-Type is not application/json, or the charset or content encoding is unsupported (unsupported_media_type)'),
+    };
+  }
+  return doc;
+}
+
+export const openapi = withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))))));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">
