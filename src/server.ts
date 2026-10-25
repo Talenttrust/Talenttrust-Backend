@@ -87,6 +87,9 @@ export function startServer({
 
   server.on('request', (_req, res) => {
     activeRequests++;
+    if (draining) {
+      res.setHeader('Connection', 'close');
+    }
     let finished = false;
     const markDone = () => {
       if (!finished) {
@@ -103,20 +106,19 @@ export function startServer({
     app.set('draining', true);
 
     return new Promise((resolve) => {
+      server.close(() => {
+        // Stopped accepting new connections.
+      });
+      server.closeIdleConnections();
+
       const start = Date.now();
       const poll = () => {
         if (activeRequests === 0) {
-          server.close(() => {
-            // Server stopped accepting new connections.
-          });
           resolve({ forced: false });
           return;
         }
         if (Date.now() - start >= graceMs) {
           server.closeAllConnections();
-          server.close(() => {
-            // Server stopped accepting new connections.
-          });
           resolve({ forced: true });
           return;
         }

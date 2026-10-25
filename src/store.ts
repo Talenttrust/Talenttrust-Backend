@@ -2,7 +2,18 @@
  * In-memory escrow store. Mirrors the state machine of the on-chain Soroban
  * escrow contract so the API can be used without a database. Data lives only
  * for the lifetime of the process (or serverless instance).
+ *
+ * All monetary amounts are stored internally as bigint (token smallest-unit
+ * integers) and serialised as decimal strings in *Units response fields.
+ * The legacy numeric fields (totalAmount, fundedAmount, releasedAmount,
+ * milestone.amount) are kept for backwards compatibility but are documented as
+ * deprecated and lossy above Number.MAX_SAFE_INTEGER.
  */
+
+import { parseAmount, checkedAdd, I128_MAX } from './amount';
+import { HttpError } from './amount-error';
+
+export { HttpError } from './amount-error';
 
 export type ContractStatus =
   | 'Created'
@@ -10,12 +21,41 @@ export type ContractStatus =
   | 'Completed'
   | 'Disputed'
   | 'Resolved'
-  | 'Cancelled';
+  | 'Cancelled'
+  | 'Expired';
+
+export type SortSpec =
+  | 'createdAt'
+  | '-createdAt'
+  | 'updatedAt'
+  | '-updatedAt'
+  | 'totalAmount'
+  | '-totalAmount';
+
+/** Keyset cursor: the sort it was issued for plus the last row's sort value and id. */
+export interface Cursor {
+  sort: string;
+  lastValue: string;
+  lastId: number;
+}
+
+export interface QueryFilters {
+  status?: string[];
+  party?: string;
+  role?: 'client' | 'freelancer';
+  token?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  linked?: boolean;
+}
 
 export interface Milestone {
   index: number;
   title: string;
+  /** @deprecated lossy above 2^53; use amountUnits */
   amount: number | string;
+  /** Canonical decimal-string representation of the milestone amount (base units). */
+  amountUnits: string;
   released: boolean;
 }
 
@@ -48,19 +88,42 @@ export interface EscrowContract {
   freelancer: string;
   token: string;
   milestones: Milestone[];
+  /** @deprecated lossy above 2^53; use totalAmountUnits */
   totalAmount: number | string;
+  /** Canonical decimal-string total (base units). */
+  totalAmountUnits: string;
+  /** @deprecated lossy above 2^53; use fundedAmountUnits */
   fundedAmount: number | string;
+  /** Canonical decimal-string funded amount (base units). */
+  fundedAmountUnits: string;
+  /** @deprecated lossy above 2^53; use releasedAmountUnits */
   releasedAmount: number | string;
+  /** Canonical decimal-string released amount (base units). */
+  releasedAmountUnits: string;
   status: ContractStatus;
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
+  /** Term revision number; starts at 1 and increments on every edit. */
+  revision: number;
+  /** Entity version for ETag / If-Match; starts at 1 and increments on every state change. */
+  version: number;
   createdAt: string;
   updatedAt: string;
+  /** Contracts still `Created` (not fully funded) at this instant expire. */
+  fundingDeadline: string;
+  expiredAt?: string;
+  /** @deprecated lossy above 2^53; use refundableAmountUnits */
+  refundableAmount?: number;
+  /** Amount returned to the client when a partially funded contract expired (base units). */
+  refundableAmountUnits?: string;
 }
 
-import { HttpError, type ErrorKey } from './errors';
-export { HttpError, type ErrorKey };
+export interface ContractRevision {
+  revision: number;
+  at: string;
+  changes: Array<{ field: 'title' | 'milestones'; from: unknown; to: unknown }>;
+}
 
 export interface Reputation {
   address: string;
@@ -69,27 +132,271 @@ export interface Reputation {
   averageRating: number;
 }
 
+export type ReviewRole = 'client_to_freelancer' | 'freelancer_to_client';
+
+export interface Review {
+  id: number;
+  contractId: number;
+  reviewer: string;
+  reviewee: string;
+  role: ReviewRole;
+  rating: number;
+  comment?: string;
+  context?: 'disputed';
+  createdAt: string;
+}
+
+/** Internal store record — keeps bigints for arithmetic. */
+interface InternalContract {
+  id: number;
+  title: string;
+  client: string;
+  freelancer: string;
+  token: string;
+  milestones: Array<{
+    index: number;
+    title: string;
+    amount: bigint;
+    released: boolean;
+  }>;
+  totalAmount: bigint;
+  fundedAmount: bigint;
+  releasedAmount: bigint;
+  status: ContractStatus;
+  reputationIssued: boolean;
+  dispute?: Dispute;
+  chain?: ChainInfo;
+  revision: number;
+  revisions: ContractRevision[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  fundingDeadline: string;
+  expiredAt?: string;
+  refundableAmount?: bigint;
+}
+
 const MAX_MILESTONES = 20;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const DEFAULT_FUNDING_WINDOW_MS = 14 * DAY_MS;
+const MAX_FUNDING_WINDOW_MS = 90 * DAY_MS;
+
+export type Clock = () => Date;
+
+export type MutationRecorder = (action: string, result: string) => void;
+
+/** Store methods counted by escrow_mutations_total, mapped to their `action` label. */
+const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
+  ['create', 'create'],
+  ['deposit', 'deposit'],
+  ['release', 'release'],
+  ['openDispute', 'dispute'],
+  ['resolveDispute', 'resolve'],
+  ['cancel', 'cancel'],
+  ['rate', 'rate'],
+];
+
+const parseIsoMillis = (value: unknown): number | undefined => {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  ) {
+    return undefined;
+  }
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : undefined;
+};
+const MAX_REVISIONS = 50;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
+/** Validate a milestones array into internal (bigint) milestones. */
+function parseMilestones(input: unknown): InternalContract['milestones'] {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+  }
+  if (input.length > MAX_MILESTONES) {
+    throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
+  }
+  return input.map((m: unknown, index: number) => {
+    const raw =
+      typeof m === 'number' || typeof m === 'string' || typeof m === 'boolean'
+        ? { amount: m }
+        : ((m ?? {}) as { title?: unknown; amount?: unknown });
+    const amount = parseAmount(raw.amount, `milestone ${index} amount`);
+    return {
+      index,
+      title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
+      amount,
+      released: false,
+    };
+  });
+}
+
+/** Sum milestone amounts with overflow check (mirrors contract checked_add). */
+function sumMilestones(milestones: InternalContract['milestones']): bigint {
+  let total = 0n;
+  for (let i = 0; i < milestones.length; i++) {
+    total = checkedAdd(total, milestones[i].amount, `milestone ${i} amount`);
+  }
+  return total;
+}
+
+/** JSON-safe snapshot of milestones for revision history. */
+const publicMilestones = (milestones: InternalContract['milestones']): Milestone[] =>
+  milestones.map((m) => ({
+    index: m.index,
+    title: m.title,
+    amount: Number(m.amount),
+    amountUnits: m.amount.toString(),
+    released: m.released,
+  }));
+
+/** Project an internal contract to the public API shape. */
+function toPublic(c: InternalContract): EscrowContract {
+  return {
+    id: c.id,
+    title: c.title,
+    client: c.client,
+    freelancer: c.freelancer,
+    token: c.token,
+    milestones: publicMilestones(c.milestones),
+    totalAmount: Number(c.totalAmount),    // deprecated
+    totalAmountUnits: c.totalAmount.toString(),
+    fundedAmount: Number(c.fundedAmount),  // deprecated
+    fundedAmountUnits: c.fundedAmount.toString(),
+    releasedAmount: Number(c.releasedAmount), // deprecated
+    releasedAmountUnits: c.releasedAmount.toString(),
+    status: c.status,
+    reputationIssued: c.reputationIssued,
+    dispute: c.dispute,
+    chain: c.chain,
+    revision: c.revision,
+    version: c.version,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    fundingDeadline: c.fundingDeadline,
+    expiredAt: c.expiredAt,
+    refundableAmount: c.refundableAmount === undefined ? undefined : Number(c.refundableAmount),
+    refundableAmountUnits: c.refundableAmount?.toString(),
+  };
+}
+
 export class EscrowStore {
-  private contracts = new Map<number, EscrowContract>();
+  private contracts = new Map<number, InternalContract>();
   private reputation = new Map<string, { completed: number; total: number }>();
+  private clientReputation = new Map<string, { completed: number; total: number }>();
+  private reviews: Review[] = [];
+  private nextReviewId = 1;
   private nextId = 1;
 
+  private mutationRecorder: MutationRecorder = () => undefined;
+
+  constructor(private readonly clock: Clock = () => new Date()) {
+    // Count every domain mutation as ok / <error code> for the metrics endpoint.
+    for (const [method, action] of INSTRUMENTED_MUTATIONS) {
+      const self = this as unknown as Record<string, (...args: unknown[]) => unknown>;
+      const original = self[method].bind(this);
+      self[method] = (...args: unknown[]) => {
+        let result: unknown;
+        try {
+          result = original(...args);
+        } catch (err) {
+          this.mutationRecorder(action, err instanceof HttpError ? err.code : 'error');
+          throw err;
+        }
+        this.mutationRecorder(action, 'ok');
+        return result;
+      };
+    }
+  }
+
+  /** Install a callback invoked once per mutation with its action and result (`ok` or error code). */
+  setMutationRecorder(recorder: MutationRecorder): void {
+    this.mutationRecorder = recorder;
+  }
+
+  private now(): Date {
+    return this.clock();
+  }
+
+  private nowIso(): string {
+    return this.now().toISOString();
+  }
+
+  currentTime(): string {
+    return this.nowIso();
+  }
+
+  private validateCreationDeadline(value: unknown, now: number): string {
+    if (value === undefined) return new Date(now + DEFAULT_FUNDING_WINDOW_MS).toISOString();
+    const deadline = parseIsoMillis(value);
+    if (deadline === undefined || deadline < now + HOUR_MS || deadline > now + MAX_FUNDING_WINDOW_MS) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be 1 hour to 90 days in the future');
+    }
+    return new Date(deadline).toISOString();
+  }
+
+  /** Lazily expire a still-unfunded contract whose funding deadline has passed; refunds partial funding. */
+  private expireIfDue(c: InternalContract, now = this.now()): InternalContract {
+    if (c.status === 'Created' && now.getTime() >= Date.parse(c.fundingDeadline)) {
+      c.status = 'Expired';
+      c.expiredAt = now.toISOString();
+      const held = c.fundedAmount - c.releasedAmount;
+      c.refundableAmount = held > 0n ? held : 0n;
+      c.fundedAmount = c.releasedAmount;
+      c.updatedAt = now.toISOString();
+      c.version += 1;
+    }
+    return c;
+  }
+
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
-    return [...this.contracts.values()].filter(
-      (c) =>
-        (!filter.status || c.status === filter.status) &&
-        (!filter.party || c.client === filter.party || c.freelancer === filter.party) &&
-        (filter.linked === undefined || (filter.linked ? !!c.chain : !c.chain)),
-    );
+    return [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
+      .filter(
+        (c) =>
+          (!filter.status || c.status === filter.status) &&
+          (!filter.party || c.client === filter.party || c.freelancer === filter.party) &&
+          (filter.linked === undefined || (filter.linked ? !!c.chain : !c.chain)),
+      )
+      .map(toPublic);
+  }
+
+  /** Filtered, sorted, keyset-paginated listing (ties broken by id). */
+  query(opts: { filters?: QueryFilters; sort?: string; limit?: number; after?: Cursor }): {
+    data: EscrowContract[];
+    hasMore: boolean;
+    nextCursor: Cursor | null;
+  } {
+    const limit = opts.limit ?? 20;
+    const sort = opts.sort ?? '-createdAt';
+    const { field, desc } = parseSort(sort);
+    let items = [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
+      .filter((c) => matchesFilters(c, opts.filters));
+    items.sort((a, b) => compareContracts(a, b, field, desc));
+    const after = opts.after;
+    if (after) items = items.filter((c) => isAfterCursor(c, after, field, desc));
+    const page = items.slice(0, limit + 1);
+    const hasMore = page.length > limit;
+    const data = hasMore ? page.slice(0, limit) : page;
+    let nextCursor: Cursor | null = null;
+    if (hasMore) {
+      const last = data[data.length - 1];
+      nextCursor = { sort, lastValue: String(sortValue(last, field)), lastId: last.id };
+    }
+    return { data: data.map(toPublic), hasMore, nextCursor };
+  }
+
+  private getInternal(id: number): InternalContract {
+    const c = this.contracts.get(id);
+    if (!c) throw new HttpError(404, 'contract_not_found', `Contract ${id} not found`);
+    return this.expireIfDue(c);
   }
 
   get(id: number): EscrowContract {
-    const c = this.contracts.get(id);
-    if (!c) throw new HttpError('contract_not_found', `Contract ${id} not found`);
-    return c;
+    return toPublic(this.getInternal(id));
   }
 
   create(input: {
@@ -98,50 +405,22 @@ export class EscrowStore {
     freelancer?: unknown;
     token?: unknown;
     milestones?: unknown;
+    fundingDeadline?: unknown;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
-      throw new HttpError('invalid_parties');
+      throw new HttpError(400, 'invalid_parties', 'client and freelancer are required strings');
     }
     if (client === freelancer) {
-      throw new HttpError('invalid_parties', 'client and freelancer must differ');
+      throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
-    if (!Array.isArray(input.milestones) || input.milestones.length === 0) {
-      throw new HttpError('invalid_milestones');
-    }
-    if (input.milestones.length > MAX_MILESTONES) {
-      throw new HttpError('invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
-    }
-    const milestones: Milestone[] = input.milestones.map((m: unknown, index: number) => {
-      const raw = (typeof m === 'number' || typeof m === 'string' ? { amount: m } : m) as {
-        title?: unknown;
-        amount?: unknown;
-      };
-      let amount: number | string;
-      if (typeof raw?.amount === 'string' && /^\d+$/.test(raw.amount.trim())) {
-        amount = raw.amount.trim();
-      } else {
-        const num = Number(raw?.amount);
-        if (!Number.isFinite(num) || num <= 0) {
-          throw new HttpError('invalid_amount', `milestone ${index} amount must be positive`);
-        }
-        amount = num;
-      }
-      return {
-        index,
-        title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
-        amount,
-        released: false,
-      };
-    });
+    const milestones = parseMilestones(input.milestones);
+    const totalAmount = sumMilestones(milestones);
 
-    const hasBig = milestones.some((m) => typeof m.amount === 'string');
-    const totalAmount = hasBig
-      ? milestones.reduce((s, m) => s + BigInt(m.amount), 0n).toString()
-      : milestones.reduce((s, m) => s + Number(m.amount), 0);
-
-    const now = new Date().toISOString();
-    const c: EscrowContract = {
+    const nowDate = this.now();
+    const fundingDeadline = this.validateCreationDeadline(input.fundingDeadline, nowDate.getTime());
+    const now = nowDate.toISOString();
+    const c: InternalContract = {
       id: this.nextId++,
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
       client,
@@ -149,105 +428,171 @@ export class EscrowStore {
       token: typeof input.token === 'string' && input.token ? input.token : 'XLM',
       milestones,
       totalAmount,
-      fundedAmount: hasBig ? '0' : 0,
-      releasedAmount: hasBig ? '0' : 0,
+      fundedAmount: 0n,
+      releasedAmount: 0n,
       status: 'Created',
       reputationIssued: false,
+      revision: 1,
+      version: 1,
+      revisions: [],
       createdAt: now,
       updatedAt: now,
+      fundingDeadline,
     };
     this.contracts.set(c.id, c);
-    return c;
+    return toPublic(c);
   }
 
-  private requireActive(c: EscrowContract) {
+  edit(
+    id: number,
+    input: { client?: unknown; title?: unknown; milestones?: unknown },
+  ): EscrowContract {
+    const c = this.getInternal(id);
+    if (input.client !== c.client) {
+      throw new HttpError(403, 'forbidden', 'Only the client can edit this contract');
+    }
+    if (c.status !== 'Created' || c.fundedAmount !== 0n) {
+      throw new HttpError(409, 'contract_locked', 'Contract terms can only be edited before funding');
+    }
+    const hasTitle = Object.prototype.hasOwnProperty.call(input, 'title');
+    const hasMilestones = Object.prototype.hasOwnProperty.call(input, 'milestones');
+    if (!hasTitle && !hasMilestones) {
+      throw new HttpError(400, 'empty_patch', 'At least one of title or milestones must be provided');
+    }
+
+    const changes: ContractRevision['changes'] = [];
+    let title: string | undefined;
+    let milestones: InternalContract['milestones'] | undefined;
+    let totalAmount: bigint | undefined;
+    if (hasTitle) {
+      title = typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement';
+      if (title !== c.title) changes.push({ field: 'title', from: c.title, to: title });
+    }
+    if (hasMilestones) {
+      milestones = parseMilestones(input.milestones);
+      totalAmount = sumMilestones(milestones);
+      const from = publicMilestones(c.milestones);
+      const to = publicMilestones(milestones);
+      if (JSON.stringify(from) !== JSON.stringify(to)) {
+        changes.push({ field: 'milestones', from, to });
+      }
+    }
+
+    const at = new Date().toISOString();
+    if (title !== undefined) c.title = title;
+    if (milestones && totalAmount !== undefined) {
+      c.milestones = milestones;
+      c.totalAmount = totalAmount;
+    }
+    c.revision += 1;
+    c.revisions.push({ revision: c.revision, at, changes });
+    if (c.revisions.length > MAX_REVISIONS) c.revisions.shift();
+    c.updatedAt = at;
+    c.version += 1;
+    return toPublic(c);
+  }
+
+  getRevisions(id: number): ContractRevision[] {
+    return this.getInternal(id).revisions;
+  }
+
+  delete(id: number, clientRaw: unknown): void {
+    const c = this.getInternal(id);
+    if (clientRaw !== c.client) {
+      throw new HttpError(403, 'forbidden', 'Only the client can withdraw this contract');
+    }
+    if (c.status !== 'Created' || c.fundedAmount !== 0n) {
+      throw new HttpError(409, 'contract_locked', 'Contract can only be withdrawn before funding');
+    }
+    this.contracts.delete(id);
+  }
+
+  private requireActive(c: InternalContract) {
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
     if (!ACTIVE.includes(c.status)) {
       throw new HttpError('contract_not_active', `Contract is ${c.status}`);
     }
   }
 
-  private touch(c: EscrowContract) {
-    c.updatedAt = new Date().toISOString();
-    return c;
+  /**
+   * Party check used when the request is authenticated (wallet auth). Mirrors
+   * the contract's `require_auth()` rules. `caller === undefined` means the
+   * request was not authenticated (auth disabled) and keeps legacy behaviour.
+   */
+  private requireClient(c: InternalContract, caller: string | undefined, action: string) {
+    if (caller !== undefined && caller !== c.client) {
+      throw new HttpError(403, 'forbidden', `Only the contract client can ${action}`);
+    }
   }
 
-  deposit(id: number, amountRaw: unknown): EscrowContract {
-    const c = this.get(id);
+  /** Single point that records a successful state change: bumps `version` and `updatedAt`. */
+  private touch(c: InternalContract): EscrowContract {
+    c.version += 1;
+    c.updatedAt = this.nowIso();
+    return toPublic(c);
+  }
+
+  /** @security when `caller` is given it must equal contract.client — mirrors deposit_funds's client.require_auth() */
+  deposit(id: number, amountRaw: unknown, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    this.requireClient(c, caller, 'deposit');
     this.requireActive(c);
-    const isBig =
-      typeof c.totalAmount === 'string' ||
-      (typeof amountRaw === 'string' && /^\d+$/.test(amountRaw));
 
-    if (isBig) {
-      let amount: bigint;
-      try {
-        amount = BigInt(String(amountRaw));
-      } catch {
-        throw new HttpError('invalid_amount', 'amount must be positive');
-      }
-      if (amount <= 0n) {
-        throw new HttpError('invalid_amount', 'amount must be positive');
-      }
-      const curFunded = BigInt(String(c.fundedAmount));
-      const total = BigInt(String(c.totalAmount));
-      if (curFunded + amount > total) {
-        throw new HttpError('over_funded');
-      }
-      c.fundedAmount = (curFunded + amount).toString();
-      if (BigInt(c.fundedAmount) === total) c.status = 'Funded';
-      return this.touch(c);
-    }
+    const amount = parseAmount(amountRaw, 'amount');
 
-    const amount = Number(amountRaw);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new HttpError('invalid_amount');
+    const newFunded = checkedAdd(c.fundedAmount, amount, 'fundedAmount');
+    if (newFunded > c.totalAmount) {
+      throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
     }
-    if (Number(c.fundedAmount) + amount > Number(c.totalAmount)) {
-      throw new HttpError('over_funded');
-    }
-    c.fundedAmount = Number(c.fundedAmount) + amount;
+    c.fundedAmount = newFunded;
     if (c.fundedAmount === c.totalAmount) c.status = 'Funded';
     return this.touch(c);
   }
 
-  release(id: number, index: number): EscrowContract {
-    const c = this.get(id);
+  /** @security when `caller` is given it must equal contract.client — mirrors release_milestone's client.require_auth() */
+  release(id: number, index: number, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    this.requireClient(c, caller, 'release milestones');
     this.requireActive(c);
     const m = c.milestones[index];
-    if (!m) throw new HttpError('milestone_not_found', `Milestone ${index} not found`);
-    if (m.released) throw new HttpError('already_released');
+    if (!m) throw new HttpError(404, 'milestone_not_found', `Milestone ${index} not found`);
+    if (m.released) throw new HttpError(409, 'already_released', 'Milestone already released');
 
-    const isBig = typeof c.totalAmount === 'string' || typeof m.amount === 'string';
-    if (isBig) {
-      const balance = BigInt(String(c.fundedAmount)) - BigInt(String(c.releasedAmount));
-      const needed = BigInt(String(m.amount));
-      if (balance < needed) {
-        throw new HttpError('insufficient_funds');
-      }
-      m.released = true;
-      c.releasedAmount = (BigInt(String(c.releasedAmount)) + needed).toString();
-      if (c.milestones.every((x) => x.released)) c.status = 'Completed';
-      return this.touch(c);
-    }
-
-    if (Number(c.fundedAmount) - Number(c.releasedAmount) < Number(m.amount)) {
-      throw new HttpError('insufficient_funds');
+    const balance = c.fundedAmount - c.releasedAmount;
+    if (balance < m.amount) {
+      throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
     }
     m.released = true;
-    c.releasedAmount = Number(c.releasedAmount) + Number(m.amount);
+    c.releasedAmount = checkedAdd(c.releasedAmount, m.amount, 'releasedAmount');
     if (c.milestones.every((x) => x.released)) c.status = 'Completed';
     return this.touch(c);
   }
 
-  openDispute(id: number, raisedBy: unknown, reason: unknown): EscrowContract {
-    const c = this.get(id);
-    if (raisedBy !== c.client && raisedBy !== c.freelancer) {
-      throw new HttpError('forbidden');
+  /**
+   * @security when `caller` (authenticated address) is given it must be the
+   * client or freelancer — mirrors caller.require_auth(). A body `raisedBy` is
+   * accepted for backwards compatibility but rejected (403) if it differs.
+   */
+  openDispute(id: number, raisedByRaw: unknown, reason: unknown, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    let raisedBy = raisedByRaw;
+    if (caller !== undefined) {
+      if (caller !== c.client && caller !== c.freelancer) {
+        throw new HttpError(403, 'forbidden', 'Only the client or freelancer can open a dispute');
+      }
+      if (raisedByRaw !== undefined && raisedByRaw !== caller) {
+        throw new HttpError(403, 'forbidden', 'raisedBy must match the authenticated address');
+      }
+      raisedBy = caller;
+    } else if (raisedBy !== c.client && raisedBy !== c.freelancer) {
+      throw new HttpError('forbidden', 'Only the client or freelancer can open a dispute');
     }
     this.requireActive(c);
     c.status = 'Disputed';
     c.dispute = {
-      raisedBy,
+      raisedBy: raisedBy as string,
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
       openedAt: new Date().toISOString(),
     };
@@ -255,17 +600,21 @@ export class EscrowStore {
   }
 
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
-    const c = this.get(id);
-    if (c.status !== 'Disputed' || !c.dispute) {
-      throw new HttpError('contract_not_disputed');
+    const c = this.getInternal(id);
+    if (c.status !== 'Disputed') {
+      throw new HttpError('contract_not_disputed', 'Only disputed contracts can be resolved');
     }
     const bps = Number(freelancerBpsRaw);
-    if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) {
-      throw new HttpError('invalid_split');
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
+      throw new HttpError(400, 'invalid_split', 'freelancerBps must be an integer between 0 and 10000');
     }
-    const remaining = Number(c.fundedAmount) - Number(c.releasedAmount);
-    const toFreelancer = Math.round((remaining * bps) / 10000);
-    c.releasedAmount = Number(c.releasedAmount) + toFreelancer;
+    // Mirror the contract's integer arithmetic exactly:
+    //   to_freelancer = held * bps / 10000  (integer division — truncation)
+    //   to_client     = held - to_freelancer
+    //   to_freelancer + to_client == held  (always)
+    const held = c.fundedAmount - c.releasedAmount;
+    const toFreelancer = (held * BigInt(bps)) / 10000n;
+    c.releasedAmount = c.releasedAmount + toFreelancer;
     c.status = 'Resolved';
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
@@ -274,31 +623,134 @@ export class EscrowStore {
     return this.touch(c);
   }
 
-  cancel(id: number): EscrowContract {
-    const c = this.get(id);
+  /** @security when `caller` is given it must equal contract.client — mirrors cancel_contract's client.require_auth() */
+  cancel(id: number, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    this.requireClient(c, caller, 'cancel');
     this.requireActive(c);
     c.status = 'Cancelled';
     return this.touch(c);
   }
 
-  rate(id: number, ratingRaw: unknown): Reputation {
-    const c = this.get(id);
-    if (c.status !== 'Completed') {
-      throw new HttpError('contract_not_completed');
+  private validateComment(commentRaw: unknown): string | undefined {
+    if (commentRaw === undefined || commentRaw === null) return undefined;
+    if (typeof commentRaw !== 'string') {
+      throw new HttpError(400, 'invalid_comment', 'comment must be a string');
     }
-    if (c.reputationIssued) {
-      throw new HttpError('already_rated');
+    const trimmed = commentRaw.trim();
+    if (trimmed.length > 1000) {
+      throw new HttpError(400, 'invalid_comment', 'comment must be at most 1000 characters');
     }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+      throw new HttpError(400, 'invalid_comment', 'comment must not contain control characters');
+    }
+    return trimmed.length ? trimmed : undefined;
+  }
+
+  private validateRating(ratingRaw: unknown): number {
     const rating = Number(ratingRaw);
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-      throw new HttpError('invalid_rating');
+      throw new HttpError(400, 'invalid_rating', 'rating must be an integer from 1 to 5');
     }
-    const r = this.reputation.get(c.freelancer) ?? { completed: 0, total: 0 };
+    return rating;
+  }
+
+  private applyReputation(
+    map: Map<string, { completed: number; total: number }>,
+    address: string,
+    rating: number,
+  ) {
+    const r = map.get(address) ?? { completed: 0, total: 0 };
     r.completed += 1;
     r.total += rating;
-    this.reputation.set(c.freelancer, r);
-    c.reputationIssued = true;
+    map.set(address, r);
+  }
+
+  createReview(
+    id: number,
+    input: { reviewer?: unknown; rating?: unknown; comment?: unknown },
+  ): Review {
+    const c = this.getInternal(id);
+    const { reviewer } = input;
+    if (reviewer !== c.client && reviewer !== c.freelancer) {
+      throw new HttpError(403, 'forbidden', 'Only the client or freelancer can review this contract');
+    }
+    if (c.status !== 'Completed' && c.status !== 'Resolved') {
+      throw new HttpError('contract_not_completed', `Contract is ${c.status}`);
+    }
+    const role: ReviewRole =
+      reviewer === c.client ? 'client_to_freelancer' : 'freelancer_to_client';
+    if (this.reviews.some((r) => r.contractId === id && r.role === role)) {
+      throw new HttpError(409, 'already_reviewed', 'Review already submitted for this direction');
+    }
+    const rating = this.validateRating(input.rating);
+    const comment = this.validateComment(input.comment);
+    const reviewee = role === 'client_to_freelancer' ? c.freelancer : c.client;
+    const review: Review = {
+      id: this.nextReviewId++,
+      contractId: id,
+      reviewer: reviewer as string,
+      reviewee,
+      role,
+      rating,
+      createdAt: new Date().toISOString(),
+    };
+    if (comment !== undefined) review.comment = comment;
+    if (c.status === 'Resolved') review.context = 'disputed';
+    this.reviews.push(review);
+    if (role === 'client_to_freelancer') {
+      this.applyReputation(this.reputation, c.freelancer, rating);
+      c.reputationIssued = true;
+    } else {
+      this.applyReputation(this.clientReputation, c.client, rating);
+    }
     this.touch(c);
+    return review;
+  }
+
+  /** Client-only: move the funding deadline later (at most 90 days from now). */
+  extendDeadline(id: number, client: unknown, fundingDeadline: unknown): EscrowContract {
+    const c = this.getInternal(id);
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
+    if (client !== c.client) {
+      throw new HttpError('forbidden', 'Only the client can extend the funding deadline');
+    }
+    const deadline = parseIsoMillis(fundingDeadline);
+    const now = this.now().getTime();
+    if (deadline === undefined || deadline <= Date.parse(c.fundingDeadline) || deadline > now + MAX_FUNDING_WINDOW_MS) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be later and no more than 90 days away');
+    }
+    c.fundingDeadline = new Date(deadline).toISOString();
+    return this.touch(c);
+  }
+
+  /** Expire every due unfunded contract; returns the ids expired by this sweep (idempotent). */
+  sweepExpired(): number[] {
+    const now = this.now();
+    const expired: number[] = [];
+    for (const c of this.contracts.values()) {
+      const wasExpired = c.status === 'Expired';
+      this.expireIfDue(c, now);
+      if (!wasExpired && c.status === 'Expired') expired.push(c.id);
+    }
+    return expired;
+  }
+
+  /** @security when `caller` is given it must equal contract.client — mirrors issue_reputation's client.require_auth() */
+  rate(id: number, ratingRaw: unknown, caller?: string): Reputation {
+    const c = this.getInternal(id);
+    this.requireClient(c, caller, 'issue reputation');
+    if (c.status !== 'Completed') {
+      throw new HttpError('contract_not_completed', 'Only completed contracts can issue reputation');
+    }
+    if (c.reputationIssued) {
+      throw new HttpError(409, 'reputation_already_issued', 'Reputation already issued for this contract');
+    }
+    const rating = this.validateRating(ratingRaw);
+    this.createReview(id, { reviewer: c.client, rating });
     return this.getReputation(c.freelancer);
   }
 
@@ -307,22 +759,23 @@ export class EscrowStore {
     escrowIdRaw: unknown,
     chainReader: import('./chain').ChainReader,
   ): Promise<EscrowContract> {
-    const c = this.get(id);
+    const c = this.getInternal(id);
     if (typeof escrowIdRaw !== 'string' || !escrowIdRaw.trim()) {
-      throw new HttpError('invalid_escrow_id', 'escrowId must be a non-empty string');
+      throw new HttpError(400, 'invalid_escrow_id', 'escrowId must be a non-empty string');
     }
     const escrowId = escrowIdRaw.trim();
     if (c.chain) {
       throw new HttpError(
+        409,
         'already_linked',
         `Contract ${id} is already linked to on-chain escrow ${c.chain.escrowId}`,
       );
     }
 
-    // Check if another contract is already linked to this escrowId
     for (const other of this.contracts.values()) {
       if (other.id !== id && other.chain?.escrowId === escrowId) {
         throw new HttpError(
+          409,
           'chain_escrow_taken',
           `On-chain escrow ${escrowId} is already linked to contract ${other.id}`,
         );
@@ -334,43 +787,30 @@ export class EscrowStore {
       result = await chainReader.getContract(escrowId);
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError('chain_unavailable', 'Chain RPC service unavailable');
+      throw new HttpError(503, 'chain_unavailable', 'Chain RPC service unavailable');
     }
 
     if (!result || !result.contract) {
-      throw new HttpError(
-        'chain_contract_not_found',
-        `On-chain escrow ${escrowId} not found`,
-      );
+      throw new HttpError(404, 'chain_contract_not_found', `On-chain escrow ${escrowId} not found`);
     }
 
     const onChain = result.contract;
     const mismatches: DriftItem[] = [];
 
-    // Compare client
     if (c.client !== onChain.client) {
       mismatches.push({ field: 'client', api: c.client, chain: onChain.client });
     }
-
-    // Compare freelancer
     if (c.freelancer !== onChain.freelancer) {
       mismatches.push({ field: 'freelancer', api: c.freelancer, chain: onChain.freelancer });
     }
-
-    // Compare token
     if (c.token !== onChain.token) {
       mismatches.push({ field: 'token', api: c.token, chain: onChain.token });
     }
 
-    // Compare milestones: amounts and count (exact BigInt comparison)
-    const apiAmounts = c.milestones.map((m) => String(m.amount));
+    const apiAmounts = c.milestones.map((m) => m.amount.toString());
     const chainAmounts = (onChain.milestones || []).map((m) => String(m.amount));
     if (apiAmounts.length !== chainAmounts.length) {
-      mismatches.push({
-        field: 'milestones.count',
-        api: apiAmounts.length,
-        chain: chainAmounts.length,
-      });
+      mismatches.push({ field: 'milestones.count', api: apiAmounts.length, chain: chainAmounts.length });
     } else {
       for (let i = 0; i < apiAmounts.length; i++) {
         let equal = false;
@@ -380,33 +820,17 @@ export class EscrowStore {
           equal = apiAmounts[i] === chainAmounts[i];
         }
         if (!equal) {
-          mismatches.push({
-            field: `milestones[${i}].amount`,
-            api: apiAmounts[i],
-            chain: chainAmounts[i],
-          });
+          mismatches.push({ field: `milestones[${i}].amount`, api: apiAmounts[i], chain: chainAmounts[i] });
         }
       }
     }
 
     if (mismatches.length > 0) {
-      throw new HttpError(
-        'chain_mismatch',
-        'API contract does not match on-chain escrow parameters',
-        {
-          mismatches,
-        },
-      );
+      throw new HttpError(409, 'chain_mismatch', 'API contract does not match on-chain escrow parameters', { mismatches });
     }
 
     const now = new Date().toISOString();
-    c.chain = {
-      escrowId,
-      linkedAt: now,
-      lastVerifiedAt: now,
-      status: 'in_sync',
-      drift: [],
-    };
+    c.chain = { escrowId, linkedAt: now, lastVerifiedAt: now, status: 'in_sync', drift: [] };
     return this.touch(c);
   }
 
@@ -419,9 +843,9 @@ export class EscrowStore {
     checkedAt: string;
     latestLedger: number;
   }> {
-    const c = this.get(id);
+    const c = this.getInternal(id);
     if (!c.chain) {
-      throw new HttpError('not_linked', `Contract ${id} is not linked to any on-chain escrow`);
+      throw new HttpError(409, 'not_linked', `Contract ${id} is not linked to any on-chain escrow`);
     }
 
     let result: import('./chain').ChainReaderResult | null;
@@ -429,72 +853,47 @@ export class EscrowStore {
       result = await chainReader.getContract(c.chain.escrowId);
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError('chain_unavailable', 'Chain RPC service unavailable');
+      throw new HttpError(503, 'chain_unavailable', 'Chain RPC service unavailable');
     }
 
     if (!result || !result.contract) {
-      throw new HttpError(
-        'chain_contract_not_found',
-        `On-chain escrow ${c.chain.escrowId} not found`,
-      );
+      throw new HttpError(404, 'chain_contract_not_found', `On-chain escrow ${c.chain.escrowId} not found`);
     }
 
     const onChain = result.contract;
     const drift: DriftItem[] = [];
 
-    // Compare fundedAmount (exact string/bigint comparison)
     let fundedEqual = false;
     try {
-      fundedEqual = BigInt(String(c.fundedAmount)) === BigInt(String(onChain.fundedAmount));
+      fundedEqual = c.fundedAmount === BigInt(String(onChain.fundedAmount));
     } catch {
-      fundedEqual = String(c.fundedAmount) === String(onChain.fundedAmount);
+      fundedEqual = c.fundedAmount.toString() === String(onChain.fundedAmount);
     }
     if (!fundedEqual) {
-      drift.push({
-        field: 'fundedAmount',
-        api: String(c.fundedAmount),
-        chain: String(onChain.fundedAmount),
-      });
+      drift.push({ field: 'fundedAmount', api: c.fundedAmount.toString(), chain: String(onChain.fundedAmount) });
     }
 
-    // Compare releasedAmount (exact string/bigint comparison)
     let releasedEqual = false;
     try {
-      releasedEqual = BigInt(String(c.releasedAmount)) === BigInt(String(onChain.releasedAmount));
+      releasedEqual = c.releasedAmount === BigInt(String(onChain.releasedAmount));
     } catch {
-      releasedEqual = String(c.releasedAmount) === String(onChain.releasedAmount);
+      releasedEqual = c.releasedAmount.toString() === String(onChain.releasedAmount);
     }
     if (!releasedEqual) {
-      drift.push({
-        field: 'releasedAmount',
-        api: String(c.releasedAmount),
-        chain: String(onChain.releasedAmount),
-      });
+      drift.push({ field: 'releasedAmount', api: c.releasedAmount.toString(), chain: String(onChain.releasedAmount) });
     }
 
-    // Compare status
     if (c.status !== onChain.status) {
       drift.push({ field: 'status', api: c.status, chain: onChain.status });
     }
-
-    // Compare reputationIssued
     if (c.reputationIssued !== onChain.reputationIssued) {
-      drift.push({
-        field: 'reputationIssued',
-        api: c.reputationIssued,
-        chain: onChain.reputationIssued,
-      });
+      drift.push({ field: 'reputationIssued', api: c.reputationIssued, chain: onChain.reputationIssued });
     }
 
-    // Compare per-milestone released status
     const count = Math.min(c.milestones.length, (onChain.milestones || []).length);
     for (let i = 0; i < count; i++) {
       if (c.milestones[i].released !== onChain.milestones[i].released) {
-        drift.push({
-          field: `milestones[${i}].released`,
-          api: c.milestones[i].released,
-          chain: onChain.milestones[i].released,
-        });
+        drift.push({ field: `milestones[${i}].released`, api: c.milestones[i].released, chain: onChain.milestones[i].released });
       }
     }
 
@@ -505,12 +904,7 @@ export class EscrowStore {
     c.chain.drift = drift;
     this.touch(c);
 
-    return {
-      status: parityStatus,
-      drift,
-      checkedAt: now,
-      latestLedger: result.latestLedger,
-    };
+    return { status: parityStatus, drift, checkedAt: now, latestLedger: result.latestLedger };
   }
 
   getReputation(address: string): Reputation {
@@ -523,19 +917,59 @@ export class EscrowStore {
     };
   }
 
+  getReputationWithClient(address: string): Reputation & {
+    asClient: { completedContracts: number; averageRating: number };
+  } {
+    const base = this.getReputation(address);
+    const cr = this.clientReputation.get(address) ?? { completed: 0, total: 0 };
+    return {
+      ...base,
+      asClient: {
+        completedContracts: cr.completed,
+        averageRating: cr.completed ? Math.round((cr.total / cr.completed) * 100) / 100 : 0,
+      },
+    };
+  }
+
   stats() {
-    const all = this.list();
+    const all = [...this.contracts.values()].map((c) => this.expireIfDue(c));
     const byStatus: Record<string, number> = {};
     for (const c of all) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
+
+    // Sum with bigint to match contract precision; expose as decimal strings.
+    let totalEscrowedBig = 0n;
+    let totalReleasedBig = 0n;
+    for (const c of all) {
+      totalEscrowedBig += c.fundedAmount - c.releasedAmount;
+      totalReleasedBig += c.releasedAmount;
+    }
+
     return {
       contracts: all.length,
       byStatus,
-      totalEscrowed: all.reduce(
-        (s, c) => s + (Number(c.fundedAmount) - Number(c.releasedAmount)),
-        0,
-      ),
-      totalReleased: all.reduce((s, c) => s + Number(c.releasedAmount), 0),
+      /** @deprecated lossy above 2^53; use totalEscrowedUnits */
+      totalEscrowed: Number(totalEscrowedBig),
+      totalEscrowedUnits: totalEscrowedBig.toString(),
+      /** @deprecated lossy above 2^53; use totalReleasedUnits */
+      totalReleased: Number(totalReleasedBig),
+      totalReleasedUnits: totalReleasedBig.toString(),
     };
+  }
+
+  listReviews(
+    address: string,
+    filter: { role?: string; limit?: number; cursor?: number } = {},
+  ): { reviews: Review[]; nextCursor: number | null } {
+    const limit = filter.limit && filter.limit > 0 ? Math.min(filter.limit, 100) : 20;
+    const all = this.reviews
+      .filter((r) => r.reviewee === address)
+      .filter((r) => !filter.role || r.role === filter.role)
+      .sort((a, b) => b.id - a.id);
+    const cursor = filter.cursor;
+    const start = cursor ? all.findIndex((r) => r.id < cursor) : 0;
+    const slice = all.slice(start < 0 ? 0 : start, start < 0 ? 0 : start + limit);
+    const nextCursor = start < 0 ? null : start + limit < all.length ? slice[slice.length - 1]?.id ?? null : null;
+    return { reviews: slice, nextCursor };
   }
 
   /** Seed a few demo engagements so the API is explorable out of the box. */
@@ -546,23 +980,89 @@ export class EscrowStore {
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [
-        { title: 'Wireframes', amount: 250 },
-        { title: 'Visual design', amount: 500 },
-        { title: 'Implementation', amount: 750 },
+        { title: 'Wireframes', amount: 2500000 },
+        { title: 'Visual design', amount: 5000000 },
+        { title: 'Implementation', amount: 7500000 },
       ],
     });
-    this.deposit(a.id, 1500);
+    this.deposit(a.id, 15000000);
     this.release(a.id, 0);
     const b = this.create({
       title: 'Smart contract audit',
       client: 'GCLIENTDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
       freelancer: 'GFREELANCERDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      milestones: [{ title: 'Audit report', amount: 2000 }],
+      milestones: [{ title: 'Audit report', amount: 20000000 }],
     });
-    this.deposit(b.id, 2000);
+    this.deposit(b.id, 20000000);
     this.release(b.id, 0);
     this.rate(b.id, 5);
     return this;
   }
+}
+
+export const LIST_STATUSES: ContractStatus[] = ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'];
+const SORT_FIELDS = ['createdAt', 'updatedAt', 'totalAmount'] as const;
+type SortField = (typeof SORT_FIELDS)[number];
+
+function parseSort(sort: string): { field: SortField; desc: boolean } {
+  const desc = sort.startsWith('-');
+  const field = desc ? sort.slice(1) : sort;
+  if (!(SORT_FIELDS as readonly string[]).includes(field)) {
+    throw new HttpError(400, 'invalid_query', 'invalid sort');
+  }
+  return { field: field as SortField, desc };
+}
+
+function sortValue(c: InternalContract, field: SortField): string | bigint {
+  return field === 'totalAmount' ? c.totalAmount : c[field];
+}
+
+/** Compare two sort values; totalAmount compares as bigint (cursor values arrive as strings). */
+function compareValue(va: string | bigint, vb: string | bigint, field: SortField): number {
+  if (field === 'totalAmount') {
+    let a: bigint;
+    let b: bigint;
+    try {
+      a = BigInt(va);
+      b = BigInt(vb);
+    } catch {
+      throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+    }
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+  const a = String(va);
+  const b = String(vb);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareContracts(a: InternalContract, b: InternalContract, field: SortField, desc: boolean): number {
+  const cmp = compareValue(sortValue(a, field), sortValue(b, field), field);
+  if (cmp !== 0) return desc ? -cmp : cmp;
+  return a.id - b.id;
+}
+
+function matchesFilters(c: InternalContract, f: QueryFilters | undefined): boolean {
+  if (!f) return true;
+  if (f.status && !f.status.includes(c.status)) return false;
+  if (f.party !== undefined) {
+    if (f.role === 'client') {
+      if (c.client !== f.party) return false;
+    } else if (f.role === 'freelancer') {
+      if (c.freelancer !== f.party) return false;
+    } else if (c.client !== f.party && c.freelancer !== f.party) {
+      return false;
+    }
+  }
+  if (f.token && c.token !== f.token) return false;
+  if (f.createdAfter && c.createdAt < f.createdAfter) return false;
+  if (f.createdBefore && c.createdAt > f.createdBefore) return false;
+  if (f.linked !== undefined && !!c.chain !== f.linked) return false;
+  return true;
+}
+
+function isAfterCursor(c: InternalContract, after: Cursor, field: SortField, desc: boolean): boolean {
+  const cmp = compareValue(sortValue(c, field), after.lastValue, field);
+  if (cmp !== 0) return desc ? cmp < 0 : cmp > 0;
+  return c.id > after.lastId;
 }
