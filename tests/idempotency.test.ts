@@ -249,7 +249,7 @@ describe('OpenAPI', () => {
     expect(spec.openapi).toBe('3.0.3');
     expect(spec.components.parameters.IdempotencyKey.name).toBe('Idempotency-Key');
     const posts = Object.entries<Record<string, any>>(spec.paths).filter(([, item]) => item.post); // eslint-disable-line @typescript-eslint/no-explicit-any
-    expect(posts).toHaveLength(8);
+    expect(posts).toHaveLength(13);
     for (const [path, item] of posts) {
       const op = item.post;
       expect(op.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
