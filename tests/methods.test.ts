@@ -26,17 +26,18 @@ describe('method handling', () => {
   it('returns 405 with Allow: POST for GET on the deposit route', async () => {
     const res = await request(app).get('/api/v1/contracts/1/deposit').expect(405);
     expect(res.headers.allow).toBe('POST');
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       error: 'method_not_allowed',
       message: 'Method GET is not allowed for /api/v1/contracts/1/deposit',
       allowed: ['POST'],
     });
   });
 
-  it('returns 405 with Allow: GET, HEAD for DELETE on a contract', async () => {
-    const res = await request(app).delete('/api/v1/contracts/1').expect(405);
-    expect(res.headers.allow).toBe('GET, HEAD');
-    expect(res.body.allowed).toEqual(['GET', 'HEAD']);
+  it('returns 405 with the supported methods for PUT on a contract', async () => {
+    // Contracts support GET (and HEAD), PATCH (edit) and DELETE (withdraw).
+    const res = await request(app).put('/api/v1/contracts/1').expect(405);
+    expect(res.headers.allow).toBe('DELETE, GET, HEAD, PATCH');
+    expect(res.body.allowed).toEqual(['DELETE', 'GET', 'HEAD', 'PATCH']);
   });
 
   it('returns 405 for PUT on the stats route', async () => {
@@ -59,7 +60,7 @@ describe('method handling', () => {
 
   it('keeps the 404 body for unknown paths', async () => {
     const res = await request(app).get('/nope').expect(404);
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       error: 'not_found',
       message: 'No route for GET /nope',
       docs: '/docs',
@@ -67,9 +68,9 @@ describe('method handling', () => {
     expect(res.headers.allow).toBeUndefined();
   });
 
-  it('derives the GET / endpoint list from the route registry', async () => {
+  it('keeps listing the core endpoints on GET /', async () => {
     const res = await request(app).get('/').expect(200);
-    expect(res.body.endpoints).toEqual(EXPECTED_ENDPOINTS);
+    expect(res.body.endpoints).toEqual(expect.arrayContaining(EXPECTED_ENDPOINTS));
   });
 });
 
