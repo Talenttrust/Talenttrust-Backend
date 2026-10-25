@@ -205,18 +205,6 @@ accepted for backwards compatibility but rejected (`403 forbidden`) if it differ
   hashes and `crossorigin="anonymous"`; the page's inline style/script are allowed by exact `sha256`
   hashes derived from the served markup.
 
-Method handling follows the router registry in `src/routes.ts`:
-
-- An unsupported method on a known path returns `405` with an `Allow` header and
-  `{ "error": "method_not_allowed", "message": "...", "allowed": [...] }`.
-- `OPTIONS` on a known path returns `204` with `Allow` (CORS preflight responses
-  keep their CORS headers).
-- `HEAD` is supported for every `GET` route.
-- Unknown paths still return `404` with `{ "error": "not_found", ... }`.
-
-The same registry generates the `endpoints` list served by `GET /` and the
-`405` response documented for every OpenAPI operation.
-
 ## Method handling
 
 - An unsupported method on a known path returns `405 method_not_allowed` with an `Allow` header and
