@@ -48,10 +48,15 @@ export function canonicalJSON(val: unknown): string {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
-    return '[' + val.map(canonicalJSON).join(',') + ']';
+    // Like JSON.stringify: undefined array entries serialise as null.
+    return '[' + val.map((v) => (v === undefined ? 'null' : canonicalJSON(v))).join(',') + ']';
   }
   const obj = val as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
+  // Like JSON.stringify: drop undefined-valued keys, so a contract hashes the
+  // same before and after a JSON round-trip (e.g. `dispute: undefined`).
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort();
   return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJSON(obj[k])).join(',') + '}';
 }
 
