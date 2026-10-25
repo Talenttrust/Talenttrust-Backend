@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Live chain status on `/api/v1/chain` (Issue #1571)
+
+- `GET /api/v1/chain` now includes `onChain`: a cached snapshot read from the
+  Soroban RPC (`version`, `is_paused`, `contract_count`, `get_admin`,
+  `latestLedger`). Cached for 15s (`CHAIN_STATUS_TTL_MS`) with single-flight
+  fetches; RPC failures degrade to the last good snapshot (`stale: true`) or
+  `reachable: false`, and the endpoint still returns 200.
+- `?refresh=true` bypasses the cache, rate-limited to once per 5s
+  (`CHAIN_REFRESH_MIN_INTERVAL_MS`). Per-call RPC timeout is
+  `RPC_TIMEOUT_MS` (default 4000ms).
+- `createApp({ store, chainStatusReader })` dependency injection so tests exercise
+  the endpoint without network I/O.
+
 #### Transaction Poller Lease Fencing (Issue #1210)
 
 - **Lease tokens on transactions**: `Transaction` rows now carry `lease_owner` and
