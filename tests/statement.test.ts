@@ -80,7 +80,9 @@ const OTHER_CLIENT = 'GCLIENTOTHERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 
 // ── Store factory ─────────────────────────────────────────────────────────────
 function buildStore() {
-  const store = new EscrowStore();
+  // The store hands out copies, so backdating goes through its clock instead of mutating results.
+  let now: number | undefined;
+  const store = new EscrowStore(() => new Date(now ?? Date.now()));
 
   // c1: CLIENT=client, FREELANCER=freelancer
   const c1 = store.create({
@@ -99,15 +101,14 @@ function buildStore() {
   });
 
   // c3: CLIENT=client – backdated to 2019 for date-filter tests
+  now = Date.parse('2019-06-15T00:00:00.000Z');
   const c3 = store.create({
     title: 'Old project',
     client: CLIENT,
     freelancer: 'GFIXEDFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     milestones: [{ title: 'Work', amount: 200 }],
   });
-  const old = new Date('2019-06-15T00:00:00.000Z').toISOString();
-  (c3 as Record<string, unknown>).createdAt = old;
-  (c3 as Record<string, unknown>).updatedAt = old;
+  now = undefined;
 
   // c4: injection-risk title
   const c4 = store.create({
