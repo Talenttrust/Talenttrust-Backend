@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import cors, { CorsOptions } from 'cors';
 import { config } from './config';
+import { HttpError } from './amount-error';
 
 const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
 
@@ -50,7 +51,7 @@ export const originGuard = (origins: string[]) => {
     if (!raw) return next();
     const origin = normalizeOrigin(raw);
     if (origin !== undefined && (allowed.has(origin) || origin === ownOrigin(req))) return next();
-    res.status(403).json({ error: 'origin_not_allowed', message: 'Origin is not allowed by CORS policy' });
+    next(new HttpError(403, 'origin_not_allowed', 'Origin is not allowed by CORS policy'));
   };
 };
 
@@ -58,8 +59,17 @@ export const corsOptionsFor = (origins: string[]): CorsOptions => {
   const allowed = new Set(origins);
   return {
     origin: (origin, callback) => callback(null, origin === undefined || allowed.has(normalizeOrigin(origin) ?? '')),
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Accept',
+      'Authorization',
+      'Idempotency-Key',
+      'If-Match',
+      'If-None-Match',
+      'X-Request-Id',
+    ],
+    exposedHeaders: ['ETag', 'Receipt', 'X-Request-Id', 'Idempotent-Replayed', 'Retry-After', 'Location'],
     maxAge: 600,
     credentials: false,
     optionsSuccessStatus: 204,
