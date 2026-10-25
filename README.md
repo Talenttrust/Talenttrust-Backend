@@ -25,7 +25,9 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Service info and endpoint list (JSON) |
-| GET | `/health` | Health check (includes `paused` and `pauseSource`) |
+| GET | `/health` | Health check (includes `paused`, `pauseSource` and, once a probe ran, the last readiness `checks`) |
+| GET | `/health/live` | Liveness probe (always 200 while the process is up) |
+| GET | `/health/ready` | Readiness probe: Soroban RPC, network passphrase, contract, storage |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
 | GET | `/api/v1/chain` | Deployment info, pause state (`paused`, `pauseSource`) and live on-chain status (`onChain`: `version`, `paused`, `contractCount`, `admin`, `latestLedger`); `?refresh=true` bypasses the 15s cache (rate-limited to once per 5s) |
@@ -233,6 +235,15 @@ against every configured digest in constant time, and never echoed back.
 - `GET /api/v1/auth/whoami` returns `{ keyId, scopes }` for the presented key.
 - `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add.
 
+## Health probes
+
+Readiness (`/health/ready`) checks four dependencies in parallel — Soroban RPC `getHealth`, the
+network passphrase, the escrow contract's ledger entry and the store — and answers `200 ready` /
+`200 degraded` (only warnings) / `503 unready`. Results are cached for `HEALTH_CACHE_MS` with
+single-flight, so a burst of probes performs at most one round of RPC calls. Failure details are
+fixed strings and never include the RPC URL. `/health/live` never touches a dependency, and
+`/health` reports the summary of the last readiness run once one has happened.
+
 ## Development
 
 ```bash
@@ -248,7 +259,8 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off) and
-`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
+`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
+result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
