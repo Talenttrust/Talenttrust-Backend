@@ -1,170 +1,75 @@
 /**
  * @module auth/scopedApiKeyMiddleware
- * @description Config-based scoped API key authentication middleware.
- *
- * This module provides middleware for authenticating requests using API keys
- * loaded from the `API_KEYS` environment variable (via {@link parseApiKeysConfig}).
- * Keys are SHA-256 hashed and compared with constant-time comparison.
- *
- * Two middlewares are exported:
- * - `authenticateScopedApiKey` — extracts and validates the key, sets `req.scopedApiKey`.
- * - `requireScope(scope)` — checks that the authenticated key has a specific scope.
- *
- * Usage:
- * ```ts
- * router.post('/contracts/:id/resolve',
- *   authenticateScopedApiKey(apiKeys),
- *   requireScope(SCOPES.DISPUTES_RESOLVE),
- *   handler);
- * ```
+ * @description Scoped API keys (`API_KEYS`) for operator-only routes such as
+ * dispute resolution. Keys are sent as `X-API-Key: <key>` or
+ * `Authorization: ApiKey <key>`, hashed with SHA-256 and compared against
+ * every configured digest in constant time (no early exit, so timing does not
+ * reveal which key id was close). Errors go through the app error handler.
  */
-
-import { Request, Response, NextFunction } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import * as crypto from 'crypto';
-import type { ParsedApiKeys } from '../config/apiKeysConfig';
-import { sha256Hex } from '../config/apiKeysConfig';
+import { HttpError } from '../amount-error';
+import type { ParsedApiKeys } from './apiKeysConfig';
+import { sha256Hex } from './apiKeysConfig';
 
-/**
- * Request augmented with scoped API key info after successful authentication.
- */
 export interface ScopedApiKeyRequest extends Request {
-  scopedApiKey?: {
-    id: string;
-    scopes: string[];
-  };
+  scopedApiKey?: { id: string; scopes: string[] };
 }
 
-/**
- * Extract the raw API key from request headers.
- *
- * Accepted formats:
- * 1. `X-API-Key: <key>`
- * 2. `Authorization: ApiKey <key>`
- *
- * Returns `null` when no key is found or the header is malformed.
- */
-export function extractApiKeyFromHeaders(
-  headers: Record<string, string | string[] | undefined>,
-): string | null {
-  // 1. X-API-Key header
+/** Raw API key from `X-API-Key` or `Authorization: ApiKey <key>`; null when absent. */
+export function extractApiKeyFromHeaders(headers: Record<string, string | string[] | undefined>): string | null {
   const xApiKey = headers['x-api-key'];
-  if (typeof xApiKey === 'string' && xApiKey.trim() !== '') {
-    return xApiKey.trim();
-  }
-
-  // 2. Authorization: ApiKey <key>
+  if (typeof xApiKey === 'string' && xApiKey.trim() !== '') return xApiKey.trim();
   const auth = headers['authorization'];
   if (typeof auth === 'string') {
     const parts = auth.trim().split(/\s+/);
-    if (parts.length === 2 && parts[0].toLowerCase() === 'apikey') {
-      const key = parts[1];
-      if (key.length > 0) return key;
-    }
+    if (parts.length === 2 && parts[0].toLowerCase() === 'apikey' && parts[1].length > 0) return parts[1];
   }
-
   return null;
 }
 
-/**
- * Constant-time comparison of two hex digests.
- *
- * Both buffers must be the same length (SHA-256 hex = 64 chars).
- * Returns `false` if lengths differ — `timingSafeEqual` would throw otherwise.
- */
 function safeCompareHex(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'hex');
   const bufB = Buffer.from(b, 'hex');
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
 }
 
-/**
- * Factory: returns middleware that authenticates a request using a scoped API key.
- *
- * On success, sets `req.scopedApiKey = { id, scopes }` and calls `next()`.
- * On failure, responds with 401 and does NOT call `next()`.
- *
- * @param apiKeys - The parsed API key store from `parseApiKeysConfig()`.
- */
+/** Resolve the presented key (if any) to its configured id and scopes. */
+export function matchApiKey(apiKeys: ParsedApiKeys, rawKey: string): { id: string; scopes: string[] } | null {
+  const incomingDigest = sha256Hex(rawKey);
+  let matched: { id: string; scopes: string[] } | null = null;
+  // Compare against every digest so the time taken does not depend on which key matched.
+  for (const [storedDigest, entry] of apiKeys.byDigest) {
+    if (safeCompareHex(incomingDigest, storedDigest) && !matched) matched = { id: entry.id, scopes: entry.scopes };
+  }
+  return matched;
+}
+
+/** 401 unless a configured API key is presented; sets `req.scopedApiKey`. */
 export function authenticateScopedApiKey(apiKeys: ParsedApiKeys) {
-  return (req: ScopedApiKeyRequest, res: Response, next: NextFunction): void => {
+  return (req: ScopedApiKeyRequest, _res: Response, next: NextFunction): void => {
     const rawKey = extractApiKeyFromHeaders(req.headers as Record<string, string | string[] | undefined>);
-
     if (!rawKey) {
-      res.status(401).json({
-        error: {
-          code: 'unauthorized',
-          message: 'API key required. Provide X-API-Key or Authorization: ApiKey <key>.',
-        },
-      });
-      return;
+      return next(new HttpError(401, 'unauthorized', 'API key required. Provide X-API-Key or Authorization: ApiKey <key>.'));
     }
-
-    // Hash the incoming key and look it up
-    const incomingDigest = sha256Hex(rawKey);
-
-    // Iterate through all keys and compare with constant-time comparison.
-    // Even though we use a Map for O(1) lookup, we compare every key's digest
-    // to avoid leaking which key id was guessed (timing side-channel).
-    let matched: { id: string; scopes: string[] } | null = null;
-    let foundMatch = false;
-
-    for (const [storedDigest, entry] of apiKeys.byDigest) {
-      const isMatch = safeCompareHex(incomingDigest, storedDigest);
-      if (isMatch && !foundMatch) {
-        matched = { id: entry.id, scopes: entry.scopes };
-        foundMatch = true;
-        // Continue iterating to keep timing uniform (don't break early)
-      }
-    }
-
-    if (!matched) {
-      res.status(401).json({
-        error: {
-          code: 'unauthorized',
-          message: 'Invalid API key.',
-        },
-      });
-      return;
-    }
-
+    const matched = matchApiKey(apiKeys, rawKey);
+    if (!matched) return next(new HttpError(401, 'unauthorized', 'Invalid API key.'));
     req.scopedApiKey = matched;
     next();
   };
 }
 
-/**
- * Factory: returns middleware that enforces a specific scope on an authenticated key.
- *
- * - 401 `unauthorized` when no key is present (caller skipped `authenticateScopedApiKey`).
- * - 403 `insufficient_scope` when the key lacks the required scope. The response
- *   body includes `required: <scope>` so the caller knows what is needed.
- *
- * @param scope - The required scope string (e.g. `'disputes:resolve'`).
- */
+/** 403 `insufficient_scope` (with `required`) when the authenticated key lacks `scope`. */
 export function requireScope(scope: string) {
-  return (req: ScopedApiKeyRequest, res: Response, next: NextFunction): void => {
+  return (req: ScopedApiKeyRequest, _res: Response, next: NextFunction): void => {
     if (!req.scopedApiKey) {
-      res.status(401).json({
-        error: {
-          code: 'unauthorized',
-          message: 'Authentication with a scoped API key is required.',
-        },
-      });
-      return;
+      return next(new HttpError(401, 'unauthorized', 'Authentication with a scoped API key is required.'));
     }
-
     if (!req.scopedApiKey.scopes.includes(scope)) {
-      res.status(403).json({
-        error: {
-          code: 'insufficient_scope',
-          message: `The API key does not have the required scope: ${scope}`,
-          required: scope,
-        },
-      });
-      return;
+      return next(
+        new HttpError(403, 'insufficient_scope', `The API key does not have the required scope: ${scope}`, { required: scope }),
+      );
     }
-
     next();
   };
 }

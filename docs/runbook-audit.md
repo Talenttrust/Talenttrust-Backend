@@ -142,6 +142,10 @@ The `createDefaultAuditRepository()` factory in `src/audit/repository.ts`:
 | `[FATAL] Configuration validation failed` | `fatal` | Missing or invalid `COMPLIANCE_AUDIT_SECRET` |
 | `Rate limit exceeded for auditExport` | `warn` | Export rate limit hit — possible abuse |
 | `CSV injection detected` | `warn` | Potentially malicious payload in export field |
+| `Audit SQLite write serialization conflict; retrying` | `warn` | Transient lock contention (`SQLITE_BUSY`/`SQLITE_LOCKED`) — bounded retry in progress |
+| `Audit SQLite schema missing; attempting deterministic repair` | `warn` | Audit table/column/index missing — one-shot idempotent repair before one retry |
+| `Audit SQLite schema repair failed; rethrowing original error` | `error` | Repair could not rebuild the schema (e.g. read-only volume); the original write error surfaces |
+| `Audit row could not be decoded during integrity verification` | `error` | A row (usually malformed `metadata_json`) is unreadable; the report is returned instead of throwing |
 
 ### 3.2 HTTP response codes
 
@@ -227,6 +231,25 @@ ls -la $(dirname $AUDIT_DB_PATH)
 export AUDIT_STORAGE_BACKEND=sqlite
 export AUDIT_DB_PATH=/var/lib/talenttrust/audit.db
 ```
+
+**Automatic recovery (SQLite backend):** the repository already attempts the
+following before the failure reaches the caller, so a 500 normally means the
+recovery path was also exhausted:
+
+1. **Transient lock contention** (`SQLITE_BUSY`/`SQLITE_LOCKED`) is retried up
+to `MAX_WRITE_ATTEMPTS` (3) with a fixed backoff. The transaction re-reads the
+chain tail on every attempt, so a retry never forks the hash chain. Each
+automatic retry emits the `serialization conflict; retrying` warning above.
+2. **Missing schema** (`no such table`/`no such column`/`no such index`) triggers
+exactly one idempotent `initSchema()` repair on the same instance, then one
+retry. This covers an out-of-band `DROP` or a partially-applied migration.
+3. **Any other error** (disk-full, constraint, permission) is thrown on the
+first attempt — a retry loop never masks a real bug.
+
+If logs show `schema repair failed`, the schema could not be rebuilt: check the
+`AUDIT_DB_PATH` volume is writable. To opt out of automatic schema repair and
+fail fast instead, construct the repository with
+`{ autoRepairSchema: false }`.
 
 ### 4.3 Export endpoint returns 500
 

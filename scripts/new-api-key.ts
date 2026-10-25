@@ -15,7 +15,7 @@
  */
 
 import * as crypto from 'crypto';
-import { SCOPES, VALID_SCOPES } from '../src/auth/scopes';
+import { VALID_SCOPES } from '../src/auth/scopes';
 
 const BASE62_CHARS =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';

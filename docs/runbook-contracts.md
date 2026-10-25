@@ -39,9 +39,52 @@ The implementation in
 [`contracts/predictify-hybrid/src/bets.rs`](../contracts/predictify-hybrid/src/bets.rs):
 
 1. requires authorization from the caller;
-2. validates the batch and individual bet data;
-3. uses instance storage for idempotency keys and bet records; and
-4. publishes a `bets_placed` event after the batch succeeds.
+2. validates the batch shape (non-empty, at most `MAX_BETS_PER_BATCH`) and
+   every bet (`market_id != 0`, `amount > 0`, `i128`-safe total) before
+   performing any write;
+3. records one idempotency receipt per `(caller, key)` pair in
+   **temporary** storage, together with a fingerprint of the batch it was
+   spent on, expiring after `IDEM_KEY_TTL_LEDGERS` ledgers (~24 h); and
+4. publishes a `bets_placed` event — plus the legacy `place_bets` event —
+   only after the batch succeeds.
+
+Receipts are deliberately not kept in instance or persistent storage: the
+instance entry is a single bounded ledger entry, and an archived persistent
+entry cannot be read without a paid restore, which would make an expired
+token permanently unusable rather than reusable. See
+`DataKey` in
+[`contracts/predictify-hybrid/src/storage.rs`](../contracts/predictify-hybrid/src/storage.rs).
+
+### Concurrent `place_bets` submissions
+
+Soroban has no compare-and-swap, so mutual exclusion comes from the
+transaction footprint: every invocation declares the receipt entry
+read-write, and the ledger admits at most one transaction per ledger that
+targets the same `(caller, key)`.
+
+That has consequences an operator cannot see from the contract alone:
+
+- A transaction that loses a same-ledger race never executes and never
+  returns a contract error. The submitting client sees a **ledger-level
+  transaction-set conflict**, not `IdempotentBatchAlreadyApplied`. Treat it
+  as retryable: resubmit, and the resubmission lands in a later ledger,
+  reads the receipt, and returns the typed error.
+- A replay under a live token is classified by the stored fingerprint:
+  the same batch returns `IdempotentBatchAlreadyApplied` (code 1); a
+  different batch returns `IdempotencyKeyReusedWithDifferentBatch`
+  (code 7), meaning the caller's batch was **not** applied and it needs a
+  fresh token. The receipt is never overwritten by a rejected call.
+- Every accepted batch bumps the contract instance/code TTL. The instance
+  is a single shared entry, but that bump is threshold-guarded and only
+  performs a write while the contract is already near archival. That is
+  the window in which otherwise-unrelated concurrent `place_bets` calls
+  can start failing with ledger-level conflicts.
+- The all-zero idempotency key opts out of all of this. It has no replay
+  protection and no collision detection, so retries apply repeatedly. It is
+  deprecated; do not use it.
+- Market state is not written by `place_bets` yet. When it is, the same
+  footprint rules apply to shared market entries, and a losing racer must
+  be retried rather than assumed applied.
 
 Storage keys are defined in
 [`contracts/predictify-hybrid/src/storage.rs`](../contracts/predictify-hybrid/src/storage.rs),
@@ -322,6 +365,9 @@ necessary.
 | `/health/ready` returns `503` | SQLite, Redis, or Stellar RPC is unavailable, a probe timed out, or shutdown draining has started | Inspect the non-production check detail or production logs. |
 | Contract API returns `401` or `403` | Missing authentication or insufficient role/ownership permission | Check `src/routes/contracts.routes.ts` and `src/lib/authorization.ts`. |
 | Contract create returns a conflict | Reused idempotency key with a different payload, or an OCC conflict | Check the `Idempotency-Key`, caller identity, and supplied version. |
+| `place_bets` returns `IdempotencyKeyReusedWithDifferentBatch` | The token was already spent on a different batch, either by a concurrent submission or by a client reusing a token | This batch was **not** applied. Generate a fresh 32-byte token; retrying with this one fails again until the receipt expires. |
+| `place_bets` submission fails with a ledger-level conflict, not a contract error | The transaction lost a same-ledger race for the same `(caller, key)` token | Retryable. Resubmit; the retry will land in a later ledger and return a typed contract error. |
+| `place_bets` fails with a host/footprint error after a successful submission | The transaction was simulated against a ledger that storage has since moved past | Discard the simulation and rebuild the transaction from current ledger state. |
 | Contract request returns validation error | DTO, lifecycle, amount, milestone, or identifier bounds failed | Check `src/modules/contracts/dto`, `src/contracts/bounds.ts`, and `src/services/contracts.service.ts`. |
 | Upstream contracts path returns degraded data or `503` | Upstream timeout/error or open `contracts` circuit breaker | Check `UPSTREAM_CONTRACTS_URL`, the breaker probe, and `ContractsClient` logs. |
 | Contract-processing job retries or reaches failed jobs | Invalid contract ID/action, timeout, Redis interruption, or processor error | Inspect job status, structured processor logs, timeout, and retry policy. |

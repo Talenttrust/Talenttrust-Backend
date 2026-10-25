@@ -183,6 +183,32 @@ ever generated. Request-time validation (`requireApiKeyScope` in
 `src/auth/apiKeyMiddleware.ts`) checks the authenticated key's `scope` array
 against the route's required `resource:action` and returns `403` on mismatch.
 
+Since issue #1391, request-time matching is a **closed grammar** rather than
+prefix/suffix matching, so it cannot grant on a scope this service would
+never issue. A stored scope grants a requirement only when it is:
+
+| Stored scope | Grants `contracts:read`? | Note |
+|--------------|---------------------------|------|
+| `*` | yes | full wildcard |
+| `contracts:read` | yes | exact match |
+| `contracts:*` | yes | wildcard action |
+| `*:read` | yes | wildcard resource |
+| `payments:read` | no | different resource |
+| `contracts:read:*` | **no** | three segments — grants nothing |
+| `*:admin:read` | **no** | three segments — grants nothing |
+| `""`, `":"` | **no** | malformed |
+
+Two related fail-closed rules on the request path:
+
+- If the persisted `scope` value is not a JSON array of strings, the request
+  is **denied with 403** (`reason: scope_unreadable`). It is not an error —
+  an authorization decision must never depend on a JSON column being intact.
+- `requireApiKeyScope(resource, action)` throws `TypeError` at route-mount
+  time if either argument is not a non-empty `[a-z-]` segment. A route with a
+  malformed requirement now fails at boot rather than silently widening
+  access; previously `requireApiKeyScope('', 'read')` accepted any
+  `resource:*` scope.
+
 ### 2.3 Admin scope allowlist
 
 `src/middleware/adminAuthGuard.ts` defines:
@@ -223,7 +249,9 @@ inserts never shift already-issued cursors.
 | `"Error rotating API key:"` | `error` (console) | `apiKeyController.rotateApiKeyController` | Unhandled exception during rotation |
 | `"Error deactivating API key:"` | `error` (console) | `apiKeyController.deactivateApiKeyController` | Unhandled exception during deactivation |
 | `"Error getting API key:"` | `error` (console) | `apiKeyController.getApiKeyController` | Unhandled exception during key lookup |
-| `"API key validation error:"` | `error` (console) | `src/auth/apiKeyMiddleware.ts` (`authenticateApiKey`) | `validateApiKey` threw — DB error or crypto failure on the consuming path; results in `500`, not `401` |
+| `"API key validation error:"` | `error` (console) | `src/auth/apiKeyMiddleware.ts` (`authenticateApiKey`) | `validateApiKey` threw — DB error or crypto failure on the consuming path; results in `500`, not `401`. Unchanged by #1391 |
+| `auth_api_key_rejected` | `debug` / `warn` | `src/auth/apiKeyMiddleware.ts` | Credential refused. Carries a stable `reason` and `path`, never the credential. Reason codes: `missing_header`, `key_empty`, `key_blank` (debug); `header_not_string`, `key_too_long`, `key_not_canonical`, `key_rejected` (warn). See docs/runbook-auth.md §3.1.1 |
+| `auth_api_key_scope_denied` | `warn` | `requireApiKeyScope` | Authenticated key lacks the required scope (`scope_mismatch`) or its stored `scope` is unreadable (`scope_unreadable`) |
 
 `validateApiKey` itself (`src/auth/apiKeys.ts`) does **not** log on a simple
 invalid-key or malformed-hash result — those are silent `null` returns by
@@ -238,7 +266,7 @@ exceptions surface as the `"API key validation error:"` log line above.
 | **200** | list/get/rotate/deactivate success | — |
 | **400** | `createApiKeyController` | Missing `name`, non-array/empty `scope`, or malformed scope string |
 | **400** | `listApiKeysController` | Malformed or tampered `cursor` |
-| **401** | Consuming path (`authenticateApiKey`) | Missing `X-API-Key` header, or key fails validation (invalid, expired-and-just-deactivated, malformed stored hash) |
+| **401** | Consuming path (`authenticateApiKey`) | Missing or empty `X-API-Key` header (`Missing X-API-Key header`); or a key that is malformed, oversized, not 64 lowercase hex characters, or fails validation — invalid, expired-and-just-deactivated, malformed stored hash (`Invalid API key`). Since #1391 a malformed credential is always a 401, never a 500 |
 | **401** | Management path (all controllers) | `req.user` not set — caller not authenticated via JWT/legacy bearer |
 | **403** | Consuming path (`requireApiKeyScope`) | Authenticated key's `scope` does not satisfy the required `resource:action` |
 | **403** | Management path (get/rotate/deactivate) | `existingKey.created_by !== req.user.userId` — caller does not own the key |
