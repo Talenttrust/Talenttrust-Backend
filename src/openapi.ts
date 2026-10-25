@@ -1357,7 +1357,7 @@ const spec = {
           total_amount: { type: 'number', description: 'Sum of all milestone amounts' },
           funded_amount: { type: 'number', description: 'Total deposited into escrow' },
           released_amount: { type: 'number', description: 'Total released to freelancer' },
-          outstanding_amount: { type: 'number', description: 'funded_amount − released_amount' },
+          outstanding_amount: { type: 'number', description: 'Still held in escrow: funded_amount − released_amount while live, 0 once resolved, cancelled or expired' },
           total_amount_units: { type: 'string', description: 'Exact total in base units (the CSV uses these exact values)' },
           funded_amount_units: { type: 'string' },
           released_amount_units: { type: 'string' },

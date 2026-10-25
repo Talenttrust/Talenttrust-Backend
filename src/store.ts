@@ -1637,7 +1637,9 @@ export class EscrowStore {
         return created >= from.getTime() && created < to.getTime();
       })
       .map((c): StatementRow => {
-        const outstanding = c.fundedAmount - c.releasedAmount;
+        // Funds are only still held while the contract is live; resolution/cancellation/expiry pays out the rest.
+        const holding = c.status === 'Created' || c.status === 'Funded' || c.status === 'Disputed';
+        const outstanding = holding ? c.fundedAmount - c.releasedAmount : 0n;
         const asClient = c.client === address;
         return {
           contract_id: String(c.id),
