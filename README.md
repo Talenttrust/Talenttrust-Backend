@@ -36,6 +36,8 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/chain/events` | Indexed contract events (`?escrowId=`, `?type=`, `?limit=`, `?cursor=`), newest first |
 | GET | `/api/v1/chain/indexer` | Event indexer status (cursor, last run, last error, lag) |
 | GET/POST | `/api/cron/index-events` | Index a batch of contract events (`Authorization: Bearer $CRON_SECRET`) |
+| GET | `/api/v1/parties/:address/statement.csv` | Downloadable RFC 4180 CSV statement for an address (`?from=&to=&role=client\|freelancer\|all&bom=true`; formula-injection safe) |
+| GET | `/api/v1/parties/:address/statement.json` | Same rows as JSON |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |

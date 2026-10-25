@@ -1004,7 +1004,7 @@ export function createApp(
         `attachment; filename="talenttrust-${safeAddress}-${from.toISOString().slice(0, 10)}-${to.toISOString().slice(0, 10)}.csv"`,
       );
       if (bom) res.write('\uFEFF'); // UTF-8 BOM for Excel when ?bom=true
-      res.write(csvRow(CSV_HEADERS));
+      res.write(csvRow([...CSV_HEADERS]));
       for (const row of rows) {
         // Amount columns carry the exact base-unit decimal strings.
         res.write(
