@@ -73,6 +73,11 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
+// ── Date range covering everything created "now" (within the 3-year maximum) ──
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RECENT_FROM = new Date(Date.now() - 2 * 365 * DAY_MS).toISOString().slice(0, 10);
+const RECENT_TO = new Date(Date.now() + DAY_MS).toISOString().slice(0, 10);
+
 // ── Addresses used across tests ───────────────────────────────────────────────
 const CLIENT     = 'GCLIENTTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const FREELANCER = 'GFREELANCERTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -137,7 +142,7 @@ describe('Statement CSV – headers and structure', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
@@ -160,7 +165,7 @@ describe('Statement CSV – headers and structure', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     const rows = parseCsv(res.text);
     expect(rows[0]).toEqual([
@@ -179,7 +184,7 @@ describe('Statement CSV – role and party filtering', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', role: 'client' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, role: 'client' });
 
     const rows = parseCsv(res.text).slice(1);
     expect(rows.length).toBeGreaterThanOrEqual(1);
@@ -190,7 +195,7 @@ describe('Statement CSV – role and party filtering', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${FREELANCER}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', role: 'freelancer' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, role: 'freelancer' });
 
     const rows = parseCsv(res.text).slice(1);
     expect(rows.length).toBe(2);
@@ -201,7 +206,7 @@ describe('Statement CSV – role and party filtering', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${FREELANCER}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', role: 'client' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, role: 'client' });
 
     const rows = parseCsv(res.text).slice(1);
     expect(rows.length).toBe(0);
@@ -225,7 +230,7 @@ describe('Statement CSV – role and party filtering', () => {
 
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', role: 'all' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, role: 'all' });
 
     const rows = parseCsv(res.text).slice(1);
     expect(rows.length).toBe(2);
@@ -244,7 +249,7 @@ describe('Statement CSV – date range filtering', () => {
     // c3 was backdated to 2019; a from=2020 range should exclude it
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     const rows = parseCsv(res.text).slice(1);
     for (const row of rows) {
@@ -313,7 +318,7 @@ describe('Statement CSV – error cases', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', role: 'owner' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, role: 'owner' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_role');
   });
@@ -327,7 +332,7 @@ describe('Statement CSV – injection protection', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     // Raw CSV must contain the prefixed cell: '=HYPERLINK(...)
     expect(res.text).toContain("'=HYPERLINK(");
@@ -337,7 +342,7 @@ describe('Statement CSV – injection protection', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     const rows = parseCsv(res.text).slice(1);
     const injRow = rows.find((r) => r[1].includes('HYPERLINK'));
@@ -351,7 +356,7 @@ describe('Statement CSV – injection protection', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     const rows = parseCsv(res.text).slice(1);
     const specialRow = rows.find((r) => r[1].includes('quoted'));
@@ -383,7 +388,7 @@ describe('Statement CSV – BOM', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     expect(res.text.startsWith('\uFEFF')).toBe(false);
   });
@@ -392,7 +397,7 @@ describe('Statement CSV – BOM', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`)
-      .query({ from: '2020-01-01', to: '2030-01-01', bom: 'true' });
+      .query({ from: RECENT_FROM, to: RECENT_TO, bom: 'true' });
 
     expect(res.status).toBe(200);
     expect(res.text.startsWith('\uFEFF')).toBe(true);
@@ -410,7 +415,7 @@ describe('Statement JSON endpoint', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.json`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
@@ -420,7 +425,7 @@ describe('Statement JSON endpoint', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.json`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     expect(res.body).toHaveProperty('address', CLIENT);
     expect(res.body).toHaveProperty('from');
@@ -433,7 +438,7 @@ describe('Statement JSON endpoint', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.json`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     for (const row of res.body.data as Array<Record<string, unknown>>) {
       for (const field of [
@@ -448,7 +453,7 @@ describe('Statement JSON endpoint', () => {
 
   it('JSON rows and CSV rows agree on contract_id, role, token and status', async () => {
     const { store } = buildStore();
-    const params = { from: '2020-01-01', to: '2030-01-01', role: 'client' };
+    const params = { from: RECENT_FROM, to: RECENT_TO, role: 'client' };
 
     const csvRes = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.csv`).query(params);
@@ -471,7 +476,7 @@ describe('Statement JSON endpoint', () => {
     const { store } = buildStore();
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.json`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     for (const row of res.body.data as Array<Record<string, unknown>>) {
       expect(row.dispute_freelancer_bps).toBeNull();
@@ -492,7 +497,7 @@ describe('Statement JSON endpoint', () => {
 
     const res = await request(createApp({ store }))
       .get(`/api/v1/parties/${CLIENT}/statement.json`)
-      .query({ from: '2020-01-01', to: '2030-01-01' });
+      .query({ from: RECENT_FROM, to: RECENT_TO });
 
     expect(res.body.data[0].dispute_freelancer_bps).toBe(7500);
     expect(res.body.data[0].status).toBe('Resolved');
@@ -527,8 +532,8 @@ describe('OpenAPI spec', () => {
     const res = await request(createApp(new EscrowStore()))
       .get('/openapi.json');
 
-    expect(res.body.paths).toHaveProperty('/api/v1/parties/{address}/statement.csv');
-    expect(res.body.paths).toHaveProperty('/api/v1/parties/{address}/statement.json');
+    expect(res.body.paths).toHaveProperty(['/api/v1/parties/{address}/statement.csv']);
+    expect(res.body.paths).toHaveProperty(['/api/v1/parties/{address}/statement.json']);
   });
 
   it('spec includes StatementRow schema in components', async () => {
