@@ -1,8 +1,11 @@
 import SwaggerParser from '@apidevtools/swagger-parser';
 import { openapi } from '../src/openapi';
+import { createApp } from '../src/app';
+import { EscrowStore } from '../src/store';
 import {
   assertConformance,
   conformanceProblems,
+  request,
   type ConformanceResponse,
 } from './helpers/openapi';
 
@@ -27,7 +30,7 @@ const contractBody = () => ({
   client: 'GA',
   freelancer: 'GB',
   token: 'XLM',
-  milestones: [{ index: 0, title: 'Wireframes', amount: 100, released: false }],
+  milestones: [{ index: 0, title: 'Wireframes', amount: 100, amountUnits: '100', released: false }],
   totalAmount: 100,
   fundedAmount: 0,
   releasedAmount: 0,
@@ -166,5 +169,38 @@ describe('conformance harness', () => {
     expect(
       conformanceProblems(response({ error: 'not_found' }), 'get', '/not-in-spec').join('\n'),
     ).toMatch(/missing required property 'message'/);
+  });
+});
+
+describe('live responses conform to the spec', () => {
+  // Every awaited request below is validated against src/openapi.ts by the harness.
+  const app = createApp(new EscrowStore());
+
+  it('documents the system routes', async () => {
+    await request(app).get('/').expect(200);
+    await request(app).get('/health').expect(200);
+    await request(app).get('/docs').expect(200);
+    await request(app).get('/openapi.json').expect(200);
+  });
+
+  it('documents the contract lifecycle', async () => {
+    const created = await request(app)
+      .post('/api/v1/contracts')
+      .send({ client: 'GA', freelancer: 'GB', milestones: [{ title: 'Design', amount: 100 }, 50] })
+      .expect(201);
+    const id = created.body.id as number;
+    await request(app).get(`/api/v1/contracts/${id}`).expect(200);
+    await request(app).get('/api/v1/contracts?limit=5').expect(200);
+    await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 150 }).expect(200);
+    await request(app).post(`/api/v1/contracts/${id}/milestones/0/release`).expect(200);
+    await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GB', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${id}/resolve`).send({ freelancerBps: 5000 }).expect(200);
+    await request(app).get('/api/v1/stats').expect(200);
+  });
+
+  it('documents error responses', async () => {
+    await request(app).get('/api/v1/contracts/999').expect(404);
+    await request(app).post('/api/v1/contracts').send({ client: 'GA', freelancer: 'GA', milestones: [1] }).expect(400);
+    await request(app).get('/definitely-not-a-route').expect(404);
   });
 });

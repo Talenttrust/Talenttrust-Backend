@@ -100,7 +100,12 @@ ajv.addSchema({
 
 // ── Path / response lookup ────────────────────────────────────────────────────────────────────────
 
-const pathSegments = (path: string): string[] => path.split('/').filter((s) => s.length > 0);
+// Query strings are not part of the path template.
+const pathSegments = (path: string): string[] =>
+  path
+    .split('?')[0]
+    .split('/')
+    .filter((s) => s.length > 0);
 
 function pathMatches(template: string, actual: string): boolean {
   const expected = pathSegments(template);
