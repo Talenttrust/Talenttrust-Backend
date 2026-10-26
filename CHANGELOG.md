@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Token registry (Issue #1593)
+
+- New `src/tokens.ts` static registry (native XLM SAC + testnet USDC SAC;
+  `TOKENS_JSON` overrides defaults by symbol/contract id and extends the list,
+  `TOKENS_USDC_CONTRACT_ID`/`TOKENS_USDC_ISSUER` reconfigure the USDC entry).
+  Invalid entries fail startup with a clear message.
+- `GET /api/v1/tokens` and `GET /api/v1/tokens/:symbolOrContractId` expose the
+  registry to clients.
+- `POST /api/v1/contracts` accepts only registered `token` symbols
+  (case-insensitive) or contract ids (400 `unsupported_token`), stores the
+  resolved `tokenContractId`, and contract responses gain `display` amounts
+  formatted with the token's decimals (base units unchanged).
+- `GET /api/v1/stats` gains `byToken` per-symbol totals (base-unit decimal
+  strings); the cross-token top-level totals are documented as deprecated when
+  more than one token exists.
+- Seed data now uses registered tokens.
+
 #### Live chain status on `/api/v1/chain` (Issue #1571)
 
 - `GET /api/v1/chain` now includes `onChain`: a cached snapshot read from the

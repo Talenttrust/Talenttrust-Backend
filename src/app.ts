@@ -17,6 +17,7 @@ import {
   type QueryFilters,
 } from './store';
 import { openapi, docsHtml, docsCsp } from './openapi';
+import { getTokenRegistry, resolveToken } from './tokens';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
 import { CSV_HEADERS, csvRow } from './csv';
@@ -723,6 +724,8 @@ export function createApp(
         'GET  /api/v1/state-machine',
         'GET  /api/v1/contracts/:id/actions',
         'GET  /api/v1/stats',
+        'GET  /api/v1/tokens',
+        'GET  /api/v1/tokens/:symbolOrContractId',
         'POST /api/v1/tx/build',
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
@@ -1051,6 +1054,19 @@ export function createApp(
         throw new HttpError(400, 'invalid_actor', 'as must be a non-empty address string');
       }
       return store.allowedActions(contractId, as as string | undefined);
+    }),
+  );
+  // --- Token registry (static configuration, validated at startup) ---
+  v1.get('/tokens', wrap(() => ({ data: getTokenRegistry() })));
+  v1.get(
+    '/tokens/:symbolOrContractId',
+    wrap((req) => {
+      const { symbolOrContractId } = req.params;
+      const token = resolveToken(symbolOrContractId);
+      if (!token) {
+        throw new HttpError(404, 'token_not_found', `Token "${symbolOrContractId}" is not registered`);
+      }
+      return token;
     }),
   );
   v1.get('/stats', wrap(() => store.stats()));

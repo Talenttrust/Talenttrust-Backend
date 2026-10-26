@@ -12,6 +12,7 @@
 
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
+import { formatTokenUnits, resolveToken } from './tokens';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
@@ -127,7 +128,12 @@ export interface EscrowContract {
   title: string;
   client: string;
   freelancer: string;
+  /** Registered symbol the contract escrows (see GET /api/v1/tokens). */
   token: string;
+  /** Resolved token contract address (Stellar Asset Contract / SEP-41) for `token`. */
+  tokenContractId: string;
+  /** Amounts formatted with the token's decimals (e.g. "150.0000000"); base-unit fields stay unchanged. */
+  display: { totalAmount: string; fundedAmount: string; releasedAmount: string };
   milestones: Milestone[];
   /** @deprecated lossy above 2^53; use totalAmountUnits */
   totalAmount: number | string;
@@ -361,6 +367,7 @@ interface InternalContract {
   client: string;
   freelancer: string;
   token: string;
+  tokenContractId: string;
   milestones: Array<{
     index: number;
     title: string;
@@ -469,6 +476,12 @@ function toPublic(c: InternalContract): EscrowContract {
     client: c.client,
     freelancer: c.freelancer,
     token: c.token,
+    tokenContractId: c.tokenContractId,
+    display: {
+      totalAmount: formatTokenUnits(c.totalAmount, c.token),
+      fundedAmount: formatTokenUnits(c.fundedAmount, c.token),
+      releasedAmount: formatTokenUnits(c.releasedAmount, c.token),
+    },
     milestones: publicMilestones(c.milestones),
     totalAmount: Number(c.totalAmount),    // deprecated
     totalAmountUnits: c.totalAmount.toString(),
@@ -748,6 +761,19 @@ export class EscrowStore {
     if (client === freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
+    // Escrow tokens come from the configured registry only: a registered
+    // symbol (case-insensitive) or contract id, else 400 unsupported_token.
+    // Omitted/null/empty falls back to the default registered token (XLM).
+    const rawToken =
+      input.token === undefined || input.token === null || input.token === '' ? 'XLM' : input.token;
+    const resolvedToken = resolveToken(rawToken);
+    if (!resolvedToken) {
+      throw new HttpError(
+        400,
+        'unsupported_token',
+        `token ${JSON.stringify(rawToken)} is not registered; use a symbol or contract id from GET /api/v1/tokens`,
+      );
+    }
     let milestones: InternalContract['milestones'];
     let template: InternalTemplate | undefined;
     if (input.templateId !== undefined) {
@@ -776,7 +802,8 @@ export class EscrowStore {
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
       client,
       freelancer,
-      token: typeof input.token === 'string' && input.token ? input.token : 'XLM',
+      token: resolvedToken.symbol,
+      tokenContractId: resolvedToken.contractId,
       milestones,
       totalAmount,
       fundedAmount: 0n,
@@ -1641,18 +1668,43 @@ export class EscrowStore {
     // Sum with bigint to match contract precision; expose as decimal strings.
     let totalEscrowedBig = 0n;
     let totalReleasedBig = 0n;
+    const perToken = new Map<string, { escrowed: bigint; released: bigint }>();
     for (const c of all) {
-      totalEscrowedBig += c.fundedAmount - c.releasedAmount;
+      const escrowed = c.fundedAmount - c.releasedAmount;
+      totalEscrowedBig += escrowed;
       totalReleasedBig += c.releasedAmount;
+      const tokenTotals = perToken.get(c.token) ?? { escrowed: 0n, released: 0n };
+      tokenTotals.escrowed += escrowed;
+      tokenTotals.released += c.releasedAmount;
+      perToken.set(c.token, tokenTotals);
+    }
+
+    // Per-token totals keyed by registered symbol, as base-unit decimal
+    // strings: tokens carry different decimals, so amounts only compare
+    // within one symbol.
+    const byToken: Record<string, { totalEscrowed: string; totalReleased: string }> = {};
+    for (const symbol of [...perToken.keys()].sort()) {
+      const totals = perToken.get(symbol)!;
+      byToken[symbol] = {
+        totalEscrowed: totals.escrowed.toString(),
+        totalReleased: totals.released.toString(),
+      };
     }
 
     return {
       contracts: all.length,
       byStatus,
-      /** @deprecated lossy above 2^53; use totalEscrowedUnits */
+      byToken,
+      /**
+       * @deprecated lossy above 2^53; use totalEscrowedUnits. Also deprecated
+       * (mixed units) when more than one token exists — use byToken.
+       */
       totalEscrowed: Number(totalEscrowedBig),
       totalEscrowedUnits: totalEscrowedBig.toString(),
-      /** @deprecated lossy above 2^53; use totalReleasedUnits */
+      /**
+       * @deprecated lossy above 2^53; use totalReleasedUnits. Also deprecated
+       * (mixed units) when more than one token exists — use byToken.
+       */
       totalReleased: Number(totalReleasedBig),
       totalReleasedUnits: totalReleasedBig.toString(),
     };
@@ -1680,7 +1732,7 @@ export class EscrowStore {
       title: 'Landing page redesign',
       client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      token: 'XLM',
       milestones: [
         { title: 'Wireframes', amount: 2500000 },
         { title: 'Visual design', amount: 5000000 },
@@ -1693,7 +1745,7 @@ export class EscrowStore {
       title: 'Smart contract audit',
       client: 'GCLIENTDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
       freelancer: 'GFREELANCERDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
-      token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      token: 'USDC',
       milestones: [{ title: 'Audit report', amount: 20000000 }],
     });
     this.deposit(b.id, 20000000);

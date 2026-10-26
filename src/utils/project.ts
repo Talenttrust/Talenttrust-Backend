@@ -12,6 +12,7 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'client',
   'freelancer',
   'token',
+  'tokenContractId',
   'milestones',
   'totalAmount',
   'totalAmountUnits',
@@ -33,6 +34,7 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'expiredAt',
   'refundableAmount',
   'refundableAmountUnits',
+  'display',
 ] as const;
 
 /** Keys permitted inside a `milestones.<sub>` selector. */

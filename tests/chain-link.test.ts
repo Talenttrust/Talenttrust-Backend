@@ -3,7 +3,7 @@ import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { ChainReader, ChainReaderResult, ChainUnavailableError, OnChainEscrow } from '../src/chain';
 
-const DEFAULT_TOKEN = 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const DEFAULT_TOKEN = 'XLM';
 
 class FakeChainReader implements ChainReader {
   public escrows = new Map<string, OnChainEscrow>();
@@ -224,13 +224,13 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       const c = store.create({
         client: 'GA',
         freelancer: 'GB',
-        token: 'TOKEN_A',
+        token: 'XLM',
         milestones: [{ amount: 100 }],
       });
       fakeChain.escrows.set('E3', {
         client: 'GA',
         freelancer: 'GB',
-        token: 'TOKEN_B',
+        token: 'USDC',
         totalAmount: '100',
         fundedAmount: '0',
         releasedAmount: '0',
@@ -244,8 +244,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       expect(res.body.error).toBe('chain_mismatch');
       expect(res.body.mismatches).toContainEqual({
         field: 'token',
-        api: 'TOKEN_A',
-        chain: 'TOKEN_B',
+        api: 'XLM',
+        chain: 'USDC',
       });
     });
 
