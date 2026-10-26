@@ -40,12 +40,14 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/parties/:address/statement.json` | Same rows as JSON |
 | GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
 | GET | `/api/v1/contracts/:id/actions?as=<address>` | Allowed actions now, with error codes/reasons, releasable indexes and remaining deposit capacity |
-| GET | `/api/v1/stats` | Aggregate statistics |
+| GET | `/api/v1/stats` | Aggregate statistics (`byToken` breaks totals down per registered symbol; the cross-token totals are deprecated when more than one token exists) |
+| GET | `/api/v1/tokens` | Registered token registry as `{ data: Token[] }` (`symbol`, `name`, `contractId`, `decimals`, `issuer`) |
+| GET | `/api/v1/tokens/:symbolOrContractId` | One registered token by symbol (case-insensitive) or contract id (404 `token_not_found`) |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
-| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
+| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts (`token` must be a registered symbol or contract id, else 400 `unsupported_token`); list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
@@ -151,8 +153,8 @@ GET /api/v1/contracts?fields=title,status,totalAmount
 GET /api/v1/contracts/1?fields=milestones.amount
 ```
 
-Allowed top-level fields: `title`, `client`, `freelancer`, `token`, `milestones`, `totalAmount`,
-`totalAmountUnits`, `fundedAmount`, `fundedAmountUnits`, `releasedAmount`, `releasedAmountUnits`,
+Allowed top-level fields: `title`, `client`, `freelancer`, `token`, `tokenContractId`, `milestones`, `totalAmount`,
+`totalAmountUnits`, `fundedAmount`, `fundedAmountUnits`, `releasedAmount`, `releasedAmountUnits`, `display`,
 `status`, `reputationIssued`, `dispute`, `chain`, `revision`, `createdAt`, `updatedAt`.
 Use dot notation for milestone sub-fields: `milestones.index`, `milestones.title`,
 `milestones.amount`, `milestones.amountUnits`, `milestones.released`. Unknown fields return `400 invalid_fields`.
@@ -283,7 +285,10 @@ result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
-`GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
+`GET`/`POST /api/cron/expire-contracts`), `TOKENS_JSON` (JSON array of `{symbol, name, contractId, decimals, issuer?}`
+entries that overrides defaults by symbol/contract id and extends the registry; invalid entries fail startup with a clear
+message), `TOKENS_USDC_CONTRACT_ID` and `TOKENS_USDC_ISSUER` (override the built-in testnet USDC SAC entry, which
+defaults to Circle's testnet USDC with 7 decimals). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any
 partial funding is reported as `refundableAmount`/`refundableAmountUnits`. A client can extend a deadline

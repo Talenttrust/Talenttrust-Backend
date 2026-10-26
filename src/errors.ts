@@ -35,6 +35,16 @@ export const ERRORS = {
   contract_not_found: { status: 404, title: 'Contract not found', detail: 'Contract not found' },
   invalid_parties: { status: 400, title: 'Invalid parties', detail: 'client and freelancer are required, distinct strings' },
   invalid_milestones: { status: 400, title: 'Invalid milestones', detail: 'milestones must be a non-empty array of at most 20 items' },
+  unsupported_token: {
+    status: 400,
+    title: 'Unsupported token',
+    detail: 'token must be a registered symbol or token contract id (GET /api/v1/tokens lists the registry)',
+  },
+  token_not_found: {
+    status: 404,
+    title: 'Token not found',
+    detail: 'No registered token matches the requested symbol or contract id',
+  },
   invalid_amount: { status: 400, title: 'Invalid amount', detail: 'amount must be a positive integer in token base units' },
   over_funded: {
     status: 409,

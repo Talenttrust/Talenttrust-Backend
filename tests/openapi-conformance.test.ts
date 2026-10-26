@@ -198,6 +198,16 @@ describe('live responses conform to the spec', () => {
     await request(app).get('/api/v1/stats').expect(200);
   });
 
+  it('documents the token registry', async () => {
+    await request(app).get('/api/v1/tokens').expect(200);
+    await request(app).get('/api/v1/tokens/XLM').expect(200);
+    await request(app).get('/api/v1/tokens/DOGE').expect(404);
+    await request(app)
+      .post('/api/v1/contracts')
+      .send({ client: 'GA', freelancer: 'GB', token: 'DOGE', milestones: [100] })
+      .expect(400);
+  });
+
   it('documents error responses', async () => {
     await request(app).get('/api/v1/contracts/999').expect(404);
     await request(app).post('/api/v1/contracts').send({ client: 'GA', freelancer: 'GA', milestones: [1] }).expect(400);

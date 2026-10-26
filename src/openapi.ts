@@ -78,6 +78,13 @@ const addressParam = {
   schema: { type: 'string', minLength: 1 },
   description: 'Stellar address',
 };
+const tokenSymbolOrContractIdParam = {
+  name: 'symbolOrContractId',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', minLength: 1, maxLength: 64 },
+  description: 'Registered token symbol (case-insensitive) or token contract id (exact match)',
+};
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 const reviewRef = { $ref: '#/components/schemas/Review' };
 const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
@@ -158,6 +165,7 @@ const spec = {
     { name: 'System' },
     { name: 'Auth', description: 'Wallet-signature authentication (SEP-10 style)' },
     { name: 'Contracts' },
+    { name: 'Tokens', description: 'Configured registry of supported escrow tokens' },
     { name: 'Reputation' },
     { name: 'Transaction' },
     { name: 'Receipts' },
@@ -883,7 +891,35 @@ const spec = {
         },
       },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
+    '/api/v1/tokens': {
+      get: {
+        tags: ['Tokens'],
+        summary: 'List registered escrow tokens',
+        description:
+          'The static token registry that POST /api/v1/contracts validates `token` against. ' +
+          'Entries carry `symbol`, `name`, `contractId` (Stellar Asset Contract / SEP-41 address), ' +
+          '`decimals` (used for `display` amount strings) and `issuer`. Configure with TOKENS_JSON, ' +
+          'TOKENS_USDC_CONTRACT_ID and TOKENS_USDC_ISSUER.',
+        responses: ok('Registered tokens', {
+          type: 'object',
+          required: ['data'],
+          properties: { data: { type: 'array', items: { $ref: '#/components/schemas/Token' } } },
+        }),
+      },
+    },
+    '/api/v1/tokens/{symbolOrContractId}': {
+      get: {
+        tags: ['Tokens'],
+        summary: 'Get one registered token by symbol or contract id',
+        description: 'Symbols match case-insensitively; contract ids match exactly. Unknown tokens return 404 token_not_found.',
+        parameters: [tokenSymbolOrContractIdParam],
+        responses: {
+          ...ok('Registered token', { $ref: '#/components/schemas/Token' }),
+          404: errorResponse('Token is not registered (token_not_found)'),
+        },
+      },
+    },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, byToken: { type: 'object', description: 'Per-token totals keyed by registered symbol; amounts are base-unit decimal strings.', additionalProperties: { type: 'object', required: ['totalEscrowed', 'totalReleased'], properties: { totalEscrowed: { type: 'string', description: 'Currently escrowed for this token (base units, decimal string).' }, totalReleased: { type: 'string', description: 'Released for this token (base units, decimal string).' } } } }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits; also deprecated (mixed units) when more than one token exists — use byToken.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed across all tokens in base units (bigint-safe decimal string); mixed units when more than one token exists — prefer byToken.' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits; also deprecated (mixed units) when more than one token exists — use byToken.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released across all tokens in base units (bigint-safe decimal string); mixed units when more than one token exists — prefer byToken.' } } }) } },
     '/api/v1/tx/build': {
       post: {
         tags: ['Transaction'],
@@ -2091,6 +2127,18 @@ const spec = {
           checkedAt: { type: 'string', format: 'date-time' },
         },
       },
+      Token: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['symbol', 'name', 'contractId', 'decimals'],
+        properties: {
+          symbol: { type: 'string', description: 'Ticker stored on contracts as `token` (e.g. XLM)' },
+          name: { type: 'string' },
+          contractId: { type: 'string', description: 'Stellar Asset Contract / SEP-41 token contract address' },
+          decimals: { type: 'integer', minimum: 0, maximum: 18, description: 'Fractional digits used by `display` amount strings' },
+          issuer: { type: 'string', nullable: true, description: 'Issuing account (G…) or null for the native asset' },
+        },
+      },
       EscrowContract: {
         type: 'object',
         additionalProperties: false,
@@ -2100,6 +2148,8 @@ const spec = {
           'client',
           'freelancer',
           'token',
+          'tokenContractId',
+          'display',
           'milestones',
           'totalAmount',
           'totalAmountUnits',
@@ -2120,7 +2170,19 @@ const spec = {
           title: { type: 'string' },
           client: { type: 'string' },
           freelancer: { type: 'string' },
-          token: { type: 'string' },
+          token: { type: 'string', description: 'Registered token symbol (see GET /api/v1/tokens).' },
+          tokenContractId: { type: 'string', description: 'Resolved token contract address (Stellar Asset Contract / SEP-41) for `token`.' },
+          display: {
+            type: 'object',
+            required: ['totalAmount', 'fundedAmount', 'releasedAmount'],
+            additionalProperties: false,
+            description: 'Amounts formatted with the token decimals (e.g. "150.0000000" for 1500000000 base units); the base-unit fields above are unchanged.',
+            properties: {
+              totalAmount: { type: 'string' },
+              fundedAmount: { type: 'string' },
+              releasedAmount: { type: 'string' },
+            },
+          },
           milestones: { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
           totalAmount: {
             description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
