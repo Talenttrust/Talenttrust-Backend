@@ -45,6 +45,12 @@ export const ERRORS = {
   milestone_not_found: { status: 404, title: 'Milestone not found', detail: 'Milestone not found' },
   already_released: { status: 409, title: 'Already released', detail: 'Milestone already released' },
   insufficient_funds: { status: 409, title: 'Insufficient funds', detail: 'Escrow balance too low for this milestone' },
+  invalid_review_window: { status: 400, title: 'Invalid review window', detail: 'reviewWindowSeconds must be an integer between 3600 and 2592000' },
+  invalid_milestone_status: { status: 409, title: 'Invalid milestone status', detail: 'Milestone is not pending' },
+  invalid_deliverable: { status: 400, title: 'Invalid deliverable', detail: 'A note of up to 1000 characters and an optional HTTPS URL are required' },
+  contract_disputed: { status: 409, title: 'Contract disputed', detail: 'Submissions are blocked during a dispute' },
+  cancel_requested: { status: 409, title: 'Cancellation requested', detail: 'The contract is awaiting release of submitted work' },
+  cancel_already_requested: { status: 409, title: 'Cancellation already requested', detail: 'Cancellation has already been requested' },
   forbidden: {
     status: 403,
     title: 'Forbidden',

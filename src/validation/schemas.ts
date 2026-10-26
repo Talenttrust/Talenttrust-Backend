@@ -25,6 +25,12 @@ export const MilestoneReleaseParams = z.object({
   index: z.string().regex(/^(?:[0-9]|1[0-9])$/, 'index must be an integer 0..19'),
 });
 
+export const SubmitMilestoneBody = z.object({
+  freelancer: z.string().min(1),
+  note: z.string().min(1).max(1000),
+  url: z.string().optional(),
+}).strict();
+
 /**
  * Token base-unit amount: a positive safe integer, or a canonical decimal
  * string (no sign, no leading zeros, no exponent) for values beyond 2^53.
@@ -54,6 +60,7 @@ export const CreateContractBody = z
     milestones: z.array(MilestoneItem).min(1).max(20).optional(),
     // Validated (range-checked against the store clock) by EscrowStore.create.
     fundingDeadline: z.string().optional(),
+    reviewWindowSeconds: z.number().optional(),
     /** Create from a saved milestone template instead of explicit milestones. */
     templateId: z.number().int().positive().optional(),
     /** Total budget (base units) for percent-mode templates. */

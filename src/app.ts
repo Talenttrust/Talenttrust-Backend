@@ -38,6 +38,7 @@ import {
   IdParam,
   MilestoneIndexParam,
   MilestoneReleaseParams,
+  SubmitMilestoneBody,
   CreateContractBody,
   DepositBody,
   DisputeBody,
@@ -452,7 +453,7 @@ function resolveStoreAndLogger(
   }
   const opts = (storeOrOpts as AppDeps | undefined) ?? {};
   return {
-    store: opts.store ?? new EscrowStore().seed(),
+    store: opts.store ?? new EscrowStore(opts.now ? { clock: () => { const value = opts.now!(); return value instanceof Date ? value : new Date(value); } } : undefined).seed(),
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
     txRpcServer: opts.txRpcServer,
@@ -734,6 +735,7 @@ export function createApp(
         'POST /api/v1/contracts/:id/deposit',
         'POST /api/v1/contracts/:id/extend-deadline',
         'POST /api/v1/contracts/:id/milestones/:index/release',
+        'POST /api/v1/contracts/:id/milestones/:index/submit',
         'POST /api/v1/contracts/:id/dispute',
         'POST /api/v1/contracts/:id/resolve',
         'POST /api/v1/contracts/:id/cancel',
@@ -765,6 +767,7 @@ export function createApp(
         'POST /api/v1/auth/token',
         'POST /api/v1/receipts/verify',
         'GET/POST /api/cron/expire-contracts',
+        'POST /api/cron/auto-release',
         'GET/POST /api/cron/index-events',
         'GET  /api/v1/chain/events',
         'GET  /api/v1/chain/indexer',
@@ -1207,6 +1210,20 @@ export function createApp(
     }),
   );
   v1.post(
+    '/contracts/:id/milestones/:index/submit',
+    ...jsonObjectBody,
+    requireNotPaused,
+    requireAuth,
+    validate({ params: MilestoneReleaseParams, body: SubmitMilestoneBody }),
+    checkPreconditions,
+    wrap((req, res) => {
+      const updated = audited(req, () => store.submitMilestone(Number(req.params.id), Number(req.params.index), req.body, callerOf(req)));
+      setEtag(res, updated);
+      maybeAttachReceipt(req, res, updated);
+      return publicContract(updated);
+    }),
+  );
+  v1.post(
     '/contracts/:id/dispute',
     ...jsonObjectBody,
     requireNotPaused,
@@ -1577,6 +1594,16 @@ export function createApp(
   app.get('/api/cron/index-events', indexEvents);
   app.post('/api/cron/index-events', indexEvents);
   app.post('/api/cron/expire-contracts', expireContracts);
+
+  const autoRelease = wrap((req) => {
+    const expected = process.env.CRON_SECRET;
+    const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (!expected || !supplied || !constantTimeEqual(supplied, expected)) {
+      throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
+    }
+    return { released: store.sweepAutoRelease(), checkedAt: store.currentTime() };
+  });
+  app.post('/api/cron/auto-release', autoRelease);
 
   // Prometheus scrape endpoint; disabled (404) unless METRICS_TOKEN is set, checked per request.
   const escrowContracts = registry.gauge('escrow_contracts', 'Escrow contracts by status', ['status']);

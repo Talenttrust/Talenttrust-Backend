@@ -53,9 +53,10 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
 | POST | `/api/v1/contracts/:id/extend-deadline` | `{ "client": "G...", "fundingDeadline": "2026-01-15T00:00:00.000Z" }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
+| POST | `/api/v1/contracts/:id/milestones/:index/submit` | Freelancer submission `{ "freelancer": "G...", "note": "...", "url": "https://..." }`; the default review window is 3 days (create-time `reviewWindowSeconds`: 3600–2592000) |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` — requires a scoped API key with `disputes:resolve` (`X-API-Key`) when `API_KEYS` is set |
-| POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
+| POST | `/api/v1/contracts/:id/cancel` | Refund pending milestones; submitted work stays escrowed until release, after which cancellation completes |
 | POST | `/api/v1/contracts/:id/reputation` | Client rates freelancer: `{ "rating": 5 }` (backward-compatible) |
 | POST | `/api/v1/contracts/:id/reviews` | Two-sided review: `{ "reviewer": "G...", "rating": 5, "comment": "..." }` |
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
@@ -67,6 +68,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
+| POST | `/api/cron/auto-release` | Authenticated hourly sweep that releases submissions after their review windows (due items also settle on contract reads/mutations) |
 | GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
 | POST | `/api/v1/tx/submit` | Validate and relay a signed escrow transaction (`{ "xdr": "..." }`) |
@@ -283,7 +285,7 @@ result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
-`GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
+`GET`/`POST /api/cron/expire-contracts` and `POST /api/cron/auto-release`). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any
 partial funding is reported as `refundableAmount`/`refundableAmountUnits`. A client can extend a deadline

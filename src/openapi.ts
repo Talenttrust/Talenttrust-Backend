@@ -503,6 +503,18 @@ const spec = {
         },
       },
     },
+    '/api/cron/auto-release': {
+      post: {
+        tags: ['Cron'],
+        summary: 'Automatically release milestones past their review window',
+        description: 'Sweeps all contracts and releases due submissions. Disputes freeze the review window. Requires Authorization: Bearer CRON_SECRET.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Contracts with newly released milestones', content: json({ type: 'object', required: ['released', 'checkedAt'], properties: { released: { type: 'array', items: { type: 'integer' } }, checkedAt: { type: 'string', format: 'date-time' } } }) },
+          401: errorResponse('Missing or invalid bearer secret'),
+        },
+      },
+    },
     '/api/v1/contracts/{id}/extend-deadline': {
       post: {
         tags: ['Contracts'],
@@ -1097,8 +1109,18 @@ const spec = {
     '/api/v1/contracts/{id}/milestones/{index}/release': {
       post: {
         tags: ['Contracts'],
-        summary: 'Release a milestone payment to the freelancer',
+        summary: 'Release a pending or submitted milestone payment to the freelancer',
+        description: 'The client may approve a pending milestone early or release submitted work before the review window ends.',
         parameters: [idParam, indexParam],
+        responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses },
+      },
+    },
+    '/api/v1/contracts/{id}/milestones/{index}/submit': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Submit a funded milestone for client review',
+        parameters: [idParam, indexParam],
+        requestBody: { required: true, content: json({ type: 'object', required: ['freelancer', 'note'], properties: { freelancer: { type: 'string' }, note: { type: 'string', minLength: 1, maxLength: 1000 }, url: { type: 'string', format: 'uri', pattern: '^https://' } }, additionalProperties: false }) },
         responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses },
       },
     },
@@ -1130,7 +1152,7 @@ const spec = {
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
+      post: { tags: ['Contracts'], summary: 'Cancel and refund pending milestones', description: 'Pending milestone amounts are refunded. Submitted amounts remain escrowed and cancellation completes after those submissions release; disputes freeze auto-release.', parameters: [idParam], responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -1997,7 +2019,7 @@ const spec = {
       },
       Milestone: {
         type: 'object',
-        required: ['index', 'title', 'amount', 'amountUnits', 'released'],
+        required: ['index', 'title', 'amount', 'amountUnits', 'released', 'status'],
         additionalProperties: false,
         properties: {
           index: { type: 'integer', minimum: 0 },
@@ -2011,6 +2033,9 @@ const spec = {
             description: 'Canonical decimal string amount in token base units (e.g. stroops).',
           },
           released: { type: 'boolean' },
+          status: { type: 'string', enum: ['pending', 'submitted', 'released'] },
+          submittedAt: { type: 'string', format: 'date-time' },
+          deliverable: { type: 'object', required: ['note'], properties: { note: { type: 'string', maxLength: 1000 }, url: { type: 'string', format: 'uri' } }, additionalProperties: false },
         },
       },
       Dispute: {
@@ -2112,6 +2137,7 @@ const spec = {
           'revision',
           'version',
           'fundingDeadline',
+          'reviewWindowSeconds',
           'createdAt',
           'updatedAt',
         ],
@@ -2147,6 +2173,8 @@ const spec = {
             description: 'Canonical decimal string released amount in token base units.',
           },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          reviewWindowSeconds: { type: 'integer', minimum: 3600, maximum: 2592000 },
+          cancelRequestedAt: { type: 'string', format: 'date-time' },
           reputationIssued: { type: 'boolean' },
           fundingDeadline: { type: 'string', format: 'date-time' },
           expiredAt: { type: 'string', format: 'date-time' },
@@ -2344,6 +2372,7 @@ const spec = {
           freelancer: { type: 'string', minLength: 1 },
           token: { type: 'string', maxLength: 64 },
           fundingDeadline: { type: 'string', format: 'date-time' },
+          reviewWindowSeconds: { type: 'integer', minimum: 3600, maximum: 2592000, default: 259200 },
           milestones: {
             type: 'array',
             minItems: 1,
@@ -2373,6 +2402,10 @@ const spec = {
           amount: amountSchema,
         },
         additionalProperties: false,
+      },
+      SubmitMilestoneRequest: {
+        type: 'object', required: ['freelancer', 'note'], additionalProperties: false,
+        properties: { freelancer: { type: 'string', minLength: 1 }, note: { type: 'string', minLength: 1, maxLength: 1000 }, url: { type: 'string', format: 'uri', pattern: '^https://' } },
       },
       DisputeRequest: {
         type: 'object',
@@ -2408,7 +2441,8 @@ type Operation = { parameters?: object[]; responses: Record<string, object> };
 /** Documents Idempotency-Key and its error statuses on every POST operation. */
 function withIdempotency<T extends { paths: object }>(doc: T): T {
   const paths = doc.paths as Record<string, { post?: Operation }>;
-  for (const item of Object.values(paths)) {
+  for (const [path, item] of Object.entries(paths)) {
+    if (!path.startsWith('/api/v1/')) continue;
     const op = item.post;
     if (!op) continue;
     op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
@@ -2430,6 +2464,7 @@ const PROTECTED: Array<[string, string]> = [
   ['/api/v1/contracts/{id}/deposit', 'post'],
   ['/api/v1/contracts/{id}/extend-deadline', 'post'],
   ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
+  ['/api/v1/contracts/{id}/milestones/{index}/submit', 'post'],
   ['/api/v1/contracts/{id}/dispute', 'post'],
   ['/api/v1/contracts/{id}/cancel', 'post'],
   ['/api/v1/contracts/{id}/reputation', 'post'],
@@ -2457,6 +2492,7 @@ const RECEIPT_OPS = [
   '/api/v1/contracts',
   '/api/v1/contracts/{id}/deposit',
   '/api/v1/contracts/{id}/milestones/{index}/release',
+  '/api/v1/contracts/{id}/milestones/{index}/submit',
   '/api/v1/contracts/{id}/dispute',
   '/api/v1/contracts/{id}/resolve',
   '/api/v1/contracts/{id}/cancel',
@@ -2515,6 +2551,7 @@ function withEtags<T extends { paths: object }>(doc: T): T {
     ['/api/v1/contracts/{id}/extend-deadline', 'post'],
     ['/api/v1/contracts/{id}/deposit', 'post'],
     ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
+    ['/api/v1/contracts/{id}/milestones/{index}/submit', 'post'],
     ['/api/v1/contracts/{id}/dispute', 'post'],
     ['/api/v1/contracts/{id}/resolve', 'post'],
     ['/api/v1/contracts/{id}/cancel', 'post'],
