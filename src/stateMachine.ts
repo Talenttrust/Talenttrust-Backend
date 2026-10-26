@@ -18,11 +18,12 @@ export interface MachineContract {
   status: MachineStatus;
   client: string;
   freelancer: string;
-  milestones: Array<{ index: number; amount: bigint; released: boolean }>;
+  milestones: Array<{ index: number; amount: bigint; released: boolean; status?: 'pending' | 'submitted' | 'released' }>;
   totalAmount: bigint;
   fundedAmount: bigint;
   releasedAmount: bigint;
   reputationIssued: boolean;
+  cancelRequestedAt?: string;
 }
 
 export interface GuardFailure {
@@ -100,6 +101,7 @@ export const TRANSITIONS: Record<Action, Transition> = {
       const m = c.milestones[index as number];
       if (!m) return fail(404, 'milestone_not_found', `Milestone ${index} not found`);
       if (m.released) return fail(409, 'already_released', 'Milestone already released');
+      if (c.cancelRequestedAt && m.status === 'pending') return fail(409, 'cancel_requested', 'No pending milestone may be released after cancellation is requested');
       return c.fundedAmount - c.releasedAmount < m.amount
         ? fail(409, 'insufficient_funds', 'Escrow balance too low for this milestone')
         : null;
@@ -134,6 +136,7 @@ export const TRANSITIONS: Record<Action, Transition> = {
     actor: 'client',
     actorEnforced: false,
     statusFailure: notActive,
+    guard: (c) => c.cancelRequestedAt ? fail(409, 'cancel_already_requested', 'Cancellation has already been requested') : null,
     next: { status: 'Cancelled', when: 'always' },
     nextStatus: () => 'Cancelled',
   },

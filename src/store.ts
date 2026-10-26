@@ -96,6 +96,9 @@ export interface Milestone {
   /** Canonical decimal-string representation of the milestone amount (base units). */
   amountUnits: string;
   released: boolean;
+  status: 'pending' | 'submitted' | 'released';
+  submittedAt?: string;
+  deliverable?: { note: string; url?: string };
 }
 
 export interface Dispute {
@@ -161,6 +164,8 @@ export interface EscrowContract {
   refundableAmount?: number;
   /** Amount returned to the client when a partially funded contract expired (base units). */
   refundableAmountUnits?: string;
+  reviewWindowSeconds: number;
+  cancelRequestedAt?: string;
 }
 
 export interface ContractRevision {
@@ -366,6 +371,9 @@ interface InternalContract {
     title: string;
     amount: bigint;
     released: boolean;
+    status: 'pending' | 'submitted' | 'released';
+    submittedAt?: string;
+    deliverable?: { note: string; url?: string };
   }>;
   totalAmount: bigint;
   fundedAmount: bigint;
@@ -384,6 +392,8 @@ interface InternalContract {
   fundingDeadline: string;
   expiredAt?: string;
   refundableAmount?: bigint;
+  reviewWindowSeconds: number;
+  cancelRequestedAt?: string;
 }
 
 const MAX_MILESTONES = 20;
@@ -391,6 +401,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const DEFAULT_FUNDING_WINDOW_MS = 14 * DAY_MS;
 const MAX_FUNDING_WINDOW_MS = 90 * DAY_MS;
+const DEFAULT_REVIEW_WINDOW_SECONDS = 259200;
 
 export type Clock = () => Date;
 
@@ -401,6 +412,7 @@ const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
   ['create', 'create'],
   ['deposit', 'deposit'],
   ['release', 'release'],
+  ['submitMilestone', 'submit'],
   ['openDispute', 'dispute'],
   ['resolveDispute', 'resolve'],
   ['cancel', 'cancel'],
@@ -438,6 +450,7 @@ function parseMilestones(input: unknown): InternalContract['milestones'] {
       title: typeof raw.title === 'string' && raw.title ? raw.title : `Milestone ${index + 1}`,
       amount,
       released: false,
+      status: 'pending',
     };
   });
 }
@@ -459,7 +472,13 @@ const publicMilestones = (milestones: InternalContract['milestones']): Milestone
     amount: Number(m.amount),
     amountUnits: m.amount.toString(),
     released: m.released,
+    status: m.status,
+    submittedAt: m.submittedAt,
+    deliverable: m.deliverable ? { ...m.deliverable } : undefined,
   }));
+
+const revisionMilestones = (milestones: InternalContract['milestones']) =>
+  milestones.map((m) => ({ index: m.index, title: m.title, amount: Number(m.amount), amountUnits: m.amount.toString(), released: m.released }));
 
 /** Project an internal contract to the public API shape. */
 function toPublic(c: InternalContract): EscrowContract {
@@ -490,6 +509,8 @@ function toPublic(c: InternalContract): EscrowContract {
     expiredAt: c.expiredAt,
     refundableAmount: c.refundableAmount === undefined ? undefined : Number(c.refundableAmount),
     refundableAmountUnits: c.refundableAmount?.toString(),
+    reviewWindowSeconds: c.reviewWindowSeconds,
+    cancelRequestedAt: c.cancelRequestedAt,
   };
 }
 
@@ -680,6 +701,27 @@ export class EscrowStore {
       c.updatedAt = now.toISOString();
       c.version += 1;
     }
+    return this.settleDue(c, now);
+  }
+
+  /** Release submitted milestones whose review windows elapsed; disputes freeze this clock. */
+  private settleDue(c: InternalContract, now = this.now()): InternalContract {
+    if (c.status !== 'Funded') return c;
+    let changed = false;
+    for (const milestone of c.milestones) {
+      if (milestone.status !== 'submitted' || !milestone.submittedAt) continue;
+      if (now.getTime() < Date.parse(milestone.submittedAt) + c.reviewWindowSeconds * 1000) continue;
+      milestone.status = 'released';
+      milestone.released = true;
+      c.releasedAmount = checkedAdd(c.releasedAmount, milestone.amount, 'releasedAmount');
+      changed = true;
+    }
+    if (changed) {
+      if (c.cancelRequestedAt && this.submittedBacking(c) === 0n) c.status = 'Cancelled';
+      else if (c.milestones.every((m) => m.released)) c.status = TRANSITIONS.release.nextStatus(c);
+      c.updatedAt = now.toISOString();
+      c.version += 1;
+    }
     return c;
   }
 
@@ -738,6 +780,7 @@ export class EscrowStore {
     token?: unknown;
     milestones?: unknown;
     fundingDeadline?: unknown;
+    reviewWindowSeconds?: unknown;
     templateId?: unknown;
     budget?: unknown;
   }): EscrowContract {
@@ -768,6 +811,11 @@ export class EscrowStore {
     }
     const totalAmount = sumMilestones(milestones);
 
+    const reviewWindowSeconds = input.reviewWindowSeconds === undefined ? DEFAULT_REVIEW_WINDOW_SECONDS : Number(input.reviewWindowSeconds);
+    if (!Number.isInteger(reviewWindowSeconds) || reviewWindowSeconds < 3600 || reviewWindowSeconds > 2592000) {
+      throw new HttpError(400, 'invalid_review_window', 'reviewWindowSeconds must be an integer between 3600 and 2592000');
+    }
+
     const nowDate = this.now();
     const fundingDeadline = this.validateCreationDeadline(input.fundingDeadline, nowDate.getTime());
     const now = nowDate.toISOString();
@@ -789,6 +837,7 @@ export class EscrowStore {
       createdAt: now,
       updatedAt: now,
       fundingDeadline,
+      reviewWindowSeconds,
       templateId: template?.id,
       templateVersion: template?.version,
     };
@@ -824,8 +873,8 @@ export class EscrowStore {
     if (hasMilestones) {
       milestones = parseMilestones(input.milestones);
       totalAmount = sumMilestones(milestones);
-      const from = publicMilestones(c.milestones);
-      const to = publicMilestones(milestones);
+      const from = revisionMilestones(c.milestones);
+      const to = revisionMilestones(milestones);
       if (JSON.stringify(from) !== JSON.stringify(to)) {
         changes.push({ field: 'milestones', from, to });
       }
@@ -887,6 +936,7 @@ export class EscrowStore {
   deposit(id: number, amountRaw: unknown, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'deposit');
+    if (c.cancelRequestedAt) throw new HttpError(409, 'cancel_requested', 'Deposits are blocked after cancellation is requested');
     assertAllowed('deposit', c, { amount: amountRaw });
     c.fundedAmount = checkedAdd(c.fundedAmount, parseAmount(amountRaw, 'amount'), 'fundedAmount');
     c.status = TRANSITIONS.deposit.nextStatus(c);
@@ -897,12 +947,49 @@ export class EscrowStore {
   release(id: number, index: number, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'release milestones');
-    assertAllowed('release', c, { index });
     const m = c.milestones[index];
+    assertAllowed('release', c, { index });
+    if (c.cancelRequestedAt && m.status === 'pending') throw new HttpError(409, 'cancel_requested', 'No pending milestone may be released after cancellation is requested');
+    if (c.fundedAmount - c.releasedAmount < m.amount) throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
     c.releasedAmount = checkedAdd(c.releasedAmount, m.amount, 'releasedAmount');
     m.released = true;
-    c.status = TRANSITIONS.release.nextStatus(c);
+    m.status = 'released';
+    c.status = c.cancelRequestedAt && this.submittedBacking(c) === 0n
+      ? 'Cancelled'
+      : c.milestones.every((milestone) => milestone.released) ? 'Completed' : c.status;
     return this.touch(c);
+  }
+
+  submitMilestone(id: number, index: number, input: { freelancer?: unknown; note?: unknown; url?: unknown }, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    if (typeof input.freelancer !== 'string' || input.freelancer !== c.freelancer || (caller !== undefined && caller !== c.freelancer)) {
+      throw new HttpError(403, 'forbidden', 'Only the contract freelancer can submit work');
+    }
+    if (c.status === 'Disputed') throw new HttpError(409, 'contract_disputed', 'Submissions are blocked during a dispute');
+    if (c.status !== 'Funded' || c.cancelRequestedAt) throw new HttpError(409, 'contract_not_active', 'Contract must be funded and not pending cancellation');
+    const milestone = c.milestones[index];
+    if (!milestone) throw new HttpError(404, 'milestone_not_found', `Milestone ${index} not found`);
+    if (milestone.status !== 'pending') throw new HttpError(409, 'invalid_milestone_status', `Milestone is ${milestone.status}`);
+    const note = typeof input.note === 'string' ? input.note.trim() : '';
+    if (!note || note.length > 1000) throw new HttpError(400, 'invalid_deliverable', 'note must contain 1 to 1000 characters');
+    let url: string | undefined;
+    if (input.url !== undefined) {
+      try {
+        const parsed = new URL(String(input.url));
+        if (parsed.protocol !== 'https:' || !parsed.hostname) throw new Error('invalid');
+        url = parsed.toString();
+      } catch { throw new HttpError(400, 'invalid_deliverable', 'url must be a valid https URL'); }
+    }
+    const backing = this.submittedBacking(c);
+    if (c.fundedAmount - c.releasedAmount - backing < milestone.amount) throw new HttpError(409, 'insufficient_funds', 'Escrow balance is already backing other submissions');
+    milestone.status = 'submitted';
+    milestone.submittedAt = this.nowIso();
+    milestone.deliverable = { note, ...(url ? { url } : {}) };
+    return this.touch(c);
+  }
+
+  private submittedBacking(c: InternalContract): bigint {
+    return c.milestones.reduce((sum, milestone) => milestone.status === 'submitted' ? sum + milestone.amount : sum, 0n);
   }
 
   /**
@@ -958,7 +1045,16 @@ export class EscrowStore {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'cancel');
     assertAllowed('cancel', c);
-    c.status = TRANSITIONS.cancel.nextStatus(c);
+    if (c.cancelRequestedAt) throw new HttpError(409, 'cancel_already_requested', 'Cancellation has already been requested');
+    const pendingTotal = c.milestones.filter((m) => m.status === 'pending').reduce((sum, m) => sum + m.amount, 0n);
+    const available = c.fundedAmount - c.releasedAmount - this.submittedBacking(c);
+    c.refundableAmount = pendingTotal < available ? pendingTotal : available;
+    c.fundedAmount = c.releasedAmount + this.submittedBacking(c);
+    if (this.submittedBacking(c) > 0n) {
+      c.cancelRequestedAt = this.nowIso();
+    } else {
+      c.status = TRANSITIONS.cancel.nextStatus(c);
+    }
     return this.touch(c);
   }
 
@@ -1066,6 +1162,18 @@ export class EscrowStore {
       if (!wasExpired && c.status === 'Expired') expired.push(c.id);
     }
     return expired;
+  }
+
+  /** Sweep due submissions across contracts; safe to repeat. */
+  sweepAutoRelease(): number[] {
+    const now = this.now();
+    const released: number[] = [];
+    for (const c of this.contracts.values()) {
+      const before = c.milestones.filter((m) => m.status === 'released').length;
+      this.settleDue(c, now);
+      if (c.milestones.filter((m) => m.status === 'released').length > before) released.push(c.id);
+    }
+    return released;
   }
 
   /** @security when `caller` is given it must equal contract.client — mirrors issue_reputation's client.require_auth() */
@@ -1502,7 +1610,7 @@ export class EscrowStore {
       if (budgetRaw !== undefined) {
         throw new HttpError(400, 'invalid_budget', 'budget must not be provided for fixed mode templates');
       }
-      return t.milestones.map((m, index) => ({ index, title: m.title, amount: m.amount as bigint, released: false }));
+      return t.milestones.map((m, index) => ({ index, title: m.title, amount: m.amount as bigint, released: false, status: 'pending' as const }));
     }
     if (budgetRaw === undefined) throw new HttpError(400, 'invalid_budget', 'budget is required for percent mode templates');
     const budget = parseAmount(budgetRaw, 'budget');
@@ -1511,6 +1619,7 @@ export class EscrowStore {
       title: m.title,
       amount: (budget * BigInt(m.percentBps ?? 0)) / 10000n,
       released: false,
+      status: 'pending' as const,
     }));
     const remainder = budget - milestones.reduce((sum, m) => sum + m.amount, 0n);
     milestones[milestones.length - 1].amount += remainder;

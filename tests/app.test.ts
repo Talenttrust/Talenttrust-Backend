@@ -433,7 +433,7 @@ describe('unfunded contract edits and withdrawal', () => {
     expect(updated.body.totalAmountUnits).toBe('150');
     expect(updated.body.revision).toBe(2);
     expect(updated.body.milestones).toEqual([
-      { index: 0, title: 'Specification', amount: 150, amountUnits: '150', released: false },
+      { index: 0, title: 'Specification', amount: 150, amountUnits: '150', released: false, status: 'pending' },
     ]);
     const revisions = await request(app).get(`/api/v1/contracts/${created.body.id}/revisions`).expect(200);
     expect(revisions.body).toEqual([

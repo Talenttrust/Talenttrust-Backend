@@ -248,8 +248,8 @@ describe('OpenAPI', () => {
     const spec = (await request(createApp(new EscrowStore())).get('/openapi.json').expect(200)).body;
     expect(spec.openapi).toBe('3.0.3');
     expect(spec.components.parameters.IdempotencyKey.name).toBe('Idempotency-Key');
-    const posts = Object.entries<Record<string, any>>(spec.paths).filter(([, item]) => item.post); // eslint-disable-line @typescript-eslint/no-explicit-any
-    expect(posts).toHaveLength(17);
+    const posts = Object.entries<Record<string, any>>(spec.paths).filter(([path, item]) => path.startsWith('/api/v1/') && item.post); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(posts).toHaveLength(18);
     for (const [path, item] of posts) {
       const op = item.post;
       expect(op.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });

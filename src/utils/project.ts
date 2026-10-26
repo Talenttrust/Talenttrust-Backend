@@ -33,6 +33,8 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'expiredAt',
   'refundableAmount',
   'refundableAmountUnits',
+  'reviewWindowSeconds',
+  'cancelRequestedAt',
 ] as const;
 
 /** Keys permitted inside a `milestones.<sub>` selector. */
@@ -42,6 +44,9 @@ const ALLOWED_MILESTONE_FIELDS: readonly string[] = [
   'amount',
   'amountUnits',
   'released',
+  'status',
+  'submittedAt',
+  'deliverable',
 ] as const;
 
 /**
