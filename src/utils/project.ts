@@ -20,6 +20,7 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'releasedAmount',
   'releasedAmountUnits',
   'status',
+  'acceptance',
   'reputationIssued',
   'dispute',
   'chain',

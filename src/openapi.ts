@@ -932,6 +932,7 @@ const spec = {
           { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
           { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
+          { name: 'acceptance', in: 'query', schema: { type: 'string', enum: ['pending', 'accepted', 'declined'] }, description: 'Filter by freelancer acceptance status' },
           { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
           { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
           { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
@@ -1085,13 +1086,60 @@ const spec = {
         }),
       },
     },
+    '/api/v1/contracts/{id}/accept': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Freelancer accepts the contract terms',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['freelancer', 'termsHash'],
+            properties: {
+              freelancer: { type: 'string' },
+              termsHash: { type: 'string', description: 'Expected SHA-256 hash of canonical contract terms' },
+            },
+            additionalProperties: false,
+          }),
+        },
+        responses: {
+          ...ok('Contract accepted', contractRef),
+          400: errorResponse('Invalid request body or contract id'),
+          403: errorResponse('Only the contract freelancer may accept'),
+          409: errorResponse('terms_mismatch or already_responded'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/decline': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Freelancer declines the contract terms and cancels it',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['freelancer'],
+            properties: { freelancer: { type: 'string' }, reason: { type: 'string', maxLength: 500 } },
+            additionalProperties: false,
+          }),
+        },
+        responses: {
+          ...ok('Declined contract, now cancelled', contractRef),
+          400: errorResponse('Invalid request body or contract id'),
+          403: errorResponse('Only the contract freelancer may decline'),
+          409: errorResponse('Contract has already been funded or answered'),
+        },
+      },
+    },
     '/api/v1/contracts/{id}/deposit': {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), 409: errorResponse('awaiting_acceptance or another contract-state conflict') },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
@@ -2108,6 +2156,7 @@ const spec = {
           'releasedAmount',
           'releasedAmountUnits',
           'status',
+          'acceptance',
           'reputationIssued',
           'revision',
           'version',
@@ -2147,6 +2196,7 @@ const spec = {
             description: 'Canonical decimal string released amount in token base units.',
           },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          acceptance: { $ref: '#/components/schemas/Acceptance' },
           reputationIssued: { type: 'boolean' },
           fundingDeadline: { type: 'string', format: 'date-time' },
           expiredAt: { type: 'string', format: 'date-time' },
@@ -2160,6 +2210,17 @@ const spec = {
           version: { type: 'integer', minimum: 1, description: 'Entity version behind the ETag; increments on every state change.' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      Acceptance: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['status', 'termsHash', 'respondedAt'],
+        properties: {
+          status: { type: 'string', enum: ['pending', 'accepted', 'declined'] },
+          termsHash: { type: 'string', description: 'SHA-256 of canonical JSON contract terms' },
+          respondedAt: { type: 'string', format: 'date-time', nullable: true },
+          reason: { type: 'string', maxLength: 500 },
         },
       },
       TxBuildRequest: {
@@ -2427,6 +2488,8 @@ const PROTECTED: Array<[string, string]> = [
   ['/api/v1/contracts', 'post'],
   ['/api/v1/contracts/{id}', 'patch'],
   ['/api/v1/contracts/{id}', 'delete'],
+  ['/api/v1/contracts/{id}/accept', 'post'],
+  ['/api/v1/contracts/{id}/decline', 'post'],
   ['/api/v1/contracts/{id}/deposit', 'post'],
   ['/api/v1/contracts/{id}/extend-deadline', 'post'],
   ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
@@ -2512,6 +2575,8 @@ function withEtags<T extends { paths: object }>(doc: T): T {
   const mutations: Array<[string, string]> = [
     ['/api/v1/contracts/{id}', 'patch'],
     ['/api/v1/contracts/{id}', 'delete'],
+    ['/api/v1/contracts/{id}/accept', 'post'],
+    ['/api/v1/contracts/{id}/decline', 'post'],
     ['/api/v1/contracts/{id}/extend-deadline', 'post'],
     ['/api/v1/contracts/{id}/deposit', 'post'],
     ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
@@ -2586,6 +2651,8 @@ function withPauseGuard<T extends { paths: object }>(doc: T): T {
   const paths = doc.paths as Record<string, { post?: Operation }>;
   for (const path of [
     '/api/v1/contracts',
+    '/api/v1/contracts/{id}/accept',
+    '/api/v1/contracts/{id}/decline',
     '/api/v1/contracts/{id}/deposit',
     '/api/v1/contracts/{id}/milestones/{index}/release',
     '/api/v1/contracts/{id}/dispute',

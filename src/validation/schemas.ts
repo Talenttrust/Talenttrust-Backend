@@ -140,6 +140,14 @@ export const DepositBody = z
   })
   .strict();
 
+export const AcceptContractBody = z
+  .object({ freelancer: z.string().min(1), termsHash: z.string().min(1) })
+  .strict();
+
+export const DeclineContractBody = z
+  .object({ freelancer: z.string().min(1), reason: z.string().max(500).optional() })
+  .strict();
+
 export const DisputeBody = z
   .object({
     raisedBy: z.string().min(1).optional(),
@@ -165,6 +173,7 @@ export const ListQuery = z
   .object({
     // Comma-separated statuses; each value is checked by the route (invalid_query).
     status: z.string().optional(),
+    acceptance: z.string().optional(),
     party: z.string().max(64).optional(),
     role: z.string().optional(),
     token: z.string().optional(),
