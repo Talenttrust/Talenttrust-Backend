@@ -51,6 +51,17 @@ const errorResponses = {
     description: 'Conflict',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
   },
+  429: {
+    description: 'Rate limited',
+    content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+    headers: {
+      'Retry-After': { schema: { type: 'string' }, description: 'Seconds until requests are unblocked' },
+      'RateLimit-Limit': { schema: { type: 'string' } },
+      'RateLimit-Remaining': { schema: { type: 'string' } },
+      'RateLimit-Reset': { schema: { type: 'string' } },
+      'RateLimit-Policy': { schema: { type: 'string' } },
+    },
+  },
   500: {
     description: 'Internal error',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
@@ -2607,6 +2618,35 @@ function withPauseGuard<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
+/** Add 429 to API v1 routes. */
+function withRateLimit<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, any>;
+  for (const [p, methods] of Object.entries(paths)) {
+    if (p.startsWith('/api/v1')) {
+      for (const method of Object.keys(methods)) {
+        if (typeof methods[method] === 'object' && methods[method]) {
+          const op = methods[method];
+          op.responses = op.responses || {};
+          if (!op.responses[429]) {
+            op.responses[429] = {
+              description: 'Rate limited',
+              headers: {
+                'Retry-After': { schema: { type: 'string' } },
+                'RateLimit-Limit': { schema: { type: 'string' } },
+                'RateLimit-Remaining': { schema: { type: 'string' } },
+                'RateLimit-Reset': { schema: { type: 'string' } },
+                'RateLimit-Policy': { schema: { type: 'string' } },
+              },
+              content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+            };
+          }
+        }
+      }
+    }
+  }
+  return doc;
+}
+
 /** 413/415 (and invalid_body) on the routes that take a JSON body. */
 function withBodyErrors<T extends { paths: object }>(doc: T): T {
   const paths = doc.paths as Record<string, { post?: Operation }>;
@@ -2640,7 +2680,7 @@ function withMethodNotAllowed<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withMethodNotAllowed(withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec))))))));
+export const openapi = withRateLimit(withMethodNotAllowed(withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))))))));
 
 const SWAGGER_VERSION = '5.17.14';
 const SWAGGER_CSS = `https://unpkg.com/swagger-ui-dist@${SWAGGER_VERSION}/swagger-ui.css`;

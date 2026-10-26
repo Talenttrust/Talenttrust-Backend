@@ -71,6 +71,10 @@ export const config = {
   healthCacheMs: positiveIntEnv('HEALTH_CACHE_MS', 10000),
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
+  /** Native SAC token contract id for XLM on the configured network. */
+  nativeTokenContractId:
+    process.env.NATIVE_TOKEN_CONTRACT_ID ||
+    'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

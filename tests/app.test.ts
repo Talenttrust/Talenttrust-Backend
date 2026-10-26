@@ -517,3 +517,55 @@ describe('unfunded contract edits and withdrawal', () => {
   });
 });
 
+
+
+  describe('rate limiting', () => {
+    it('returns 429 with Retry-After on the 11th rapid POST /api/v1/contracts from one client', async () => {
+      process.env.RATE_LIMIT_ENABLED = 'true';
+      process.env.RATE_LIMIT_WRITE_PER_MIN = '20';
+      process.env.RATE_LIMIT_READ_PER_MIN = '120';
+      const app2 = createApp(new EscrowStore());
+      for (let i = 0; i < 10; i++) {
+        const res = await request(app2)
+          .post('/api/v1/contracts')
+          .send({ client: `GA${i}`, freelancer: `GB${i}`, milestones: [{ amount: 100 }] });
+        expect([201, 429]).toContain(res.status);
+      }
+      const res11 = await request(app2)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA10', freelancer: 'GB10', milestones: [{ amount: 100 }] });
+      expect(res11.status).toBe(429);
+      expect(res11.headers['retry-after']).toBeDefined();
+      expect(res11.body.error).toBe('rate_limited');
+    });
+
+    it('exposes rate limit headers', async () => {
+      process.env.RATE_LIMIT_ENABLED = 'true';
+      const app2 = createApp(new EscrowStore());
+      const res = await request(app2).get('/api/v1/stats').expect(200);
+      expect(res.headers['ratelimit-limit']).toBeDefined();
+      expect(res.headers['ratelimit-remaining']).toBeDefined();
+      expect(res.headers['ratelimit-reset']).toBeDefined();
+    });
+
+    it('never limits /health', async () => {
+      process.env.RATE_LIMIT_ENABLED = 'true';
+      const app2 = createApp(new EscrowStore());
+      for (let i = 0; i < 30; i++) {
+        const res = await request(app2).get('/health');
+        expect(res.status).toBe(200);
+      }
+    });
+
+    it('RATE_LIMIT_ENABLED=false disables rate limiting', async () => {
+      process.env.RATE_LIMIT_ENABLED = 'false';
+      const app2 = createApp(new EscrowStore());
+      for (let i = 0; i < 25; i++) {
+        const res = await request(app2)
+          .post('/api/v1/contracts')
+          .send({ client: `GC${i}`, freelancer: `GD${i}`, milestones: [{ amount: 100 }] });
+        expect(res.status).not.toBe(429);
+      }
+      process.env.RATE_LIMIT_ENABLED = 'true';
+    });
+  });

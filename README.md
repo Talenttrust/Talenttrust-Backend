@@ -335,3 +335,13 @@ vercel deploy --prod
 ## License
 
 MIT
+
+
+## Rate limiting
+
+- Per-client token bucket: 120 req/min (burst 60) for GET, 20 req/min (burst 10) for POST under `/api/v1`.
+- Exempt: `/health`, `/docs`, `/openapi.json`.
+- Headers: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `RateLimit-Policy`.
+- Exceeded: `429` with `error: "rate_limited"` and `Retry-After` seconds.
+- Behind proxies (Vercel): set `TRUST_PROXY` (defaults to `1` if `VERCEL` is set, else `false`).
+- Config: `RATE_LIMIT_ENABLED`, `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`.

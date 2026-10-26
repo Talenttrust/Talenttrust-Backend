@@ -65,6 +65,7 @@ import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge'
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
+import { createRateLimitMiddleware } from './rateLimitMiddleware';
 
 declare global {
   namespace Express {
@@ -561,9 +562,17 @@ export function createApp(
   // Strong, version-based ETags are set explicitly on contract routes.
   app.set('etag', false);
   app.disable('x-powered-by');
-  // Trust the first hop (Vercel / any reverse proxy) so req.protocol reflects X-Forwarded-Proto;
-  // originGuard compares same-origin requests against it.
-  app.set('trust proxy', 1);
+  // Trust proxy configuration
+  const trustProxyEnv = process.env.TRUST_PROXY;
+  if (trustProxyEnv !== undefined) {
+    if (trustProxyEnv === 'true') app.set('trust proxy', true);
+    else if (trustProxyEnv === 'false') app.set('trust proxy', false);
+    else app.set('trust proxy', trustProxyEnv);
+  } else if (process.env.VERCEL) {
+    app.set('trust proxy', 1);
+  } else {
+    app.set('trust proxy', false);
+  }
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
   app.use((req, res, next) => {
@@ -660,6 +669,9 @@ export function createApp(
   app.use((req, res, next) =>
     (req.method === 'POST' && objectBodyRoutes.test(req.path) ? jsonLenient : jsonStrict)(req, res, next),
   );
+
+  // Rate limiting
+  app.use(createRateLimitMiddleware());
 
   // Structured access log on response finish.
   app.use((req, res, next) => {

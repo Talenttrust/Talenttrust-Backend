@@ -116,6 +116,7 @@ export const ERRORS = {
   invalid_role: { status: 400, title: 'Invalid role', detail: 'role must be client, freelancer, or all' },
   invalid_actor: { status: 400, title: 'Invalid actor', detail: 'as must be a single non-empty address string' },
   origin_not_allowed: { status: 403, title: 'Origin not allowed', detail: 'Origin is not allowed by CORS policy' },
+  rate_limited: { status: 429, title: 'Rate limited', detail: 'Too many requests' },
   // On-chain pause
   contract_paused: {
     status: 503,
@@ -134,3 +135,4 @@ export type ErrorKey = keyof typeof ERRORS;
 export const PROBLEM_TYPE_BASE = 'https://talenttrust-backend.vercel.app/errors';
 
 export const isErrorKey = (code: string): code is ErrorKey => Object.prototype.hasOwnProperty.call(ERRORS, code);
+

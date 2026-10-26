@@ -15,6 +15,8 @@ import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
+import { parseAccount, parseContractAddress } from './stellar/address';
+import { config } from './config';
 
 export { HttpError } from './amount-error';
 
