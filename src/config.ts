@@ -55,6 +55,8 @@ export const config = {
   /** Minimum interval between cache-bypassing ?refresh=true fetches. */
   chainRefreshMinIntervalMs: intEnv(process.env.CHAIN_REFRESH_MIN_INTERVAL_MS, 5000),
   requireIfMatch: process.env.REQUIRE_IF_MATCH === 'true',
+  /** Require freelancer acceptance before new escrows may be funded. */
+  requireAcceptance: process.env.REQUIRE_ACCEPTANCE !== 'false',
   apiPaused: process.env.API_PAUSED === 'true',
   pauseCheckTtlMs: Number(process.env.PAUSE_CHECK_TTL_MS) || 10000,
   pauseFailMode: (process.env.PAUSE_FAIL_MODE === 'closed' ? 'closed' : 'open') as 'open' | 'closed',

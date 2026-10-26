@@ -45,12 +45,14 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
-| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
+| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?acceptance=pending\|accepted\|declined`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
 | GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
 | POST | `/api/v1/contracts/:id/deposit` | `{ "amount": 100 }` |
+| POST | `/api/v1/contracts/:id/accept` | Freelancer accepts the offer with `{ "freelancer": "G...", "termsHash": "…" }`; deposit is blocked until accepted |
+| POST | `/api/v1/contracts/:id/decline` | Freelancer declines the offer with `{ "freelancer": "G...", "reason": "…" }` (reason optional, at most 500 characters) |
 | POST | `/api/v1/contracts/:id/extend-deadline` | `{ "client": "G...", "fundingDeadline": "2026-01-15T00:00:00.000Z" }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
@@ -282,7 +284,7 @@ result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
-`RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
+`RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), `REQUIRE_ACCEPTANCE` (default `true`; set to `false` only for legacy deployments that cannot yet enforce offer acceptance), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any

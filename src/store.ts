@@ -15,6 +15,8 @@ import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
+import { createHash } from 'crypto';
+import { config } from './config';
 
 export { HttpError } from './amount-error';
 
@@ -44,6 +46,7 @@ export interface Cursor {
 
 export interface QueryFilters {
   status?: string[];
+  acceptance?: AcceptanceStatus;
   party?: string;
   role?: 'client' | 'freelancer';
   token?: string;
@@ -122,6 +125,37 @@ export interface ChainInfo {
   drift: DriftItem[];
 }
 
+export type AcceptanceStatus = 'pending' | 'accepted' | 'declined';
+
+export interface Acceptance {
+  status: AcceptanceStatus;
+  termsHash: string;
+  respondedAt: string | null;
+  reason?: string;
+}
+
+export interface ContractTerms {
+  client: string;
+  freelancer: string;
+  token: string;
+  milestones: { title: string; amount: number | string }[];
+}
+
+/** Canonical JSON sorts object keys recursively and preserves array order. */
+export function canonicalJSON(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJSON(record[key])}`)
+    .join(',')}}`;
+}
+
+export function termsHash(terms: ContractTerms): string {
+  return createHash('sha256').update(canonicalJSON(terms)).digest('hex');
+}
+
 export interface EscrowContract {
   id: number;
   title: string;
@@ -142,6 +176,7 @@ export interface EscrowContract {
   /** Canonical decimal-string released amount (base units). */
   releasedAmountUnits: string;
   status: ContractStatus;
+  acceptance: Acceptance;
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
@@ -371,6 +406,7 @@ interface InternalContract {
   fundedAmount: bigint;
   releasedAmount: bigint;
   status: ContractStatus;
+  acceptance: Acceptance;
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
@@ -399,6 +435,8 @@ export type MutationRecorder = (action: string, result: string) => void;
 /** Store methods counted by escrow_mutations_total, mapped to their `action` label. */
 const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
   ['create', 'create'],
+  ['accept', 'accept'],
+  ['decline', 'decline'],
   ['deposit', 'deposit'],
   ['release', 'release'],
   ['openDispute', 'dispute'],
@@ -418,6 +456,18 @@ const parseIsoMillis = (value: unknown): number | undefined => {
   return Number.isFinite(millis) ? millis : undefined;
 };
 const MAX_REVISIONS = 50;
+
+function termsFor(client: string, freelancer: string, token: string, milestones: InternalContract['milestones']): ContractTerms {
+  return {
+    client,
+    freelancer,
+    token,
+    milestones: milestones.map((m) => ({
+      title: m.title,
+      amount: m.amount <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(m.amount) : m.amount.toString(),
+    })),
+  };
+}
 
 /** Validate a milestones array into internal (bigint) milestones. */
 function parseMilestones(input: unknown): InternalContract['milestones'] {
@@ -477,6 +527,7 @@ function toPublic(c: InternalContract): EscrowContract {
     releasedAmount: Number(c.releasedAmount), // deprecated
     releasedAmountUnits: c.releasedAmount.toString(),
     status: c.status,
+    acceptance: c.acceptance,
     reputationIssued: c.reputationIssued,
     dispute: c.dispute,
     chain: c.chain,
@@ -500,6 +551,7 @@ export class EscrowStore {
   private leaderboardCache: LeaderboardCache | null = null;
   private priorWeightOverride?: number;
   private readonly clock: Clock;
+  private readonly requireAcceptance: boolean;
   /** Domain events (webhooks), emitted only after a mutation succeeds. */
   readonly events: StoreEventEmitter;
   private reviews: Review[] = [];
@@ -515,18 +567,21 @@ export class EscrowStore {
 
   /** `new EscrowStore(clock)`, `new EscrowStore(events)` or `new EscrowStore({ clock?, priorWeight?, events? })`. */
   constructor(
-    clockOrOptions: Clock | StoreEventEmitter | { clock?: Clock; priorWeight?: number; events?: StoreEventEmitter } = () => new Date(),
+    clockOrOptions: Clock | StoreEventEmitter | { clock?: Clock; priorWeight?: number; events?: StoreEventEmitter; requireAcceptance?: boolean } = () => new Date(),
   ) {
     if (typeof clockOrOptions === 'function') {
       this.clock = clockOrOptions;
       this.events = new StoreEventEmitter();
+      this.requireAcceptance = config.requireAcceptance;
     } else if (clockOrOptions instanceof StoreEventEmitter) {
       this.clock = () => new Date();
       this.events = clockOrOptions;
+      this.requireAcceptance = config.requireAcceptance;
     } else {
       this.clock = clockOrOptions.clock ?? (() => new Date());
       this.priorWeightOverride = clockOrOptions.priorWeight;
       this.events = clockOrOptions.events ?? new StoreEventEmitter();
+      this.requireAcceptance = clockOrOptions.requireAcceptance ?? config.requireAcceptance;
     }
     // Count every domain mutation as ok / <error code> for the metrics endpoint, and
     // append an audit entry (before/after state) for every one that succeeds.
@@ -771,17 +826,23 @@ export class EscrowStore {
     const nowDate = this.now();
     const fundingDeadline = this.validateCreationDeadline(input.fundingDeadline, nowDate.getTime());
     const now = nowDate.toISOString();
+    const token = typeof input.token === 'string' && input.token ? input.token : 'XLM';
     const c: InternalContract = {
       id: this.nextId++,
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
       client,
       freelancer,
-      token: typeof input.token === 'string' && input.token ? input.token : 'XLM',
+      token,
       milestones,
       totalAmount,
       fundedAmount: 0n,
       releasedAmount: 0n,
       status: 'Created',
+      acceptance: {
+        status: this.requireAcceptance ? 'pending' : 'accepted',
+        termsHash: termsHash(termsFor(client, freelancer, token, milestones)),
+        respondedAt: this.requireAcceptance ? null : now,
+      },
       reputationIssued: false,
       revision: 1,
       version: 1,
@@ -836,6 +897,13 @@ export class EscrowStore {
     if (milestones && totalAmount !== undefined) {
       c.milestones = milestones;
       c.totalAmount = totalAmount;
+      if (changes.some((change) => change.field === 'milestones')) {
+        c.acceptance = {
+          status: this.requireAcceptance ? 'pending' : 'accepted',
+          termsHash: termsHash(termsFor(c.client, c.freelancer, c.token, milestones)),
+          respondedAt: this.requireAcceptance ? null : at,
+        };
+      }
     }
     c.revision += 1;
     c.revisions.push({ revision: c.revision, at, changes });
@@ -862,7 +930,18 @@ export class EscrowStore {
 
   /** Allowed actions for contract `id` per the shared state machine (`as` only affects the dispute party check). */
   allowedActions(id: number, as?: string): { status: ContractStatus; actions: AllowedAction[] } {
-    return allowedActions(this.getInternal(id), as);
+    const c = this.getInternal(id);
+    const result = allowedActions(c, as);
+    return this.requireAcceptance && c.acceptance.status === 'pending'
+      ? {
+          ...result,
+          actions: result.actions.map((action) =>
+            action.action === 'deposit'
+              ? { ...action, allowed: false, code: 'awaiting_acceptance', reason: 'Freelancer acceptance is required' }
+              : action,
+          ),
+        }
+      : result;
   }
 
   /**
@@ -883,10 +962,48 @@ export class EscrowStore {
     return toPublic(c);
   }
 
+  accept(id: number, freelancerRaw: unknown, termsHashRaw: unknown, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    if (typeof freelancerRaw !== 'string' || freelancerRaw !== c.freelancer || (caller !== undefined && caller !== c.freelancer)) {
+      throw new HttpError(403, 'forbidden', 'Only the freelancer can accept this contract');
+    }
+    if (c.status !== 'Created' || c.acceptance.status !== 'pending') {
+      throw new HttpError(409, 'already_responded', `Acceptance is already ${c.acceptance.status}`);
+    }
+    if (typeof termsHashRaw !== 'string' || termsHashRaw !== c.acceptance.termsHash) {
+      throw new HttpError(409, 'terms_mismatch', 'termsHash does not match the contract terms');
+    }
+    c.acceptance.status = 'accepted';
+    c.acceptance.respondedAt = this.nowIso();
+    return this.touch(c);
+  }
+
+  decline(id: number, freelancerRaw: unknown, reasonRaw?: unknown, caller?: string): EscrowContract {
+    const c = this.getInternal(id);
+    if (typeof freelancerRaw !== 'string' || freelancerRaw !== c.freelancer || (caller !== undefined && caller !== c.freelancer)) {
+      throw new HttpError(403, 'forbidden', 'Only the freelancer can decline this contract');
+    }
+    if (c.status !== 'Created' || c.acceptance.status !== 'pending') {
+      throw new HttpError(409, 'already_responded', `Acceptance is already ${c.acceptance.status}`);
+    }
+    if (reasonRaw !== undefined && reasonRaw !== null && (typeof reasonRaw !== 'string' || reasonRaw.length > 500)) {
+      throw new HttpError(400, 'invalid_reason', 'reason must be a string of at most 500 characters');
+    }
+    assertAllowed('cancel', c);
+    c.acceptance.status = 'declined';
+    c.acceptance.respondedAt = this.nowIso();
+    if (typeof reasonRaw === 'string' && reasonRaw) c.acceptance.reason = reasonRaw;
+    c.status = TRANSITIONS.cancel.nextStatus(c);
+    return this.touch(c);
+  }
+
   /** @security when `caller` is given it must equal contract.client — mirrors deposit_funds's client.require_auth() */
   deposit(id: number, amountRaw: unknown, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'deposit');
+    if (this.requireAcceptance && c.acceptance.status === 'pending') {
+      throw new HttpError(409, 'awaiting_acceptance', 'Freelancer must accept the contract terms before escrow can be funded');
+    }
     assertAllowed('deposit', c, { amount: amountRaw });
     c.fundedAmount = checkedAdd(c.fundedAmount, parseAmount(amountRaw, 'amount'), 'fundedAmount');
     c.status = TRANSITIONS.deposit.nextStatus(c);
@@ -958,6 +1075,11 @@ export class EscrowStore {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'cancel');
     assertAllowed('cancel', c);
+    if (c.acceptance.status === 'pending') {
+      c.acceptance.status = 'declined';
+      c.acceptance.respondedAt = this.nowIso();
+      c.acceptance.reason = 'Cancelled by client';
+    }
     c.status = TRANSITIONS.cancel.nextStatus(c);
     return this.touch(c);
   }
@@ -1687,6 +1809,7 @@ export class EscrowStore {
         { title: 'Implementation', amount: 7500000 },
       ],
     });
+    if (a.acceptance.status === 'pending') this.accept(a.id, a.freelancer, a.acceptance.termsHash);
     this.deposit(a.id, 15000000);
     this.release(a.id, 0);
     const b = this.create({
@@ -1696,6 +1819,7 @@ export class EscrowStore {
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [{ title: 'Audit report', amount: 20000000 }],
     });
+    if (b.acceptance.status === 'pending') this.accept(b.id, b.freelancer, b.acceptance.termsHash);
     this.deposit(b.id, 20000000);
     this.release(b.id, 0);
     this.rate(b.id, 5);
@@ -1747,6 +1871,7 @@ function compareContracts(a: InternalContract, b: InternalContract, field: SortF
 function matchesFilters(c: InternalContract, f: QueryFilters | undefined): boolean {
   if (!f) return true;
   if (f.status && !f.status.includes(c.status)) return false;
+  if (f.acceptance && c.acceptance.status !== f.acceptance) return false;
   if (f.party !== undefined) {
     if (f.role === 'client') {
       if (c.client !== f.party) return false;

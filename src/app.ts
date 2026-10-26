@@ -40,6 +40,8 @@ import {
   MilestoneReleaseParams,
   CreateContractBody,
   DepositBody,
+  AcceptContractBody,
+  DeclineContractBody,
   DisputeBody,
   ResolveBody,
   RateBody,
@@ -371,6 +373,12 @@ function parseFilters(q: Request['query']): QueryFilters {
     for (const status of f.status) {
       if (!(LIST_STATUSES as string[]).includes(status)) throw new HttpError(400, 'invalid_query', `invalid status ${status}`);
     }
+  }
+  if (typeof q.acceptance === 'string') {
+    if (!['pending', 'accepted', 'declined'].includes(q.acceptance)) {
+      throw new HttpError(400, 'invalid_query', 'acceptance must be pending, accepted, or declined');
+    }
+    f.acceptance = q.acceptance as QueryFilters['acceptance'];
   }
   if (typeof q.party === 'string') f.party = q.party;
   if (typeof q.role === 'string') {
@@ -727,6 +735,8 @@ export function createApp(
         'GET  /api/v1/contracts',
         'POST /api/v1/contracts',
         'GET  /api/v1/contracts/:id',
+        'POST /api/v1/contracts/:id/accept',
+        'POST /api/v1/contracts/:id/decline',
         'GET  /api/v1/contracts/:id/receipt',
         'PATCH /api/v1/contracts/:id',
         'DELETE /api/v1/contracts/:id',
@@ -1139,6 +1149,35 @@ export function createApp(
   };
   /** Expose the post-mutation entity tag. */
   const setEtag = (res: Response, contract: EscrowContract) => res.setHeader('ETag', getContractEtag(contract));
+
+  v1.post(
+    '/contracts/:id/accept',
+    ...jsonObjectBody,
+    requireAuth,
+    validate({ params: IdParam, body: AcceptContractBody }),
+    checkPreconditions,
+    wrap((req, res) => {
+      const updated = audited(req, () =>
+        store.accept(Number(req.params.id), req.body.freelancer, req.body.termsHash, callerOf(req)),
+      );
+      setEtag(res, updated);
+      return publicContract(updated);
+    }),
+  );
+  v1.post(
+    '/contracts/:id/decline',
+    ...jsonObjectBody,
+    requireAuth,
+    validate({ params: IdParam, body: DeclineContractBody }),
+    checkPreconditions,
+    wrap((req, res) => {
+      const updated = audited(req, () =>
+        store.decline(Number(req.params.id), req.body.freelancer, req.body.reason, callerOf(req)),
+      );
+      setEtag(res, updated);
+      return publicContract(updated);
+    }),
+  );
 
   // With wallet auth the authenticated address stands in for body.client.
   const clientOf = (req: Request): unknown => {
