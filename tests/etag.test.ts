@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 describe('TalentTrust API', () => {
   const app = createApp(new EscrowStore());
@@ -9,7 +10,7 @@ describe('TalentTrust API', () => {
     it('serves ETag and Cache-Control: no-cache, supports If-None-Match 304, and bumps after mutation', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'G1', freelancer: 'G2', milestones: [{ amount: 500 }] });
+        .send({ client: account('G1'), freelancer: account('G2'), milestones: [{ amount: 500 }] });
       expect(created.status).toBe(201);
       const contractId = created.body.id;
       expect(created.body.version).toBe(1);
@@ -50,7 +51,7 @@ describe('TalentTrust API', () => {
     it('rejects stale If-Match on release with 412 and does not release', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GCLIENT', freelancer: 'GFREE', milestones: [{ amount: 750 }] });
+        .send({ client: account('GCLIENT'), freelancer: account('GFREE'), milestones: [{ amount: 750 }] });
       const contractId = created.body.id;
       await request(app).post(`/api/v1/contracts/${contractId}/deposit`).send({ amount: 750 });
 
@@ -77,7 +78,7 @@ describe('TalentTrust API', () => {
     it('always passes with If-Match: *', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GAX', freelancer: 'GBX', milestones: [{ amount: 300 }] });
+        .send({ client: account('GAX'), freelancer: account('GBX'), milestones: [{ amount: 300 }] });
       const contractId = created.body.id;
 
       const dep = await request(app)
@@ -92,7 +93,7 @@ describe('TalentTrust API', () => {
     it('failed mutation does not bump version', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA1', freelancer: 'GB1', milestones: [{ amount: 100 }] });
+        .send({ client: account('GA1'), freelancer: account('GB1'), milestones: [{ amount: 100 }] });
       const contractId = created.body.id;
 
       // Fail deposit with negative amount
@@ -111,10 +112,10 @@ describe('TalentTrust API', () => {
 
       const c1 = await request(testApp)
         .post('/api/v1/contracts')
-        .send({ client: 'CL1', freelancer: 'FR1', milestones: [{ amount: 100 }] });
+        .send({ client: account('CL1'), freelancer: account('FR1'), milestones: [{ amount: 100 }] });
       const c2 = await request(testApp)
         .post('/api/v1/contracts')
-        .send({ client: 'CL2', freelancer: 'FR2', milestones: [{ amount: 200 }] });
+        .send({ client: account('CL2'), freelancer: account('FR2'), milestones: [{ amount: 200 }] });
 
       // List all
       const list1 = await request(testApp).get('/api/v1/contracts');
@@ -130,7 +131,7 @@ describe('TalentTrust API', () => {
       expect(list304.text).toBe('');
 
       // Filter changes -> list ETag changes
-      const listFilter = await request(testApp).get('/api/v1/contracts?party=CL1');
+      const listFilter = await request(testApp).get(`/api/v1/contracts?party=${account('CL1')}`);
       expect(listFilter.status).toBe(200);
       const etagFilter = listFilter.header.etag;
       expect(etagFilter).not.toBe(etagList1);
@@ -149,7 +150,7 @@ describe('TalentTrust API', () => {
 
         const created = await request(requireApp)
           .post('/api/v1/contracts')
-          .send({ client: 'C_REQ', freelancer: 'F_REQ', milestones: [{ amount: 100 }] });
+          .send({ client: account('C_REQ'), freelancer: account('F_REQ'), milestones: [{ amount: 100 }] });
         const contractId = created.body.id;
 
         // Mutation without If-Match should fail with 428

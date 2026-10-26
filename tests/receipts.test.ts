@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import {
   ReceiptManager,
   canonicalJSON,
@@ -126,8 +127,8 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
       const res = await request(app)
         .post('/api/v1/contracts?receipt=true')
         .send({
-          client: 'GC_RECEIPT_CLIENT',
-          freelancer: 'GD_RECEIPT_FREELANCER',
+          client: account('GC_RECEIPT_CLIENT'),
+          freelancer: account('GD_RECEIPT_FREELANCER'),
           milestones: [{ amount: 500 }],
         })
         .expect(201);
@@ -142,7 +143,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
     it('attaches Receipt header on state mutations (deposit, release, dispute, cancel, reputation) when ?receipt=true', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] });
       const cid = created.body.id;
 
       // Deposit with receipt=true
@@ -175,7 +176,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
     it('does not attach Receipt header when ?receipt=true is omitted', async () => {
       const res = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 50 }] })
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 50 }] })
         .expect(201);
       expect(res.headers['receipt']).toBeUndefined();
     });
@@ -202,7 +203,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
       // 1. Create a fresh contract in Created state
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'G_MATCH_CLIENT', freelancer: 'G_MATCH_FREELANCER', milestones: [{ amount: 500 }] })
+        .send({ client: account('G_MATCH_CLIENT'), freelancer: account('G_MATCH_FREELANCER'), milestones: [{ amount: 500 }] })
         .expect(201);
       const cid = created.body.id;
 

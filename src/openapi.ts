@@ -75,8 +75,8 @@ const addressParam = {
   name: 'address',
   in: 'path',
   required: true,
-  schema: { type: 'string', minLength: 1 },
-  description: 'Stellar address',
+  schema: { $ref: '#/components/schemas/StellarAccount' },
+  description: 'Stellar G… account address',
 };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 const reviewRef = { $ref: '#/components/schemas/Review' };
@@ -555,7 +555,7 @@ const spec = {
             in: 'query',
             required: true,
             description: 'Stellar G… ed25519 public key.',
-            schema: { type: 'string' },
+            schema: { $ref: '#/components/schemas/StellarAccount' },
           },
         ],
         responses: {
@@ -696,7 +696,7 @@ const spec = {
       get: {
         tags: ['Reputation'],
         summary: 'Read a freelancer reputation directly from Soroban (cached, 60 req/min per client)',
-        parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [{ name: 'address', in: 'path', required: true, schema: { $ref: '#/components/schemas/StellarAccount' } }],
         responses: {
           ...ok('On-chain reputation', { $ref: '#/components/schemas/ChainReputation' }),
           400: errorResponse('Invalid Stellar address'),
@@ -932,7 +932,7 @@ const spec = {
           { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
           { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
-          { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
+          { name: 'party', in: 'query', schema: { $ref: '#/components/schemas/StellarAccount' }, description: 'Client or freelancer account (validated and normalised)' },
           { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
           { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
           { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
@@ -957,7 +957,7 @@ const spec = {
               },
             },
           }),
-          400: errorResponse('invalid_query, invalid_cursor or invalid `?fields=` value'),
+          400: errorResponse('invalid_query, invalid_cursor, invalid party address (invalid_address) or invalid `?fields=` value'),
         },
       },
       post: {
@@ -971,9 +971,18 @@ const spec = {
             required: ['client', 'freelancer'],
             properties: {
               title: { type: 'string' },
-              client: { type: 'string' },
-              freelancer: { type: 'string' },
-              token: { type: 'string', default: 'XLM' },
+              client: { $ref: '#/components/schemas/StellarAccount' },
+              freelancer: { $ref: '#/components/schemas/StellarAccount' },
+              token: {
+                description:
+                  'Token contract address (C…), or `native` / `XLM` for the network native asset. ' +
+                  'Stored as the resolved SAC contract id; the original symbol is exposed as tokenSymbol.',
+                oneOf: [
+                  { $ref: '#/components/schemas/ContractAddress' },
+                  { type: 'string', enum: ['native', 'XLM'] },
+                ],
+                default: 'native',
+              },
               fundingDeadline: {
                 type: 'string',
                 format: 'date-time',
@@ -993,7 +1002,11 @@ const spec = {
         },
         responses: {
           201: { description: 'Created', content: json(contractRef) },
-          400: errorResponse('Invalid contract input'),
+          400: errorResponse(
+            'Invalid contract input: client/freelancer must be G… accounts (invalid_address), ' +
+              'parties must differ after normalisation (invalid_parties), and token must be a C… contract ' +
+              'or native/XLM (invalid_address).',
+          ),
         },
       },
     },
@@ -1263,8 +1276,14 @@ const spec = {
       get: {
         tags: ['Reputation'],
         summary: 'Get reputation for an address (freelancer and client)',
+        description:
+          'The address must be a valid G… Stellar account (checksum-validated and normalised). ' +
+          'A valid account with no history returns zeros.',
         parameters: [addressParam],
-        responses: ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
+        responses: {
+          ...ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
+          400: errorResponse('Invalid Stellar account address (invalid_address).'),
+        },
       },
     },
     '/api/v1/reputation/{address}/reviews': {
@@ -1371,6 +1390,19 @@ const spec = {
       },
     },
     schemas: {
+      StellarAccount: {
+        type: 'string',
+        pattern: '^G[A-Z2-7]{55}$',
+        description:
+          'Stellar ed25519 account address (strkey with a valid checksum). Muxed M… accounts are rejected.',
+        example: 'GACE4EDG4UIAAELYTPAXRIFNNTKNUQYYLWFCWWNTOHNN5PEFVGQXEOYC',
+      },
+      ContractAddress: {
+        type: 'string',
+        pattern: '^C[A-Z2-7]{55}$',
+        description: 'Stellar contract address (C… strkey with a valid checksum), such as a SAC token id.',
+        example: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      },
       AllowedActions: {
         type: 'object',
         required: ['status', 'actions'],
@@ -1638,7 +1670,7 @@ const spec = {
         type: 'object',
         required: ['address', 'completedContracts', 'totalRating', 'averageRating', 'source'],
         properties: {
-          address: { type: 'string' },
+          address: { $ref: '#/components/schemas/StellarAccount' },
           completedContracts: { type: 'integer' },
           totalRating: { type: 'integer' },
           averageRating: { type: 'number' },
@@ -1845,7 +1877,7 @@ const spec = {
         type: 'object',
         required: ['address', 'challenge', 'expiresAt'],
         properties: {
-          address: { type: 'string' },
+          address: { $ref: '#/components/schemas/StellarAccount' },
           challenge: { type: 'string', description: 'Sign these exact UTF-8 bytes with the wallet key.' },
           expiresAt: { type: 'string', format: 'date-time' },
         },
@@ -1854,7 +1886,7 @@ const spec = {
         type: 'object',
         required: ['address', 'challenge', 'signature'],
         properties: {
-          address: { type: 'string' },
+          address: { $ref: '#/components/schemas/StellarAccount' },
           challenge: { type: 'string' },
           signature: { type: 'string', description: 'Base64 ed25519 signature over the challenge string.' },
         },
@@ -1915,7 +1947,7 @@ const spec = {
       Reputation: {
         type: 'object',
         properties: {
-          address: { type: 'string' },
+          address: { $ref: '#/components/schemas/StellarAccount' },
           completedContracts: { type: 'integer' },
           totalRating: { type: 'integer' },
           averageRating: { type: 'number' },
@@ -2100,6 +2132,7 @@ const spec = {
           'client',
           'freelancer',
           'token',
+          'tokenSymbol',
           'milestones',
           'totalAmount',
           'totalAmountUnits',
@@ -2118,9 +2151,15 @@ const spec = {
         properties: {
           id: { type: 'integer' },
           title: { type: 'string' },
-          client: { type: 'string' },
-          freelancer: { type: 'string' },
-          token: { type: 'string' },
+          client: { $ref: '#/components/schemas/StellarAccount' },
+          freelancer: { $ref: '#/components/schemas/StellarAccount' },
+          token: { $ref: '#/components/schemas/ContractAddress' },
+          tokenSymbol: {
+            type: 'string',
+            nullable: true,
+            enum: ['XLM', null],
+            description: 'Token symbol when the token is the native asset; null for other SAC tokens.',
+          },
           milestones: { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
           totalAmount: {
             description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
@@ -2378,7 +2417,7 @@ const spec = {
         type: 'object',
         required: ['raisedBy'],
         properties: {
-          raisedBy: { type: 'string', minLength: 1 },
+          raisedBy: { $ref: '#/components/schemas/StellarAccount' },
           reason: { type: 'string', minLength: 1, maxLength: 1000 },
         },
         additionalProperties: false,

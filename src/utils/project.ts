@@ -12,6 +12,7 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'client',
   'freelancer',
   'token',
+  'tokenSymbol',
   'milestones',
   'totalAmount',
   'totalAmountUnits',

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -12,7 +13,7 @@ describe('funding deadlines and expiry', () => {
   let app: ReturnType<typeof createApp>;
 
   const create = (extra: Record<string, unknown> = {}) =>
-    request(app).post('/api/v1/contracts').send({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 100 }], ...extra });
+    request(app).post('/api/v1/contracts').send({ client: account('client'), freelancer: account('freelancer'), milestones: [{ amount: 100 }], ...extra });
 
   beforeEach(() => {
     delete process.env.CRON_SECRET;
@@ -27,7 +28,7 @@ describe('funding deadlines and expiry', () => {
       expect(explicit.status).toBe(201);
       expect(explicit.body.fundingDeadline).toBe(new Date(START + DAY).toISOString());
 
-      const defaulted = await request(app).post('/api/v1/contracts').send({ client: 'c2', freelancer: 'f2', milestones: [100] });
+      const defaulted = await request(app).post('/api/v1/contracts').send({ client: account('c2'), freelancer: account('f2'), milestones: [100] });
       expect(defaulted.body.fundingDeadline).toBe(new Date(START + 14 * DAY).toISOString());
     });
 
@@ -66,9 +67,9 @@ describe('funding deadlines and expiry', () => {
     });
 
     it('preserves funded contracts and accounts for partial funding on expiry', async () => {
-      const fundedId = (await create({ client: 'funded-client', freelancer: 'funded-freelancer' })).body.id;
+      const fundedId = (await create({ client: account('funded-client'), freelancer: account('funded-freelancer') })).body.id;
       await request(app).post(`/api/v1/contracts/${fundedId}/deposit`).send({ amount: 100 });
-      const partialId = (await create({ client: 'partial-client', freelancer: 'partial-freelancer' })).body.id;
+      const partialId = (await create({ client: account('partial-client'), freelancer: account('partial-freelancer') })).body.id;
       await request(app).post(`/api/v1/contracts/${partialId}/deposit`).send({ amount: 40 });
       now = START + 14 * DAY;
 
@@ -111,8 +112,8 @@ describe('funding deadlines and expiry', () => {
     });
 
     it('sweeps multiple contracts and is idempotent', async () => {
-      const first = (await create({ client: 'cron-client-1', freelancer: 'cron-freelancer-1' })).body.id;
-      const second = (await create({ client: 'cron-client-2', freelancer: 'cron-freelancer-2' })).body.id;
+      const first = (await create({ client: account('cron-client-1'), freelancer: account('cron-freelancer-1') })).body.id;
+      const second = (await create({ client: account('cron-client-2'), freelancer: account('cron-freelancer-2') })).body.id;
       now = START + 14 * DAY;
       const firstRun = await request(app).post('/api/cron/expire-contracts').set('Authorization', 'Bearer development-secret');
       expect(firstRun.status).toBe(200);
@@ -127,10 +128,10 @@ describe('funding deadlines and expiry', () => {
     it('allows only the client to extend to a later valid deadline', async () => {
       const id = (await create()).body.id;
       const deadline = new Date(START + 30 * DAY).toISOString();
-      const extended = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: 'client', fundingDeadline: deadline });
+      const extended = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: account('client'), fundingDeadline: deadline });
       expect(extended.status).toBe(200);
       expect(extended.body.fundingDeadline).toBe(deadline);
-      const unauthorized = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: 'freelancer', fundingDeadline: new Date(START + 31 * DAY).toISOString() });
+      const unauthorized = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: account('freelancer'), fundingDeadline: new Date(START + 31 * DAY).toISOString() });
       expect(unauthorized.status).toBe(403);
     });
 
@@ -140,7 +141,7 @@ describe('funding deadlines and expiry', () => {
       'invalid',
     ])('rejects an invalid or non-later extension', async (fundingDeadline) => {
       const id = (await create()).body.id;
-      const response = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: 'client', fundingDeadline });
+      const response = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: account('client'), fundingDeadline });
       expect(response.status).toBe(400);
       expect(response.body.error).toBe('invalid_deadline');
     });
@@ -148,7 +149,7 @@ describe('funding deadlines and expiry', () => {
     it('returns contract_expired when extending after lazy expiry', async () => {
       const id = (await create()).body.id;
       now = START + 14 * DAY;
-      const response = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: 'client', fundingDeadline: new Date(START + 30 * DAY).toISOString() });
+      const response = await request(app).post(`/api/v1/contracts/${id}/extend-deadline`).send({ client: account('client'), fundingDeadline: new Date(START + 30 * DAY).toISOString() });
       expect(response.status).toBe(409);
       expect(response.body.error).toBe('contract_expired');
     });

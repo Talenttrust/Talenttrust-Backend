@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import { constantTimeEqual } from '../src/metrics';
 
 function metricLine(body: string, name: string, labels: Record<string, string>): string | undefined {
@@ -92,7 +93,7 @@ describe('Prometheus metrics', () => {
     const app = createApp(new EscrowStore());
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] })
       .expect(201);
     const id = created.body.id;
     await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 }).expect(200);

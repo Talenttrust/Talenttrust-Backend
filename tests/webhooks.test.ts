@@ -3,6 +3,7 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { StoreEventEmitter } from '../src/events';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import { validateWebhookUrl, verifyWebhookSignature, WebhookManager } from '../src/webhooks';
 
 const event = (eventType: 'milestone.released' = 'milestone.released') => ({
@@ -47,9 +48,9 @@ describe('webhook delivery', () => {
     const seen: string[] = [];
     events.on((value) => seen.push(value.eventType));
     const store = new EscrowStore(events);
-    expect(() => store.create({ client: 'same', freelancer: 'same', milestones: [{ amount: 1 }] })).toThrow();
+    expect(() => store.create({ client: account('same'), freelancer: account('same'), milestones: [{ amount: 1 }] })).toThrow();
     expect(seen).toEqual([]);
-    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    const contract = store.create({ client: account('client'), freelancer: account('freelancer'), milestones: [{ amount: 1 }] });
     expect(seen).toEqual(['contract.created']);
     expect(() => store.deposit(contract.id, 2)).toThrow();
     expect(seen).toEqual(['contract.created']);
@@ -126,7 +127,7 @@ describe('webhook delivery', () => {
     await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
     const store = new EscrowStore(events);
     const started = Date.now();
-    store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    store.create({ client: account('client'), freelancer: account('freelancer'), milestones: [{ amount: 1 }] });
     expect(Date.now() - started).toBeLessThan(100);
     await waitFor(() => client.mock.calls.length === 1);
     resolveDelivery();

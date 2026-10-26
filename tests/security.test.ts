@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import { docsCsp, docsHtml } from '../src/openapi';
 import { normalizeOrigin, parseOrigins } from '../src/cors';
 
@@ -57,7 +58,7 @@ describe('CORS origin allowlist', () => {
     const post = await request(app)
       .post('/api/v1/contracts')
       .set('Origin', 'https://evil.example')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 10 }] });
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 10 }] });
     expect(post.status).toBe(403);
     expect(post.body.error).toBe('origin_not_allowed');
     expect(post.headers['access-control-allow-origin']).toBeUndefined();
@@ -82,7 +83,7 @@ describe('CORS origin allowlist', () => {
       .post('/api/v1/contracts')
       .set('Host', 'api.self.example')
       .set('Origin', 'http://api.self.example')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 10 }] });
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 10 }] });
     expect(res.status).toBe(201);
   });
 
@@ -92,7 +93,7 @@ describe('CORS origin allowlist', () => {
       .set('Host', 'api.self.example')
       .set('X-Forwarded-Proto', 'https')
       .set('Origin', 'https://api.self.example')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 10 }] });
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 10 }] });
     expect(res.status).toBe(201);
   });
 });

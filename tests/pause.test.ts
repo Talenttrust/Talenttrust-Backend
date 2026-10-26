@@ -1,9 +1,10 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import { PauseGuard } from '../src/pauseGuard';
 
-const contract = { client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] };
+const contract = { client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] };
 
 describe('pause guard', () => {
   afterEach(() => {

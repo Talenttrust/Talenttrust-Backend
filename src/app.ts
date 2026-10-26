@@ -56,6 +56,7 @@ import { parseFieldSpec, project } from './utils/project';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
+import { parseAccount } from './stellar/address';
 import { bigIntReplacer } from './amount';
 import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
@@ -372,7 +373,7 @@ function parseFilters(q: Request['query']): QueryFilters {
       if (!(LIST_STATUSES as string[]).includes(status)) throw new HttpError(400, 'invalid_query', `invalid status ${status}`);
     }
   }
-  if (typeof q.party === 'string') f.party = q.party;
+  if (typeof q.party === 'string') f.party = parseAccount(q.party, 'party');
   if (typeof q.role === 'string') {
     if (f.party === undefined) throw new HttpError(400, 'invalid_query', 'role requires party');
     if (q.role !== 'client' && q.role !== 'freelancer') throw new HttpError(400, 'invalid_query', 'role must be client or freelancer');
@@ -1278,7 +1279,7 @@ export function createApp(
   v1.get(
     '/reputation/:address',
     validate({ params: ReputationAddressParam }),
-    wrap((req) => store.getReputationWithClient(req.params.address)),
+    wrap((req) => store.getReputationWithClient(parseAccount(req.params.address, 'address'))),
   );
   v1.post(
     '/contracts/:id/reviews',

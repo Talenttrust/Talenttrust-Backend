@@ -2,8 +2,9 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { ChainReader, ChainReaderResult, ChainUnavailableError, OnChainEscrow } from '../src/chain';
+import { account, contract } from './helpers/addresses';
 
-const DEFAULT_TOKEN = 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const DEFAULT_TOKEN = contract('DEFAULT_TOKEN');
 
 class FakeChainReader implements ChainReader {
   public escrows = new Map<string, OnChainEscrow>();
@@ -38,15 +39,15 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     it('successfully links contract when parties, token, and milestones match', async () => {
       const created = store.create({
         title: 'Design audit',
-        client: 'GCLIENT11111111111111111111111111111111111111111111111111',
-        freelancer: 'GFREELANCER111111111111111111111111111111111111111111111',
+        client: account('GCLIENT11111111111111111111111111111111111111111111111111'),
+        freelancer: account('GFREELANCER111111111111111111111111111111111111111111111'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 500 }, { amount: 1000 }],
       });
 
       fakeChain.escrows.set('101', {
-        client: 'GCLIENT11111111111111111111111111111111111111111111111111',
-        freelancer: 'GFREELANCER111111111111111111111111111111111111111111111',
+        client: account('GCLIENT11111111111111111111111111111111111111111111111111'),
+        freelancer: account('GFREELANCER111111111111111111111111111111111111111111111'),
         token: DEFAULT_TOKEN,
         totalAmount: '1500',
         fundedAmount: '0',
@@ -74,8 +75,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
     it('rejects missing or empty escrowId with 400', async () => {
       const created = store.create({
-        client: 'GCLIENT',
-        freelancer: 'GFREELANCER',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 100 }],
       });
@@ -95,8 +96,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
     it('returns 404 when on-chain contract does not exist', async () => {
       const created = store.create({
-        client: 'GCLIENT',
-        freelancer: 'GFREELANCER',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 100 }],
       });
@@ -112,14 +113,14 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
     it('returns 409 already_linked when contract is already linked', async () => {
       const created = store.create({
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 100 }],
       });
       fakeChain.escrows.set('1', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -143,12 +144,12 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     });
 
     it('returns 409 chain_escrow_taken when same on-chain escrow is linked to another contract', async () => {
-      const c1 = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
-      const c2 = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c1 = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c2 = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
 
       fakeChain.escrows.set('SHARED_ESCROW', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -172,10 +173,10 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     });
 
     it('returns 409 chain_mismatch for client mismatch', async () => {
-      const c = store.create({ client: 'API_CLIENT', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c = store.create({ client: account('API_CLIENT'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
       fakeChain.escrows.set('E1', {
-        client: 'CHAIN_CLIENT',
-        freelancer: 'GB',
+        client: account('CHAIN_CLIENT'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -190,17 +191,17 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       expect(res.body.error).toBe('chain_mismatch');
       expect(res.body.mismatches).toContainEqual({
         field: 'client',
-        api: 'API_CLIENT',
-        chain: 'CHAIN_CLIENT',
+        api: account('API_CLIENT'),
+        chain: account('CHAIN_CLIENT'),
       });
       expect(store.get(c.id).chain).toBeUndefined();
     });
 
     it('returns 409 chain_mismatch for freelancer mismatch', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'API_FREELANCER', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('API_FREELANCER'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
       fakeChain.escrows.set('E2', {
-        client: 'GA',
-        freelancer: 'CHAIN_FREELANCER',
+        client: account('GA'),
+        freelancer: account('CHAIN_FREELANCER'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -215,22 +216,22 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       expect(res.body.error).toBe('chain_mismatch');
       expect(res.body.mismatches).toContainEqual({
         field: 'freelancer',
-        api: 'API_FREELANCER',
-        chain: 'CHAIN_FREELANCER',
+        api: account('API_FREELANCER'),
+        chain: account('CHAIN_FREELANCER'),
       });
     });
 
     it('returns 409 chain_mismatch for token mismatch', async () => {
       const c = store.create({
-        client: 'GA',
-        freelancer: 'GB',
-        token: 'TOKEN_A',
+        client: account('GA'),
+        freelancer: account('GB'),
+        token: contract('TOKEN_A'),
         milestones: [{ amount: 100 }],
       });
       fakeChain.escrows.set('E3', {
-        client: 'GA',
-        freelancer: 'GB',
-        token: 'TOKEN_B',
+        client: account('GA'),
+        freelancer: account('GB'),
+        token: contract('TOKEN_B'),
         totalAmount: '100',
         fundedAmount: '0',
         releasedAmount: '0',
@@ -244,21 +245,21 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       expect(res.body.error).toBe('chain_mismatch');
       expect(res.body.mismatches).toContainEqual({
         field: 'token',
-        api: 'TOKEN_A',
-        chain: 'TOKEN_B',
+        api: contract('TOKEN_A'),
+        chain: contract('TOKEN_B'),
       });
     });
 
     it('returns 409 chain_mismatch for milestone count mismatch', async () => {
       const c = store.create({
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 100 }, { amount: 200 }],
       });
       fakeChain.escrows.set('E4', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -280,14 +281,14 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
     it('returns 409 chain_mismatch for milestone amount mismatch', async () => {
       const c = store.create({
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 100 }, { amount: 200 }],
       });
       fakeChain.escrows.set('E5', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '350',
         fundedAmount: '0',
@@ -316,15 +317,15 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       const hugeChainAmount = '9007199254740994';
 
       const c = store.create({
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: hugeApiAmount }],
       });
 
       fakeChain.escrows.set('HUGE_DIFF', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: hugeChainAmount,
         fundedAmount: '0',
@@ -345,8 +346,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
       // Now with exact match above 2^53
       fakeChain.escrows.set('HUGE_MATCH', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: hugeApiAmount,
         fundedAmount: '0',
@@ -362,7 +363,7 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     });
 
     it('returns 503 chain_unavailable when RPC errors and leaves record unchanged', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
       fakeChain.throwUnavailable = true;
 
       const res = await request(app).post(`/api/v1/contracts/${c.id}/link`).send({ escrowId: 'ANY' });
@@ -374,19 +375,19 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
   describe('GET /api/v1/contracts/:id/parity', () => {
     it('returns 409 not_linked when checking parity on unlinked contract', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
       const res = await request(app).get(`/api/v1/contracts/${c.id}/parity`);
       expect(res.status).toBe(409);
       expect(res.body.error).toBe('not_linked');
     });
 
     it('returns in_sync when API and on-chain state perfectly match', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 500 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 500 }] });
       store.deposit(c.id, 500);
 
       fakeChain.escrows.set('P1', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '500',
         fundedAmount: '500',
@@ -407,12 +408,12 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     });
 
     it('detects status drift (API Funded vs chain Created)', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 500 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 500 }] });
       store.deposit(c.id, 500); // status is now 'Funded' in API
 
       fakeChain.escrows.set('P2', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '500',
         fundedAmount: '500',
@@ -440,8 +441,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
     it('detects funding drift and per-milestone release drift', async () => {
       const c = store.create({
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         milestones: [{ amount: 200 }, { amount: 300 }],
       });
@@ -449,8 +450,8 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       store.release(c.id, 0); // API milestone 0 is released
 
       fakeChain.escrows.set('P3', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '500',
         fundedAmount: '0', // On chain 0 funded
@@ -487,10 +488,10 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
     });
 
     it('returns 503 chain_unavailable during parity check when RPC fails', async () => {
-      const c = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
       fakeChain.escrows.set('P4', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',
@@ -511,12 +512,12 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
 
   describe('GET /api/v1/contracts?linked=true|false', () => {
     it('correctly filters contracts by linked on-chain state', async () => {
-      const c1 = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
-      const c2 = store.create({ client: 'GA', freelancer: 'GB', token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c1 = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
+      const c2 = store.create({ client: account('GA'), freelancer: account('GB'), token: DEFAULT_TOKEN, milestones: [{ amount: 100 }] });
 
       fakeChain.escrows.set('L1', {
-        client: 'GA',
-        freelancer: 'GB',
+        client: account('GA'),
+        freelancer: account('GB'),
         token: DEFAULT_TOKEN,
         totalAmount: '100',
         fundedAmount: '0',

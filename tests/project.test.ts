@@ -1,13 +1,14 @@
 import { parseFieldSpec, project, ALLOWED_FIELDS } from '../src/utils/project';
 import { EscrowStore, EscrowContract, HttpError } from '../src/store';
+import { account } from './helpers/addresses';
 
 describe('project()', () => {
   // Build a real contract via the store so the shape is realistic.
   const store = new EscrowStore();
   const created = store.create({
     title: 'Landing page redesign',
-    client: 'GA',
-    freelancer: 'GB',
+    client: account('GA'),
+    freelancer: account('GB'),
     milestones: [
       { title: 'Wireframes', amount: 250 },
       { title: 'Visual design', amount: 500 },
@@ -84,7 +85,7 @@ describe('project()', () => {
   });
 
   it('deep-copies dispute object', () => {
-    store.openDispute(created.id, 'GA', 'reason');
+    store.openDispute(created.id, account('GA'), 'reason');
     const disputed = store.get(created.id);
     const out = project(disputed, parseFieldSpec('dispute'));
     (out.dispute as unknown as Record<string, unknown>).reason = 'mutated';

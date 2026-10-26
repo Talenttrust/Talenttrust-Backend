@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account, contract } from './helpers/addresses';
 
 /**
  * Store whose clock advances one second per reading, so contracts created in a
@@ -17,8 +18,8 @@ function makeContracts(store: EscrowStore, count: number, baseId = 1) {
   for (let i = 0; i < count; i++) {
     const c = store.create({
       title: `Contract ${baseId + i}`,
-      client: `GCLIENT${String(baseId + i).padStart(6, '0')}`,
-      freelancer: `GFR${String(baseId + i).padStart(6, '0')}`,
+      client: account(`GCLIENT${String(baseId + i).padStart(6, '0')}`),
+      freelancer: account(`GFR${String(baseId + i).padStart(6, '0')}`),
       milestones: [{ title: `M${baseId + i}`, amount: (baseId + i) * 10 }],
     });
     created.push(c.id);
@@ -78,11 +79,11 @@ describe('contract list pagination, sorting and filters', () => {
   it('supports every sort option with totalAmount tie-break by id', async () => {
     const store = new EscrowStore();
     // same totalAmount (100) for ids 1..5 to force tie-break by id, plus distinct amounts
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] }); // id 1
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] }); // id 2
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] }); // id 3
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] }); // id 4
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 50 }] }); // id 5
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] }); // id 1
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] }); // id 2
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] }); // id 3
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 200 }] }); // id 4
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 50 }] }); // id 5
     const app = createApp(store);
 
     const sorts: string[] = ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'];
@@ -99,7 +100,7 @@ describe('contract list pagination, sorting and filters', () => {
   it('filters by status alone and combined', async () => {
     const store = steppedStore();
     makeContracts(store, 3); // ids 1..3 Created
-    store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] }); // id 4 Created
+    store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] }); // id 4 Created
     // fund one to make it Funded
     const app = createApp(store);
     await request(app).post('/api/v1/contracts/4/deposit').send({ amount: 100 });
@@ -124,16 +125,16 @@ describe('contract list pagination, sorting and filters', () => {
 
   it('filters by party and role (role requires party)', async () => {
     const store = new EscrowStore();
-    store.create({ client: 'CLIENT-A', freelancer: 'FREELANCER-B', milestones: [{ amount: 100 }] });
-    store.create({ client: 'CLIENT-C', freelancer: 'FREELANCER-B', milestones: [{ amount: 100 }] });
-    store.create({ client: 'CLIENT-A', freelancer: 'FREELANCER-D', milestones: [{ amount: 100 }] });
+    store.create({ client: account('CLIENT-A'), freelancer: account('FREELANCER-B'), milestones: [{ amount: 100 }] });
+    store.create({ client: account('CLIENT-C'), freelancer: account('FREELANCER-B'), milestones: [{ amount: 100 }] });
+    store.create({ client: account('CLIENT-A'), freelancer: account('FREELANCER-D'), milestones: [{ amount: 100 }] });
     const app = createApp(store);
 
-    const party = await request(app).get('/api/v1/contracts?party=CLIENT-A');
+    const party = await request(app).get(`/api/v1/contracts?party=${account('CLIENT-A')}`);
     expect(party.status).toBe(200);
     expect(party.body.data.length).toBe(2);
 
-    const roleClient = await request(app).get('/api/v1/contracts?party=FREELANCER-B&role=freelancer');
+    const roleClient = await request(app).get(`/api/v1/contracts?party=${account('FREELANCER-B')}&role=freelancer`);
     expect(roleClient.status).toBe(200);
     expect(roleClient.body.data.length).toBe(2);
 
@@ -141,20 +142,20 @@ describe('contract list pagination, sorting and filters', () => {
     expect(roleWithoutParty.status).toBe(400);
     expect(roleWithoutParty.body.error).toBe('invalid_query');
 
-    const invalidRole = await request(app).get('/api/v1/contracts?party=CLIENT-A&role=admin');
+    const invalidRole = await request(app).get(`/api/v1/contracts?party=${account('CLIENT-A')}&role=admin`);
     expect(invalidRole.status).toBe(400);
   });
 
   it('filters by token and createdAfter/createdBefore', async () => {
     const store = new EscrowStore();
-    store.create({ client: 'GA', freelancer: 'GB', token: 'XLM', milestones: [{ amount: 100 }] });
-    store.create({ client: 'GA', freelancer: 'GB', token: 'USDC', milestones: [{ amount: 100 }] });
+    store.create({ client: account('GA'), freelancer: account('GB'), token: 'XLM', milestones: [{ amount: 100 }] });
+    store.create({ client: account('GA'), freelancer: account('GB'), token: contract('USDC'), milestones: [{ amount: 100 }] });
     const app = createApp(store);
 
-    const byToken = await request(app).get('/api/v1/contracts?token=USDC');
+    const byToken = await request(app).get(`/api/v1/contracts?token=${contract('USDC')}`);
     expect(byToken.status).toBe(200);
     expect(byToken.body.data.length).toBe(1);
-    expect(byToken.body.data[0].token).toBe('USDC');
+    expect(byToken.body.data[0].token).toBe(contract('USDC'));
 
     const now = new Date().toISOString();
     const future = new Date(Date.now() + 10000).toISOString();
@@ -211,7 +212,7 @@ describe('contract list pagination, sorting and filters', () => {
     const first = await request(app).get('/api/v1/contracts?limit=5&sort=createdAt');
     const cursor = first.body.page.nextCursor;
     // create a new contract between fetches
-    store.create({ client: 'GX', freelancer: 'GY', milestones: [{ amount: 1 }] });
+    store.create({ client: account('GX'), freelancer: account('GY'), milestones: [{ amount: 1 }] });
     const second = await request(app)
       .get(`/api/v1/contracts?limit=5&sort=createdAt&cursor=${encodeURIComponent(cursor as string)}`);
     expect(second.status).toBe(200);

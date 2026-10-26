@@ -2,6 +2,7 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { AuditStore } from '../src/audit';
+import { account } from './helpers/addresses';
 
 describe('TalentTrust API', () => {
   const app = createApp(new EscrowStore());
@@ -10,7 +11,7 @@ describe('TalentTrust API', () => {
     it('returns contract history with correct before/after states', async () => {
       const { body: created } = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }, { amount: 50 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }, { amount: 50 }] });
       const id = created.id;
 
       await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 150 });
@@ -44,7 +45,7 @@ describe('TalentTrust API', () => {
     it('failed release does not create audit entry', async () => {
       const { body: created } = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] });
       const id = created.id;
 
       await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 50 });
@@ -59,11 +60,11 @@ describe('TalentTrust API', () => {
     it('resolve entry contains split details', async () => {
       const { body: created } = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 200 }] });
       const id = created.id;
 
       await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 200 });
-      await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GA', reason: 'test' });
+      await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: account('GA'), reason: 'test' });
       await request(app).post(`/api/v1/contracts/${id}/resolve`).send({ freelancerBps: 7000 });
 
       const history = await request(app).get(`/api/v1/contracts/${id}/history`).expect(200);
@@ -80,7 +81,7 @@ describe('TalentTrust API', () => {
 
       const { body: created } = await request(testApp)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] });
       const id = created.id;
 
       await request(testApp).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 });
@@ -116,7 +117,7 @@ describe('TalentTrust API', () => {
 
       const { body: created } = await request(freshApp)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 50 }, { amount: 50 }, { amount: 50 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 50 }, { amount: 50 }, { amount: 50 }] });
       const id = created.id;
 
       await request(freshApp).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 150 });

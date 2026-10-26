@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 describe('Milestone Templates', () => {
   const templateApp = createApp(new EscrowStore());
@@ -194,7 +195,7 @@ describe('Milestone Templates', () => {
       .expect(201);
     const contract = await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GCLIENT', freelancer: 'GFREELANCER', templateId: template.body.id })
+      .send({ client: account('GCLIENT'), freelancer: account('GFREELANCER'), templateId: template.body.id })
       .expect(201);
     expect(contract.body.milestones).toHaveLength(2);
     expect(contract.body.milestones[0].title).toBe('Design');
@@ -222,7 +223,7 @@ describe('Milestone Templates', () => {
       .expect(201);
     const contract = await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GCLIENT', freelancer: 'GFREELANCER', templateId: template.body.id, budget: 1001 })
+      .send({ client: account('GCLIENT'), freelancer: account('GFREELANCER'), templateId: template.body.id, budget: 1001 })
       .expect(201);
     expect(contract.body.milestones).toHaveLength(3);
     const amounts = contract.body.milestones.map((m: { amount: number }) => m.amount);
@@ -242,7 +243,7 @@ describe('Milestone Templates', () => {
       .expect(201);
     await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', templateId: template.body.id, milestones: [{ amount: 100 }] })
+      .send({ client: account('GA'), freelancer: account('GB'), templateId: template.body.id, milestones: [{ amount: 100 }] })
       .expect(400);
   });
 
@@ -253,7 +254,7 @@ describe('Milestone Templates', () => {
       .expect(201);
     await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', templateId: template.body.id })
+      .send({ client: account('GA'), freelancer: account('GB'), templateId: template.body.id })
       .expect(400);
   });
 
@@ -264,14 +265,14 @@ describe('Milestone Templates', () => {
       .expect(201);
     await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', templateId: template.body.id, budget: 1000 })
+      .send({ client: account('GA'), freelancer: account('GB'), templateId: template.body.id, budget: 1000 })
       .expect(400);
   });
 
   it('rejects contract creation with neither templateId nor milestones', async () => {
     await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB' })
+      .send({ client: account('GA'), freelancer: account('GB') })
       .expect(400);
   });
 
@@ -282,7 +283,7 @@ describe('Milestone Templates', () => {
       .expect(201);
     const contract = await request(templateApp)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', templateId: template.body.id })
+      .send({ client: account('GA'), freelancer: account('GB'), templateId: template.body.id })
       .expect(201);
     await request(templateApp)
       .delete(`/api/v1/templates/${template.body.id}`)

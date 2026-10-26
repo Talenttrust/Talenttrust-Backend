@@ -8,6 +8,7 @@ import {
   request,
   type ConformanceResponse,
 } from './helpers/openapi';
+import { account, contract } from './helpers/addresses';
 
 type ResponseDoc = {
   $ref?: string;
@@ -27,9 +28,10 @@ const jsonBody = (body: unknown): ConformanceResponse => ({
 const contractBody = () => ({
   id: 1,
   title: 'Landing page redesign',
-  client: 'GA',
-  freelancer: 'GB',
-  token: 'XLM',
+  client: account('GA'),
+  freelancer: account('GB'),
+  token: contract('TOKEN'),
+  tokenSymbol: null,
   milestones: [{ index: 0, title: 'Wireframes', amount: 100, amountUnits: '100', released: false }],
   totalAmount: 100,
   fundedAmount: 0,
@@ -103,6 +105,7 @@ describe('OpenAPI document', () => {
         'client',
         'freelancer',
         'token',
+        'tokenSymbol',
         'milestones',
         'totalAmount',
         'fundedAmount',
@@ -186,21 +189,21 @@ describe('live responses conform to the spec', () => {
   it('documents the contract lifecycle', async () => {
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ title: 'Design', amount: 100 }, 50] })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ title: 'Design', amount: 100 }, 50] })
       .expect(201);
     const id = created.body.id as number;
     await request(app).get(`/api/v1/contracts/${id}`).expect(200);
     await request(app).get('/api/v1/contracts?limit=5').expect(200);
     await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 150 }).expect(200);
     await request(app).post(`/api/v1/contracts/${id}/milestones/0/release`).expect(200);
-    await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GB', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: account('GB'), reason: 'late' }).expect(200);
     await request(app).post(`/api/v1/contracts/${id}/resolve`).send({ freelancerBps: 5000 }).expect(200);
     await request(app).get('/api/v1/stats').expect(200);
   });
 
   it('documents error responses', async () => {
     await request(app).get('/api/v1/contracts/999').expect(404);
-    await request(app).post('/api/v1/contracts').send({ client: 'GA', freelancer: 'GA', milestones: [1] }).expect(400);
+    await request(app).post('/api/v1/contracts').send({ client: account('GA'), freelancer: account('GA'), milestones: [1] }).expect(400);
     await request(app).get('/definitely-not-a-route').expect(404);
   });
 });

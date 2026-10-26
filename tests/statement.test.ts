@@ -18,6 +18,7 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { csvCell } from '../src/csv';
+import { account } from './helpers/addresses';
 
 // ── Minimal RFC 4180 CSV parser (no extra dependencies) ──────────────────────
 function parseCsv(text: string): string[][] {
@@ -79,9 +80,9 @@ const RECENT_FROM = new Date(Date.now() - 2 * 365 * DAY_MS).toISOString().slice(
 const RECENT_TO = new Date(Date.now() + DAY_MS).toISOString().slice(0, 10);
 
 // ── Addresses used across tests ───────────────────────────────────────────────
-const CLIENT     = 'GCLIENTTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-const FREELANCER = 'GFREELANCERTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-const OTHER_CLIENT = 'GCLIENTOTHERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+const CLIENT     = account('GCLIENTTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+const FREELANCER = account('GFREELANCERTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+const OTHER_CLIENT = account('GCLIENTOTHERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB');
 
 // ── Store factory ─────────────────────────────────────────────────────────────
 function buildStore() {
@@ -110,7 +111,7 @@ function buildStore() {
   const c3 = store.create({
     title: 'Old project',
     client: CLIENT,
-    freelancer: 'GFIXEDFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    freelancer: account('GFIXEDFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
     milestones: [{ title: 'Work', amount: 200 }],
   });
   now = undefined;
@@ -119,7 +120,7 @@ function buildStore() {
   const c4 = store.create({
     title: '=HYPERLINK("http://evil.example","click")',
     client: CLIENT,
-    freelancer: 'GINJECTIONFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    freelancer: account('GINJECTIONFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
     milestones: [{ title: 'Task', amount: 50 }],
   });
 
@@ -127,7 +128,7 @@ function buildStore() {
   const c5 = store.create({
     title: 'Work, "quoted" and\nnewline',
     client: CLIENT,
-    freelancer: 'GSPECIALFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    freelancer: account('GSPECIALFREELANCERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
     milestones: [{ title: 'Task', amount: 75 }],
   });
 
@@ -218,12 +219,12 @@ describe('Statement CSV – role and party filtering', () => {
     store.create({
       title: 'As client',
       client: CLIENT,
-      freelancer: 'GOTHERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      freelancer: account('GOTHERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
       milestones: [{ amount: 100 }],
     });
     store.create({
       title: 'As freelancer',
-      client: 'GOTHERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+      client: account('GOTHERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'),
       freelancer: CLIENT,
       milestones: [{ amount: 200 }],
     });

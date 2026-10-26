@@ -3,9 +3,10 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { MemoryIdempotencyStore, StoredResponse, fingerprint, idempotency } from '../src/idempotency';
+import { account } from './helpers/addresses';
 
 type App = ReturnType<typeof createApp>;
-const parties = { client: 'GA', freelancer: 'GB' };
+const parties = { client: account('GA'), freelancer: account('GB') };
 const create = (app: App, milestones: unknown[] = [100]) =>
   request(app).post('/api/v1/contracts').send({ ...parties, milestones });
 const entry = (over: Partial<StoredResponse> = {}): StoredResponse => ({
@@ -170,12 +171,12 @@ describe('Idempotency-Key', () => {
     const a = await request(app)
       .post('/api/v1/contracts')
       .set('Idempotency-Key', 'k')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [100] })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [100] })
       .expect(201);
     const b = await request(app)
       .post('/api/v1/contracts')
       .set('Idempotency-Key', 'k')
-      .send({ milestones: [100], freelancer: 'GB', client: 'GA' })
+      .send({ milestones: [100], freelancer: account('GB'), client: account('GA') })
       .expect(201);
     expect(b.headers['idempotent-replayed']).toBe('true');
     expect(b.body.id).toBe(a.body.id);

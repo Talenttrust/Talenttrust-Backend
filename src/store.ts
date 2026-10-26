@@ -15,6 +15,7 @@ import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
+import { parseAccount, parseToken } from './stellar/address';
 
 export { HttpError } from './amount-error';
 
@@ -128,6 +129,8 @@ export interface EscrowContract {
   client: string;
   freelancer: string;
   token: string;
+  /** 'XLM' when the token is the native asset, otherwise null. */
+  tokenSymbol: string | null;
   milestones: Milestone[];
   /** @deprecated lossy above 2^53; use totalAmountUnits */
   totalAmount: number | string;
@@ -361,6 +364,7 @@ interface InternalContract {
   client: string;
   freelancer: string;
   token: string;
+  tokenSymbol: string | null;
   milestones: Array<{
     index: number;
     title: string;
@@ -469,6 +473,7 @@ function toPublic(c: InternalContract): EscrowContract {
     client: c.client,
     freelancer: c.freelancer,
     token: c.token,
+    tokenSymbol: c.tokenSymbol,
     milestones: publicMilestones(c.milestones),
     totalAmount: Number(c.totalAmount),    // deprecated
     totalAmountUnits: c.totalAmount.toString(),
@@ -741,13 +746,12 @@ export class EscrowStore {
     templateId?: unknown;
     budget?: unknown;
   }): EscrowContract {
-    const { client, freelancer } = input;
-    if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
-      throw new HttpError(400, 'invalid_parties', 'client and freelancer are required strings');
-    }
+    const client = parseAccount(input.client, 'client');
+    const freelancer = parseAccount(input.freelancer, 'freelancer');
     if (client === freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
+    const { token, tokenSymbol } = parseToken(input.token, 'token');
     let milestones: InternalContract['milestones'];
     let template: InternalTemplate | undefined;
     if (input.templateId !== undefined) {
@@ -776,7 +780,8 @@ export class EscrowStore {
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
       client,
       freelancer,
-      token: typeof input.token === 'string' && input.token ? input.token : 'XLM',
+      token,
+      tokenSymbol,
       milestones,
       totalAmount,
       fundedAmount: 0n,
@@ -912,12 +917,12 @@ export class EscrowStore {
    */
   openDispute(id: number, raisedByRaw: unknown, reason: unknown, caller?: string): EscrowContract {
     const c = this.getInternal(id);
-    let raisedBy = raisedByRaw;
+    let raisedBy = raisedByRaw === undefined ? undefined : parseAccount(raisedByRaw, 'raisedBy');
     if (caller !== undefined) {
       if (caller !== c.client && caller !== c.freelancer) {
         throw new HttpError(403, 'forbidden', 'Only the client or freelancer can open a dispute');
       }
-      if (raisedByRaw !== undefined && raisedByRaw !== caller) {
+      if (raisedBy !== undefined && raisedBy !== caller) {
         throw new HttpError(403, 'forbidden', 'raisedBy must match the authenticated address');
       }
       raisedBy = caller;
@@ -1674,13 +1679,22 @@ export class EscrowStore {
     return { reviews: slice, nextCursor };
   }
 
-  /** Seed a few demo engagements so the API is explorable out of the box. */
+  /**
+   * Seed a few demo engagements so the API is explorable out of the box.
+   *
+   * These are deterministic public keys generated once for the demo data. Only
+   * the public halves are stored here; no secret key is kept in the repository.
+   */
   seed(): this {
+    const clientA = 'GACE4EDG4UIAAELYTPAXRIFNNTKNUQYYLWFCWWNTOHNN5PEFVGQXEOYC';
+    const freelancerA = 'GCR36A6TRNBLWVDPRSP5YEZJKCGEEZHIKDX3KPRJL6OAI36UNKTCKJT6';
+    const clientB = 'GBQNWA2VJPMV4IUTQ7LWK2QICSQFTP3NF7N3YUZG4ZU24EDD6GUOLLQL';
+    const freelancerB = 'GBQFACOFJHTDDQNQLQWUWWUK3EQPPTSEDREY6LKQHVAXLWFAMODA7ARV';
     const a = this.create({
       title: 'Landing page redesign',
-      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: clientA,
+      freelancer: freelancerA,
+      token: 'native',
       milestones: [
         { title: 'Wireframes', amount: 2500000 },
         { title: 'Visual design', amount: 5000000 },
@@ -1691,9 +1705,9 @@ export class EscrowStore {
     this.release(a.id, 0);
     const b = this.create({
       title: 'Smart contract audit',
-      client: 'GCLIENTDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
-      freelancer: 'GFREELANCERDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
-      token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: clientB,
+      freelancer: freelancerB,
+      token: 'native',
       milestones: [{ title: 'Audit report', amount: 20000000 }],
     });
     this.deposit(b.id, 20000000);

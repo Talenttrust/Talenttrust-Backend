@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 const TOKEN = 'adm1n-t0ken-f0r-t3sts';
 const HOUR = 3_600_000;
@@ -25,8 +26,8 @@ describe('Admin dispute queue', () => {
     raisedBy?: string;
     reason?: string;
   }) => {
-    const client = opts.client ?? 'GCLIENTAAA';
-    const freelancer = opts.freelancer ?? 'GFREELANCERAAA';
+    const client = opts.client ?? account('GCLIENTAAA');
+    const freelancer = opts.freelancer ?? account('GFREELANCERAAA');
     const amount = opts.amount ?? 100;
     const raisedBy = opts.raisedBy ?? client;
     const created = await request(app)
@@ -87,9 +88,9 @@ describe('Admin dispute queue', () => {
     it('lists three disputes with correct ages, roles, held values, and sorts', async () => {
       const a = await openDispute({ amount: 100, reason: 'missed deadline' });
       advance(24 * HOUR);
-      const b = await openDispute({ client: 'GCLIENTBBB', freelancer: 'GFREELANCERBBB', amount: 300, raisedBy: 'GFREELANCERBBB' });
+      const b = await openDispute({ client: account('GCLIENTBBB'), freelancer: account('GFREELANCERBBB'), amount: 300, raisedBy: account('GFREELANCERBBB') });
       advance(24 * HOUR);
-      const c = await openDispute({ client: 'GCLIENTCCC', freelancer: 'GFREELANCERCCC', amount: 200 });
+      const c = await openDispute({ client: account('GCLIENTCCC'), freelancer: account('GFREELANCERCCC'), amount: 200 });
       advance(2 * HOUR); // t0 + 50h
 
       const oldest = await admin(request(app).get('/api/v1/disputes?sort=oldest')).expect(200);
@@ -104,9 +105,9 @@ describe('Admin dispute queue', () => {
       expect(oldest.body.data[0]).toMatchObject({
         contractId: a.id,
         title: 'Untitled engagement',
-        client: 'GCLIENTAAA',
-        freelancer: 'GFREELANCERAAA',
-        raisedBy: 'GCLIENTAAA',
+        client: account('GCLIENTAAA'),
+        freelancer: account('GFREELANCERAAA'),
+        raisedBy: account('GCLIENTAAA'),
         reason: 'missed deadline',
         openedAt: a.openedAt,
         held: 100,
@@ -132,7 +133,7 @@ describe('Admin dispute queue', () => {
     it('marks disputes overdue only strictly after the SLA deadline', async () => {
       await openDispute({ amount: 100 });
       advance(24 * HOUR);
-      const b = await openDispute({ client: 'GCLIENTBBB', freelancer: 'GFREELANCERBBB', amount: 50 });
+      const b = await openDispute({ client: account('GCLIENTBBB'), freelancer: account('GFREELANCERBBB'), amount: 50 });
       advance(48 * HOUR); // exactly a's SLA deadline (t0 + 72h)
 
       const atDeadline = await admin(request(app).get('/api/v1/disputes')).expect(200);
@@ -159,7 +160,7 @@ describe('Admin dispute queue', () => {
     it('tracks resolved disputes with resolvedAt and freelancerBps', async () => {
       await openDispute({ amount: 100 });
       advance(24 * HOUR);
-      const b = await openDispute({ client: 'GCLIENTBBB', freelancer: 'GFREELANCERBBB', amount: 300 });
+      const b = await openDispute({ client: account('GCLIENTBBB'), freelancer: account('GFREELANCERBBB'), amount: 300 });
       advance(HOUR);
       const resolved = await request(app)
         .post(`/api/v1/contracts/${b.id}/resolve`)
@@ -202,9 +203,9 @@ describe('Admin dispute queue', () => {
       const res = await admin(request(app).get(`/api/v1/disputes/${a.id}`)).expect(200);
       expect(res.body).toMatchObject({
         contractId: a.id,
-        client: 'GCLIENTAAA',
-        freelancer: 'GFREELANCERAAA',
-        raisedBy: 'GCLIENTAAA',
+        client: account('GCLIENTAAA'),
+        freelancer: account('GFREELANCERAAA'),
+        raisedBy: account('GCLIENTAAA'),
         raisedByRole: 'client',
         reason: 'scope dispute',
         openedAt: a.openedAt,
@@ -218,7 +219,7 @@ describe('Admin dispute queue', () => {
     it('returns 404 for contracts without a dispute and 400 for invalid ids', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 10 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 10 }] });
       const plain = await admin(request(app).get(`/api/v1/disputes/${created.body.id}`)).expect(404);
       expect(plain.body.error).toBe('dispute_not_found');
       await admin(request(app).get('/api/v1/disputes/99999')).expect(404);
@@ -230,11 +231,11 @@ describe('Admin dispute queue', () => {
   describe('pagination', () => {
     it('paginates deterministically with no duplicates or gaps, including ties', async () => {
       const d1 = await openDispute({ amount: 100 });
-      const d2 = await openDispute({ client: 'GCLIENTBBB', freelancer: 'GFREELANCERBBB', amount: 100 });
+      const d2 = await openDispute({ client: account('GCLIENTBBB'), freelancer: account('GFREELANCERBBB'), amount: 100 });
       advance(HOUR);
-      const d3 = await openDispute({ client: 'GCLIENTCCC', freelancer: 'GFREELANCERCCC', amount: 100 });
+      const d3 = await openDispute({ client: account('GCLIENTCCC'), freelancer: account('GFREELANCERCCC'), amount: 100 });
       advance(HOUR);
-      const d4 = await openDispute({ client: 'GCLIENTDDD', freelancer: 'GFREELANCERDDD', amount: 100 });
+      const d4 = await openDispute({ client: account('GCLIENTDDD'), freelancer: account('GFREELANCERDDD'), amount: 100 });
 
       const full = await admin(request(app).get('/api/v1/disputes?sort=oldest')).expect(200);
       const fullOrder = full.body.data.map((d: { contractId: number }) => d.contractId);
@@ -267,7 +268,7 @@ describe('Admin dispute queue', () => {
     it('supports limit=1 paging and rejects invalid limits and cursors', async () => {
       await openDispute({ amount: 100 });
       advance(HOUR);
-      await openDispute({ client: 'GCLIENTBBB', freelancer: 'GFREELANCERBBB', amount: 100 });
+      await openDispute({ client: account('GCLIENTBBB'), freelancer: account('GFREELANCERBBB'), amount: 100 });
 
       const p1 = await admin(request(app).get('/api/v1/disputes?limit=1')).expect(200);
       expect(p1.body.page).toEqual({ limit: 1, count: 1, nextCursor: expect.any(String) });
@@ -322,10 +323,10 @@ describe('Admin dispute queue', () => {
     it('does not mutate stored data when dispute attempts are rejected', async () => {
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+        .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] });
       const id = created.body.id;
       await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 }).expect(200);
-      await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GX' }).expect(403);
+      await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: account('GX') }).expect(403);
       await request(app).post(`/api/v1/contracts/${id}/dispute`).send({}).expect(403);
       const after = store.get(id);
       expect(after.status).toBe('Funded');
@@ -351,12 +352,12 @@ describe('Admin dispute queue', () => {
       // mutation responses are sanitized too; the reason only comes back from the admin routes
       const created = await request(app)
         .post('/api/v1/contracts')
-        .send({ client: 'GCLIENTZZZ', freelancer: 'GFREELANCERZZZ', milestones: [{ amount: 10 }] });
+        .send({ client: account('GCLIENTZZZ'), freelancer: account('GFREELANCERZZZ'), milestones: [{ amount: 10 }] });
       const id = created.body.id;
       await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 10 }).expect(200);
       const opened = await request(app)
         .post(`/api/v1/contracts/${id}/dispute`)
-        .send({ raisedBy: 'GCLIENTZZZ', reason: 'mutation reason' })
+        .send({ raisedBy: account('GCLIENTZZZ'), reason: 'mutation reason' })
         .expect(200);
       expect(opened.body.dispute.reason).toBeUndefined();
       const resolved = await request(app)

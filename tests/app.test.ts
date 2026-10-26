@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 // Helper: build a store seeded with N contracts for bulk tests.
 function seededStore(n: number): EscrowStore {
@@ -8,8 +9,8 @@ function seededStore(n: number): EscrowStore {
   for (let i = 0; i < n; i++) {
     s.create({
       title: `Engagement ${i}`,
-      client: `GC${i.toString().padStart(5, '0')}`,
-      freelancer: `GF${i.toString().padStart(5, '0')}`,
+      client: account(`GC${i.toString().padStart(5, '0')}`),
+      freelancer: account(`GF${i.toString().padStart(5, '0')}`),
       milestones: Array.from({ length: 5 }, (_, j) => ({ title: `M${j}`, amount: 100 + j })),
     });
   }
@@ -37,7 +38,7 @@ describe('TalentTrust API', () => {
   it('runs the escrow lifecycle', async () => {
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }, { amount: 50 }] });
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }, { amount: 50 }] });
     expect(created.status).toBe(201);
     const id = created.body.id;
     expect((await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 150 })).body.status).toBe(
@@ -53,38 +54,38 @@ describe('TalentTrust API', () => {
   it('supports two-sided reviews on a completed contract', async () => {
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GREVCLIENT', freelancer: 'GREVFREELANCER', milestones: [{ amount: 100 }] });
+      .send({ client: account('GREVCLIENT'), freelancer: account('GREVFREELANCER'), milestones: [{ amount: 100 }] });
     const id = created.body.id;
     await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 }).expect(200);
     await request(app).post(`/api/v1/contracts/${id}/milestones/0/release`).expect(200);
 
     const c2f = await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT', rating: 5, comment: '  Clear scope, fast payment  ' })
+      .send({ reviewer: account('GREVCLIENT'), rating: 5, comment: '  Clear scope, fast payment  ' })
       .expect(201);
     expect(c2f.body.role).toBe('client_to_freelancer');
     expect(c2f.body.comment).toBe('Clear scope, fast payment');
 
     const f2c = await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVFREELANCER', rating: 4 })
+      .send({ reviewer: account('GREVFREELANCER'), rating: 4 })
       .expect(201);
     expect(f2c.body.role).toBe('freelancer_to_client');
 
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT', rating: 3 })
+      .send({ reviewer: account('GREVCLIENT'), rating: 3 })
       .expect(409);
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GSTRANGER', rating: 3 })
+      .send({ reviewer: account('GSTRANGER'), rating: 3 })
       .expect(403);
 
-    const clientRep = await request(app).get('/api/v1/reputation/GREVCLIENT').expect(200);
+    const clientRep = await request(app).get(`/api/v1/reputation/${account('GREVCLIENT')}`).expect(200);
     expect(clientRep.body.asClient.completedContracts).toBe(1);
     expect(clientRep.body.asClient.averageRating).toBe(4);
 
-    const feed = await request(app).get('/api/v1/reputation/GREVCLIENT/reviews').expect(200);
+    const feed = await request(app).get(`/api/v1/reputation/${account('GREVCLIENT')}/reviews`).expect(200);
     expect(feed.body.reviews.length).toBe(1);
     expect(feed.body.reviews[0].role).toBe('freelancer_to_client');
   });
@@ -92,41 +93,41 @@ describe('TalentTrust API', () => {
   it('rejects reviews on non-completed contracts and validates comments', async () => {
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GREVCLIENT2', freelancer: 'GREVFREELANCER2', milestones: [{ amount: 100 }] });
+      .send({ client: account('GREVCLIENT2'), freelancer: account('GREVFREELANCER2'), milestones: [{ amount: 100 }] });
     const id = created.body.id;
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT2', rating: 5 })
+      .send({ reviewer: account('GREVCLIENT2'), rating: 5 })
       .expect(409);
     await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 }).expect(200);
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT2', rating: 5 })
+      .send({ reviewer: account('GREVCLIENT2'), rating: 5 })
       .expect(409);
     await request(app).post(`/api/v1/contracts/${id}/milestones/0/release`).expect(200);
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT2', rating: 5, comment: 'x'.repeat(1001) })
+      .send({ reviewer: account('GREVCLIENT2'), rating: 5, comment: 'x'.repeat(1001) })
       .expect(400);
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT2', rating: 5, comment: 'bad\u0007char' })
+      .send({ reviewer: account('GREVCLIENT2'), rating: 5, comment: 'bad\u0007char' })
       .expect(400);
   });
 
   it('marks reviews of resolved contracts as disputed', async () => {
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GREVCLIENT3', freelancer: 'GREVFREELANCER3', milestones: [{ amount: 200 }] });
+      .send({ client: account('GREVCLIENT3'), freelancer: account('GREVFREELANCER3'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 }).expect(200);
     await request(app)
       .post(`/api/v1/contracts/${body.id}/dispute`)
-      .send({ raisedBy: 'GREVFREELANCER3', reason: 'late' })
+      .send({ raisedBy: account('GREVFREELANCER3'), reason: 'late' })
       .expect(200);
     await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: 5000 }).expect(200);
     const review = await request(app)
       .post(`/api/v1/contracts/${body.id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT3', rating: 2 })
+      .send({ reviewer: account('GREVCLIENT3'), rating: 2 })
       .expect(201);
     expect(review.body.context).toBe('disputed');
   });
@@ -134,7 +135,7 @@ describe('TalentTrust API', () => {
   it('keeps the reputation endpoint backward compatible with reviews', async () => {
     const created = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GREVCLIENT4', freelancer: 'GREVFREELANCER4', milestones: [{ amount: 100 }] });
+      .send({ client: account('GREVCLIENT4'), freelancer: account('GREVFREELANCER4'), milestones: [{ amount: 100 }] });
     const id = created.body.id;
     await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 100 }).expect(200);
     await request(app).post(`/api/v1/contracts/${id}/milestones/0/release`).expect(200);
@@ -142,12 +143,12 @@ describe('TalentTrust API', () => {
     expect(rep.body.averageRating).toBe(5);
     await request(app)
       .post(`/api/v1/contracts/${id}/reviews`)
-      .send({ reviewer: 'GREVCLIENT4', rating: 5 })
+      .send({ reviewer: account('GREVCLIENT4'), rating: 5 })
       .expect(409);
   });
 
   it('rejects invalid input and unknown routes', async () => {
-    await request(app).post('/api/v1/contracts').send({ client: 'GA', freelancer: 'GA', milestones: [1] }).expect(400);
+    await request(app).post('/api/v1/contracts').send({ client: account('GA'), freelancer: account('GA'), milestones: [1] }).expect(400);
     await request(app).get('/api/v1/contracts/999').expect(404);
     await request(app).get('/nope').expect(404);
   });
@@ -155,10 +156,10 @@ describe('TalentTrust API', () => {
   it('handles disputes', async () => {
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GC', freelancer: 'GD', milestones: [{ amount: 200 }] });
+      .send({ client: account('GC'), freelancer: account('GD'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 });
-    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GX' }).expect(403);
-    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GD', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: account('GX') }).expect(403);
+    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: account('GD'), reason: 'late' }).expect(200);
     const r = await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: 5000 }).expect(200);
     expect(r.body.releasedAmount).toBe(100);
     expect(r.body.status).toBe('Resolved');
@@ -167,9 +168,9 @@ describe('TalentTrust API', () => {
   it('rejects coerced and malformed values in resolve', async () => {
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GC', freelancer: 'GD', milestones: [{ amount: 200 }] });
+      .send({ client: account('GC'), freelancer: account('GD'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 });
-    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GD', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: account('GD'), reason: 'late' }).expect(200);
 
     await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: null }).expect(400);
     await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: true }).expect(400);
@@ -183,7 +184,7 @@ describe('TalentTrust API', () => {
   it('rejects coerced and malformed values in rate', async () => {
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GC', freelancer: 'GD', milestones: [{ amount: 200 }] });
+      .send({ client: account('GC'), freelancer: account('GD'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 });
     await request(app).post(`/api/v1/contracts/${body.id}/milestones/0/release`).expect(200);
 
@@ -207,7 +208,7 @@ describe('TalentTrust API', () => {
   it('rejects unknown body keys', async () => {
     await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 1 }], foo: 1 })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 1 }], foo: 1 })
       .expect(400);
     await request(app)
       .post('/api/v1/contracts/1/deposit')
@@ -215,7 +216,7 @@ describe('TalentTrust API', () => {
       .expect(400);
     await request(app)
       .post('/api/v1/contracts/1/dispute')
-      .send({ raisedBy: 'GA', reason: 'test', unknown: true })
+      .send({ raisedBy: account('GA'), reason: 'test', unknown: true })
       .expect(400);
   });
 
@@ -224,36 +225,36 @@ describe('TalentTrust API', () => {
     const title121 = 'a'.repeat(121);
     await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 1 }], title: title120 })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 1 }], title: title120 })
       .expect(201);
     await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 1 }], title: title121 })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 1 }], title: title121 })
       .expect(400);
 
     const milestones20 = Array(20).fill({ amount: 1 });
     const milestones21 = Array(21).fill({ amount: 1 });
     await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: milestones20 })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: milestones20 })
       .expect(201);
     await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: milestones21 })
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: milestones21 })
       .expect(400);
 
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GC', freelancer: 'GD', milestones: [{ amount: 200 }] });
+      .send({ client: account('GC'), freelancer: account('GD'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 });
-    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: 'GD', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${body.id}/dispute`).send({ raisedBy: account('GD'), reason: 'late' }).expect(200);
     await request(app).post(`/api/v1/contracts/${body.id}/resolve`).send({ freelancerBps: 0 }).expect(200);
 
     const { body: body2 } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GE', freelancer: 'GF', milestones: [{ amount: 200 }] });
+      .send({ client: account('GE'), freelancer: account('GF'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body2.id}/deposit`).send({ amount: 200 });
-    await request(app).post(`/api/v1/contracts/${body2.id}/dispute`).send({ raisedBy: 'GF', reason: 'late' }).expect(200);
+    await request(app).post(`/api/v1/contracts/${body2.id}/dispute`).send({ raisedBy: account('GF'), reason: 'late' }).expect(200);
     await request(app).post(`/api/v1/contracts/${body2.id}/resolve`).send({ freelancerBps: 10000 }).expect(200);
   });
 
@@ -270,7 +271,7 @@ describe('TalentTrust API', () => {
   it('reports multiple validation errors in details array', async () => {
     const res = await request(app)
       .post('/api/v1/contracts')
-      .send({ freelancer: 'GB', milestones: [{ amount: -1 }] })
+      .send({ freelancer: account('GB'), milestones: [{ amount: -1 }] })
       .expect(400);
     expect(res.body.error).toBe('validation_failed');
     expect(res.body.details).toBeInstanceOf(Array);
@@ -287,8 +288,8 @@ describe('sparse fieldsets (?fields=)', () => {
   const store = new EscrowStore();
   const created = store.create({
     title: 'Test contract',
-    client: 'GA',
-    freelancer: 'GB',
+    client: account('GA'),
+    freelancer: account('GB'),
     milestones: [{ title: 'Phase 1', amount: 100 }, { title: 'Phase 2', amount: 200 }],
   });
   const app = createApp(store);
@@ -344,8 +345,8 @@ describe('sparse fieldsets (?fields=)', () => {
     const full = await request(app).get(`/api/v1/contracts/${created.id}`).expect(200);
     expect(full.body.milestones).toBeDefined();
     expect(full.body.milestones.length).toBe(2);
-    expect(full.body.client).toBe('GA');
-    expect(full.body.freelancer).toBe('GB');
+    expect(full.body.client).toBe(account('GA'));
+    expect(full.body.freelancer).toBe(account('GB'));
   });
 
   it('omitting ?fields= returns all fields', async () => {
@@ -411,8 +412,8 @@ describe('unfunded contract edits and withdrawal', () => {
     request(app)
       .post('/api/v1/contracts')
       .send({
-        client: 'GCLIENT',
-        freelancer: 'GFREELANCER',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         title: 'Original terms',
         milestones: [{ title: 'Design', amount: 100 }, { title: 'Build', amount: 200 }],
       });
@@ -422,7 +423,7 @@ describe('unfunded contract edits and withdrawal', () => {
     const updated = await request(app)
       .patch(`/api/v1/contracts/${created.body.id}`)
       .send({
-        client: 'GCLIENT',
+        client: account('GCLIENT'),
         title: 'Revised terms',
         milestones: [{ title: 'Specification', amount: 150 }],
       })
@@ -461,18 +462,18 @@ describe('unfunded contract edits and withdrawal', () => {
     await request(app).post(`${contractPath}/deposit`).send({ amount: 10 }).expect(200);
     await request(app)
       .patch(contractPath)
-      .send({ client: 'GCLIENT', title: 'Too late' })
+      .send({ client: account('GCLIENT'), title: 'Too late' })
       .expect(409)
       .expect((r) => expect(r.body).toMatchObject({ error: 'contract_locked', message: 'Contract terms can only be edited before funding' }));
 
     const unfunded = await createContract().expect(201);
     const unfundedPath = `/api/v1/contracts/${unfunded.body.id}`;
-    await request(app).patch(unfundedPath).send({ client: 'OTHER', title: 'No' }).expect(403);
+    await request(app).patch(unfundedPath).send({ client: account('OTHER'), title: 'No' }).expect(403);
     await request(app)
       .patch(unfundedPath)
-      .send({ client: 'GCLIENT', milestones: [{ amount: 0 }] })
+      .send({ client: account('GCLIENT'), milestones: [{ amount: 0 }] })
       .expect(400);
-    await request(app).patch(unfundedPath).send({ client: 'GCLIENT' }).expect(400)
+    await request(app).patch(unfundedPath).send({ client: account('GCLIENT') }).expect(400)
       .expect((r) => expect(r.body).toMatchObject({
       error: 'empty_patch',
       message: 'At least one of title or milestones must be provided',
@@ -482,7 +483,7 @@ describe('unfunded contract edits and withdrawal', () => {
   it('withdraws unfunded contracts from reads, lists, and stats', async () => {
     const created = await createContract().expect(201);
     const contractPath = `/api/v1/contracts/${created.body.id}`;
-    await request(app).delete(contractPath).send({ client: 'GCLIENT' }).expect(204);
+    await request(app).delete(contractPath).send({ client: account('GCLIENT') }).expect(204);
     await request(app).get(contractPath).expect(404);
     const list = await request(app).get('/api/v1/contracts').expect(200);
     expect(list.body.data.some((contract: { id: number }) => contract.id === created.body.id)).toBe(false);
@@ -496,7 +497,7 @@ describe('unfunded contract edits and withdrawal', () => {
     await request(app).post(`${contractPath}/deposit`).send({ amount: 10 }).expect(200);
     await request(app)
       .delete(contractPath)
-      .send({ client: 'GCLIENT' })
+      .send({ client: account('GCLIENT') })
       .expect(409)
       .expect((r) => expect(r.body).toMatchObject({ error: 'contract_locked', message: 'Contract can only be withdrawn before funding' }));
   });
@@ -507,7 +508,7 @@ describe('unfunded contract edits and withdrawal', () => {
     for (let edit = 1; edit <= 51; edit += 1) {
       await request(app)
         .patch(contractPath)
-        .send({ client: 'GCLIENT', title: `Revision ${edit}` })
+        .send({ client: account('GCLIENT'), title: `Revision ${edit}` })
         .expect(200);
     }
     const revisions = await request(app).get(`${contractPath}/revisions`).expect(200);

@@ -2,6 +2,7 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore, HttpError } from '../src/store';
 import { ERRORS, ErrorKey } from '../src/errors';
+import { account } from './helpers/addresses';
 
 describe('Error catalog', () => {
   const app = createApp(new EscrowStore());
@@ -63,7 +64,7 @@ describe('Error catalog', () => {
   it('over_funded response includes contractError', async () => {
     const { body: created } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      .send({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] });
     await request(app).post(`/api/v1/contracts/${created.id}/deposit`).send({ amount: 100 });
     const res = await request(app)
       .post(`/api/v1/contracts/${created.id}/deposit`)
@@ -78,11 +79,11 @@ describe('Error catalog', () => {
   it('forbidden response uses forbidden code (unauthorized renamed)', async () => {
     const { body } = await request(app)
       .post('/api/v1/contracts')
-      .send({ client: 'GC', freelancer: 'GD', milestones: [{ amount: 200 }] });
+      .send({ client: account('GC'), freelancer: account('GD'), milestones: [{ amount: 200 }] });
     await request(app).post(`/api/v1/contracts/${body.id}/deposit`).send({ amount: 200 });
     const res = await request(app)
       .post(`/api/v1/contracts/${body.id}/dispute`)
-      .send({ raisedBy: 'GX' });
+      .send({ raisedBy: account('GX') });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('forbidden');
     expect(res.body.message).toBeTruthy();

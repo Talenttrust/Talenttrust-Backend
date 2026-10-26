@@ -62,9 +62,9 @@ export class ChainUnavailableError extends Error {
 
 /** Demo on-chain contract matching seed contract 1 for local exploration & verification */
 export const DEMO_ESCROW_3: OnChainEscrow = {
-  client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-  freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-  token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  client: 'GACE4EDG4UIAAELYTPAXRIFNNTKNUQYYLWFCWWNTOHNN5PEFVGQXEOYC',
+  freelancer: 'GCR36A6TRNBLWVDPRSP5YEZJKCGEEZHIKDX3KPRJL6OAI36UNKTCKJT6',
+  token: config.nativeTokenContractId,
   totalAmount: 1500,
   fundedAmount: 1500,
   releasedAmount: 250,

@@ -1,10 +1,11 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 
 describe('request body errors', () => {
   const app = createApp(new EscrowStore());
-  const validContract = { client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] };
+  const validContract = { client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 100 }] };
 
   afterEach(() => jest.restoreAllMocks());
 

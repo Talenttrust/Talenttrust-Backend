@@ -2,10 +2,11 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { ContractStatus, EscrowStore, HttpError } from '../src/store';
 import { Action, AllowedAction, describeStateMachine } from '../src/stateMachine';
+import { account } from './helpers/addresses';
 
 const actions: Action[] = ['deposit', 'release', 'dispute', 'resolve', 'cancel', 'rate'];
 // Advisory callers: only the dispute party check looks at `as`.
-const callers = { client: 'GC', freelancer: 'GF', outsider: 'GX', anonymous: undefined };
+const callers = { client: account('GC'), freelancer: account('GF'), outsider: account('GX'), anonymous: undefined };
 const DAY = 24 * 60 * 60 * 1000;
 
 /**
@@ -15,7 +16,7 @@ const DAY = 24 * 60 * 60 * 1000;
 function fixture(status: ContractStatus = 'Created') {
   let now = Date.now();
   const store = new EscrowStore(() => new Date(now));
-  const c = store.create({ client: 'GC', freelancer: 'GF', milestones: [10, 20] });
+  const c = store.create({ client: account('GC'), freelancer: account('GF'), milestones: [10, 20] });
   switch (status) {
     case 'Created':
       store.deposit(c.id, 15);
@@ -30,11 +31,11 @@ function fixture(status: ContractStatus = 'Created') {
       break;
     case 'Disputed':
       store.deposit(c.id, 15);
-      store.openDispute(c.id, 'GC', 'late');
+      store.openDispute(c.id, account('GC'), 'late');
       break;
     case 'Resolved':
       store.deposit(c.id, 15);
-      store.openDispute(c.id, 'GC', 'late');
+      store.openDispute(c.id, account('GC'), 'late');
       store.resolveDispute(c.id, 5000);
       break;
     case 'Cancelled':
@@ -106,7 +107,7 @@ describe('state machine and action discovery', () => {
   test('allowed actions per status follow the transition table', async () => {
     const allowed = async (status: ContractStatus) => {
       const { app, id } = fixture(status);
-      const { body } = await request(app).get(`/api/v1/contracts/${id}/actions`).query({ as: 'GC' }).expect(200);
+      const { body } = await request(app).get(`/api/v1/contracts/${id}/actions`).query({ as: account('GC') }).expect(200);
       return body.actions.filter((a: AllowedAction) => a.allowed).map((a: AllowedAction) => a.action);
     };
     expect(await allowed('Created')).toEqual(['deposit', 'release', 'dispute', 'cancel']);
@@ -122,7 +123,7 @@ describe('state machine and action discovery', () => {
     const app = createApp(new EscrowStore().seed());
     const { body } = await request(app)
       .get('/api/v1/contracts/1/actions')
-      .query({ as: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' })
+      .query({ as: 'GACE4EDG4UIAAELYTPAXRIFNNTKNUQYYLWFCWWNTOHNN5PEFVGQXEOYC' })
       .expect(200);
     expect(body.status).toBe('Funded');
     expect(body.actions).toContainEqual({ action: 'release', allowed: true, params: { index: [1, 2] } });
@@ -162,7 +163,7 @@ describe('state machine and action discovery', () => {
 
   test('reports exact remaining capacity for large integer amounts', async () => {
     const store = new EscrowStore();
-    const c = store.create({ client: 'GC', freelancer: 'GF', milestones: ['900719925474099312345'] });
+    const c = store.create({ client: account('GC'), freelancer: account('GF'), milestones: ['900719925474099312345'] });
     const { body } = await request(createApp(store)).get(`/api/v1/contracts/${c.id}/actions`).expect(200);
     expect(body.actions.find((a: AllowedAction) => a.action === 'deposit').params.maxDeposit).toBe('900719925474099312345');
     store.deposit(c.id, '900719925474099312345');
@@ -177,7 +178,7 @@ describe('state machine and action discovery', () => {
     ['deposit', { amount: 100 }, 409, 'over_funded'],
     ['milestones/19/release', {}, 404, 'milestone_not_found'],
     ['milestones/1/release', {}, 409, 'insufficient_funds'],
-    ['dispute', { raisedBy: 'GX' }, 403, 'forbidden'],
+    ['dispute', { raisedBy: account('GX') }, 403, 'forbidden'],
   ] as const)('preserves %s guard errors', async (route, body, status, code) => {
     const { app, store, id } = fixture();
     const before = JSON.stringify(store.get(id));
@@ -188,13 +189,13 @@ describe('state machine and action discovery', () => {
 
   test('existence precedes actor, which precedes status and guards', async () => {
     const { app, id } = fixture('Cancelled');
-    expect((await request(app).post('/api/v1/contracts/999/dispute').send({ raisedBy: 'GX' }).expect(404)).body.error).toBe(
+    expect((await request(app).post('/api/v1/contracts/999/dispute').send({ raisedBy: account('GX') }).expect(404)).body.error).toBe(
       'contract_not_found',
     );
-    expect((await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GX' }).expect(403)).body.error).toBe(
+    expect((await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: account('GX') }).expect(403)).body.error).toBe(
       'forbidden',
     );
-    expect((await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: 'GC' }).expect(409)).body.error).toBe(
+    expect((await request(app).post(`/api/v1/contracts/${id}/dispute`).send({ raisedBy: account('GC') }).expect(409)).body.error).toBe(
       'contract_not_active',
     );
     expect((await request(app).post(`/api/v1/contracts/${id}/deposit`).send({ amount: 1 }).expect(409)).body.error).toBe(
@@ -210,7 +211,7 @@ describe('state machine and action discovery', () => {
     const created = fixture('Created');
     created.store.release(created.id, 0);
     expect(() => created.store.release(created.id, 0)).toThrow('Milestone already released');
-    const big = created.store.create({ client: 'GC', freelancer: 'GF', milestones: ['100'] });
+    const big = created.store.create({ client: account('GC'), freelancer: account('GF'), milestones: ['100'] });
     for (const amount of ['no', '0', '-1', '1.5']) {
       expect(() => created.store.deposit(big.id, amount)).toThrow(/amount/);
     }

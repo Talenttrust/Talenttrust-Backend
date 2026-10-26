@@ -20,6 +20,13 @@ const NETWORK_PASSPHRASES: Record<string, string> = {
   futurenet: 'Test SDF Future Network ; October 2022',
 };
 
+/** Stellar Asset Contract (SAC) ids for the native token on each known network. */
+const NATIVE_TOKEN_CONTRACTS: Record<string, string> = {
+  testnet: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+  mainnet: 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA',
+  public: 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA',
+};
+
 function positiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -43,6 +50,11 @@ export const config = {
     NETWORK_PASSPHRASES.testnet,
   contractId:
     process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
+  /** Stellar Asset Contract id used when a contract's token is the native asset (XLM). */
+  nativeTokenContractId:
+    process.env.NATIVE_TOKEN_CONTRACT_ID ||
+    NATIVE_TOKEN_CONTRACTS[network.toLowerCase()] ||
+    NATIVE_TOKEN_CONTRACTS.testnet,
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
   txTimeoutSeconds: Math.max(1, Number.parseInt(process.env.TX_TIMEOUT_SECONDS || '300', 10) || 300),
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',

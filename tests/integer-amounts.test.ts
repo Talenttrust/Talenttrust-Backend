@@ -16,6 +16,7 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore, HttpError } from '../src/store';
 import { parseAmount, checkedAdd, I128_MAX, bigIntReplacer } from '../src/amount';
+import { account } from './helpers/addresses';
 
 // ── parseAmount unit tests ────────────────────────────────────────────────────
 
@@ -96,8 +97,8 @@ describe('i128 overflow', () => {
   test('contract with milestone at I128_MAX is accepted', () => {
     const store = new EscrowStore();
     const c = store.create({
-      client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-      freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+      client: account('GCLIENT'),
+      freelancer: account('GFREELANCER'),
       milestones: [{ title: 'M1', amount: '170141183460469231731687303715884105727' }],
     });
     expect(c.totalAmountUnits).toBe('170141183460469231731687303715884105727');
@@ -107,8 +108,8 @@ describe('i128 overflow', () => {
     const store = new EscrowStore();
     expect(() =>
       store.create({
-        client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-        freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         milestones: [
           { title: 'M1', amount: '170141183460469231731687303715884105727' },
           { title: 'M2', amount: 1 },
@@ -152,12 +153,12 @@ describe('resolveDispute integer split', () => {
   test('store.resolveDispute uses integer split matching contract', () => {
     const store = new EscrowStore();
     const c = store.create({
-      client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-      freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+      client: account('GCLIENT'),
+      freelancer: account('GFREELANCER'),
       milestones: [{ title: 'M', amount: 10001 }],
     });
     store.deposit(c.id, 10001);
-    store.openDispute(c.id, 'GCLIENT000000000000000000000000000000000000000000000000000', 'test');
+    store.openDispute(c.id, account('GCLIENT'), 'test');
     const resolved = store.resolveDispute(c.id, 5000);
     // 10001 * 5000 / 10000 = 5000 (truncated, not rounded)
     expect(resolved.releasedAmountUnits).toBe('5000');
@@ -198,8 +199,8 @@ function createContract(app: ReturnType<typeof createApp>, overrides: object = {
   return request(app)
     .post('/api/v1/contracts')
     .send({
-      client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-      freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+      client: account('GCLIENT'),
+      freelancer: account('GFREELANCER'),
       milestones: [{ title: 'M', amount: 1000 }],
       ...overrides,
     });
@@ -330,8 +331,8 @@ describe('no raw bigint leaks — JSON.stringify safe on every route', () => {
     const createRes = await request(app)
       .post('/api/v1/contracts')
       .send({
-        client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-        freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         milestones: [{ title: 'M', amount: 9999 }],
       });
     contractId = createRes.body.id;
@@ -371,8 +372,8 @@ describe('stats() bigint arithmetic', () => {
     await request(app)
       .post('/api/v1/contracts')
       .send({
-        client: 'GCLIENT000000000000000000000000000000000000000000000000000',
-        freelancer: 'GFREELANCER00000000000000000000000000000000000000000000000',
+        client: account('GCLIENT'),
+        freelancer: account('GFREELANCER'),
         milestones: [{ amount: 1000000 }],
       })
       .then((r) =>

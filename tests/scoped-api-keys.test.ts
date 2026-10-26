@@ -2,6 +2,7 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { account } from './helpers/addresses';
 import { parseApiKeysConfig, sha256Hex, type ParsedApiKeys } from '../src/auth/apiKeysConfig';
 import { extractApiKeyFromHeaders } from '../src/auth/scopedApiKeyMiddleware';
 import { SCOPES, isValidScope } from '../src/auth/scopes';
@@ -21,9 +22,9 @@ function makeApiKeys(opts: { id?: string; scopes?: string[]; hash?: string } = {
 /** App with one disputed, funded contract (id 1). */
 function disputedApp(apiKeys: ParsedApiKeys) {
   const store = new EscrowStore();
-  const c = store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] });
+  const c = store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 200 }] });
   store.deposit(c.id, 200);
-  store.openDispute(c.id, 'GA', 'late');
+  store.openDispute(c.id, account('GA'), 'late');
   return { store, id: c.id, app: createApp({ store, apiKeys }) };
 }
 
@@ -196,7 +197,7 @@ describe('POST /contracts/:id/resolve — scoped API key', () => {
 
   it('returns 409 when the contract is not disputed', async () => {
     const store = new EscrowStore();
-    const c = store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] });
+    const c = store.create({ client: account('GA'), freelancer: account('GB'), milestones: [{ amount: 200 }] });
     const app = createApp({ store, apiKeys: makeApiKeys() });
     await request(app).post(`/api/v1/contracts/${c.id}/resolve`).set('X-API-Key', SECRET).send({ freelancerBps: 5000 }).expect(409);
   });
