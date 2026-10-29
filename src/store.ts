@@ -10,6 +10,7 @@
  * deprecated and lossy above Number.MAX_SAFE_INTEGER.
  */
 
+import { EventEmitter } from 'node:events';
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
@@ -493,6 +494,29 @@ function toPublic(c: InternalContract): EscrowContract {
   };
 }
 
+export type ContractAction =
+  | 'created'
+  | 'deposited'
+  | 'released'
+  | 'dispute_opened'
+  | 'dispute_resolved'
+  | 'cancelled'
+  | 'rated';
+
+export interface ContractEvent {
+  id: number;
+  contractId: number;
+  action: ContractAction;
+  status: ContractStatus;
+  contract: EscrowContract;
+}
+
+export interface ContractEventListener {
+  (event: ContractEvent): void;
+}
+
+const MAX_EVENT_LISTENERS = 0;
+
 export class EscrowStore {
   private contracts = new Map<number, InternalContract>();
   private reputation = new Map<string, ReputationRecord>();
@@ -505,6 +529,7 @@ export class EscrowStore {
   private reviews: Review[] = [];
   private nextReviewId = 1;
   private nextId = 1;
+  eventSeq = 0;
   private templates = new Map<number, InternalTemplate>();
   private nextTemplateId = 1;
 
@@ -527,6 +552,9 @@ export class EscrowStore {
       this.clock = clockOrOptions.clock ?? (() => new Date());
       this.priorWeightOverride = clockOrOptions.priorWeight;
       this.events = clockOrOptions.events ?? new StoreEventEmitter();
+    }
+    if (typeof (this.events as unknown as EventEmitter).setMaxListeners === 'function') {
+      (this.events as unknown as EventEmitter).setMaxListeners(MAX_EVENT_LISTENERS);
     }
     // Count every domain mutation as ok / <error code> for the metrics endpoint, and
     // append an audit entry (before/after state) for every one that succeeds.
@@ -1678,7 +1706,7 @@ export class EscrowStore {
   seed(): this {
     const a = this.create({
       title: 'Landing page redesign',
-      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [

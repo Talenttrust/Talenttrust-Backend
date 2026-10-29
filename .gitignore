@@ -3,8 +3,11 @@ dist/
 coverage/
 .env
 .env.local
+temp_auto_push.bat
 *.log
 .DS_Store
 .vercel
 .env*
 !.env.example
+.gitignore
+branch_structure.json

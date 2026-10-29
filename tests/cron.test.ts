@@ -11,7 +11,7 @@ describe('Cron endpoint', () => {
   it('returns 401 without authorization header', async () => {
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
-    const app = createApp(undefined, eventStore, indexer);
+    const app = createApp(undefined, undefined, indexer);
 
     const response = await request(app).post('/api/cron/index-events');
     expect(response.status).toBe(401);
@@ -21,7 +21,7 @@ describe('Cron endpoint', () => {
   it('returns 401 with wrong secret', async () => {
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
-    const app = createApp(undefined, eventStore, indexer);
+    const app = createApp(undefined, undefined, indexer);
 
     const response = await request(app)
       .post('/api/cron/index-events')
@@ -36,7 +36,7 @@ describe('Cron endpoint', () => {
     const indexer = new EventIndexer(eventStore);
     // Fake RPC: tests never reach the network.
     (indexer as any).rpc = { getEvents: async () => ({ events: [], cursor: 'cursor-0', latestLedger: 100 }) };
-    const app = createApp(undefined, eventStore, indexer);
+    const app = createApp(undefined, undefined, indexer);
 
     const response = await request(app)
       .post('/api/cron/index-events')
@@ -53,7 +53,7 @@ describe('Cron endpoint', () => {
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
     (indexer as any).isRunning = true;
-    const app = createApp(undefined, eventStore, indexer);
+    const app = createApp(undefined, undefined, indexer);
 
     const response = await request(app)
       .post('/api/cron/index-events')
@@ -67,7 +67,7 @@ describe('Cron endpoint', () => {
     delete process.env.CRON_SECRET;
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
-    const app = createApp(undefined, eventStore, indexer);
+    const app = createApp(undefined, undefined, indexer);
 
     const response = await request(app)
       .post('/api/cron/index-events')

@@ -79,6 +79,7 @@ const addressParam = {
   description: 'Stellar address',
 };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const streamEventRef = { $ref: '#/components/schemas/StreamEvent' };
 const reviewRef = { $ref: '#/components/schemas/Review' };
 const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
 const reputationRef = { $ref: '#/components/schemas/Reputation' };
@@ -151,7 +152,9 @@ const spec = {
       '**Authentication**: mutating routes accept a bearer token obtained via the auth endpoints. ' +
       'Call `GET /api/v1/auth/challenge?address=G…`, sign the returned challenge string with your ' +
       'Stellar ed25519 private key, then `POST /api/v1/auth/token` to receive a short-lived JWT. ' +
-      'Tokens are required when the server runs with `AUTH_SECRET` set (or `AUTH_REQUIRED=true`).',
+      'Tokens are required when the server runs with `AUTH_SECRET` set (or `AUTH_REQUIRED=true`). ' +
+      'Live updates are available via SSE (Server-Sent Events) at /api/v1/stream; ' +
+      'streams are per-process only and are closed after a short max duration so clients reconnect.',
   },
   servers: [{ url: '/' }],
   tags: [
@@ -1307,6 +1310,41 @@ const spec = {
         responses: ok('Verification result', { $ref: '#/components/schemas/ReceiptVerification' }),
       },
     },
+    '/api/v1/stream': {
+      get: {
+        tags: ['Events'],
+        summary: 'Subscribe to live escrow updates (Server-Sent Events)',
+        description:
+          'Streams contract updates as SSE events. Each event has an `id` (a monotonic sequence), ' +
+          '`event: contract.created` or `contract.updated`, and a JSON `data` payload. ' +
+          'Reconnect with the `Last-Event-ID` header to replay buffered events after that id; ' +
+          'if the id has been evicted from the buffer an `event: reset` is sent so the client refetches. ' +
+          'Comment heartbeats `: ping` are sent periodically and the stream closes after a max duration ' +
+          'with `retry: 2000` so clients reconnect. This is a single-process channel; serverless instances ' +
+          'do not fan out events across instances.',
+        parameters: [
+          { name: 'contractId', in: 'query', required: false, schema: { type: 'integer' }, description: 'Only stream events for this contract' },
+          { name: 'party', in: 'query', required: false, schema: { type: 'string' }, description: 'Only stream events where this address is the client or freelancer' },
+          {
+            name: 'Last-Event-ID',
+            in: 'header',
+            required: false,
+            schema: { type: 'integer' },
+            description: 'Resume after this event id; replays buffered events or sends `event: reset`',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Event stream',
+            content: {
+              'text/event-stream': { schema: { type: 'string' } },
+            },
+          },
+          429: { description: 'Too many concurrent streams from this IP', content: json({ type: 'object', properties: { error: { type: 'string' } } }) },
+          503: { description: 'Server at global stream capacity', content: json({ type: 'object', properties: { error: { type: 'string' } } }) },
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -2160,6 +2198,21 @@ const spec = {
           version: { type: 'integer', minimum: 1, description: 'Entity version behind the ETag; increments on every state change.' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      StreamEvent: {
+        type: 'object',
+        description: 'Payload of a `contract.created` / `contract.updated` SSE event.',
+        required: ['contractId', 'action', 'status', 'contract'],
+        properties: {
+          contractId: { type: 'integer' },
+          action: {
+            type: 'string',
+            description: 'Mutation that produced the event',
+            enum: ['created', 'deposit', 'release', 'dispute', 'resolve', 'cancel', 'reputation'],
+          },
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          contract: contractRef,
         },
       },
       TxBuildRequest: {
