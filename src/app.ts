@@ -54,10 +54,10 @@ import {
   TemplateOwnerQuery,
 } from './validation/schemas';
 import { parseFieldSpec, project } from './utils/project';
-import { ProfileStore, profileSigningMessage } from './profiles';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
+import { ProfileStore, profileSigningMessage } from './auth/profiles';
 import { bigIntReplacer } from './amount';
 import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
@@ -78,6 +78,7 @@ declare global {
 import { idempotency, IdempotencyStore, MemoryIdempotencyStore } from './idempotency';
 
 const startedAt = Date.now();
+
 
 type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 
