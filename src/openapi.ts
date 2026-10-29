@@ -169,6 +169,7 @@ const spec = {
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
     { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+    { name: 'Profiles' },
   ],
   paths: {
     '/api/v1/tx/submit': {
@@ -1307,6 +1308,70 @@ const spec = {
         responses: ok('Verification result', { $ref: '#/components/schemas/ReceiptVerification' }),
       },
     },
+    '/api/v1/profiles': {
+      get: {
+        tags: ['Profiles'],
+        summary: 'Search profiles by skill',
+        description: 'Returns profiles that include the given skill, sorted by reputation average descending.',
+        parameters: [
+          { name: 'skill', in: 'query', required: true, schema: { type: 'string' }, description: 'Lowercase skill slug' },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque pagination cursor' },
+        ],
+        responses: {
+          200: {
+            description: 'Matching profiles',
+            content: json({
+              type: 'object',
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/ProfileWithReputation' } },
+                nextCursor: { type: 'string', nullable: true },
+              },
+            }),
+          },
+          400: { description: 'invalid_skill or invalid_limit', content: json({ $ref: '#/components/schemas/Error' }) },
+        },
+      },
+    },
+    '/api/v1/profiles/{address}': {
+      get: {
+        tags: ['Profiles'],
+        summary: 'Get a profile with embedded reputation',
+        parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Profile', content: json({ $ref: '#/components/schemas/ProfileWithReputation' }) },
+          400: { description: 'invalid_address', content: json({ $ref: '#/components/schemas/Error' }) },
+          404: { description: 'profile_not_found', content: json({ $ref: '#/components/schemas/Error' }) },
+        },
+      },
+      put: {
+        tags: ['Profiles'],
+        summary: 'Create or update a profile (signature verified)',
+        description:
+          'The signature must be a base64 ed25519 signature by the key for `address` over ' +
+          '`talenttrust-profile:v1:<address>:<nonce>:<sha256(canonicalJSON(profile))>`. ' +
+          '`nonce` must be strictly greater than the stored nonce.',
+        parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['profile', 'nonce', 'signature'],
+            properties: {
+              profile: { $ref: '#/components/schemas/ProfileInput' },
+              nonce: { type: 'integer', minimum: 1 },
+              signature: { type: 'string', format: 'byte', description: 'Base64 ed25519 signature' },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Updated profile', content: json({ $ref: '#/components/schemas/ProfileWithReputation' }) },
+          400: { description: 'invalid_address or invalid_profile', content: json({ $ref: '#/components/schemas/Error' }) },
+          401: { description: 'invalid_signature', content: json({ $ref: '#/components/schemas/Error' }) },
+          409: { description: 'stale_nonce', content: json({ $ref: '#/components/schemas/Error' }) },
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -2147,6 +2212,8 @@ const spec = {
             description: 'Canonical decimal string released amount in token base units.',
           },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          clientProfile: { $ref: '#/components/schemas/ProfileWithReputation' },
+          freelancerProfile: { $ref: '#/components/schemas/ProfileWithReputation' },
           reputationIssued: { type: 'boolean' },
           fundingDeadline: { type: 'string', format: 'date-time' },
           expiredAt: { type: 'string', format: 'date-time' },
@@ -2161,6 +2228,61 @@ const spec = {
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
         },
+      },
+      ProfileInput: {
+        type: 'object',
+        required: ['displayName', 'skills'],
+        properties: {
+          displayName: { type: 'string', minLength: 1, maxLength: 60 },
+          bio: { type: 'string', maxLength: 1000 },
+          skills: {
+            type: 'array',
+            maxItems: 20,
+            items: { type: 'string', maxLength: 30, pattern: '^[a-z0-9]+(-[a-z0-9]+)*$' },
+          },
+          links: {
+            type: 'object',
+            properties: {
+              website: { type: 'string', format: 'uri', pattern: '^https://' },
+              github: { type: 'string', format: 'uri', pattern: '^https://' },
+            },
+          },
+        },
+      },
+      Profile: {
+        type: 'object',
+        properties: {
+          address: { type: 'string' },
+          displayName: { type: 'string' },
+          bio: { type: 'string' },
+          skills: { type: 'array', items: { type: 'string' } },
+          links: {
+            type: 'object',
+            properties: { website: { type: 'string' }, github: { type: 'string' } },
+          },
+          updatedAt: { type: 'string', format: 'date-time' },
+          nonce: { type: 'integer' },
+        },
+      },
+      ProfileWithReputation: {
+        allOf: [
+          { $ref: '#/components/schemas/Profile' },
+          {
+            type: 'object',
+            properties: {
+              reputation: {
+                type: 'object',
+                nullable: true,
+                properties: {
+                  address: { type: 'string' },
+                  count: { type: 'integer' },
+                  total: { type: 'integer' },
+                  average: { type: 'number' },
+                },
+              },
+            },
+          },
+        ],
       },
       TxBuildRequest: {
         type: 'object',

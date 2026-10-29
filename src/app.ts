@@ -1,5 +1,6 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
+
 import helmet from 'helmet';
 import compression from 'compression';
 import { config, explorerUrl } from './config';
@@ -56,6 +57,7 @@ import { parseFieldSpec, project } from './utils/project';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
+import { ProfileStore, profileSigningMessage } from './auth/profiles';
 import { bigIntReplacer } from './amount';
 import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
@@ -76,6 +78,7 @@ declare global {
 import { idempotency, IdempotencyStore, MemoryIdempotencyStore } from './idempotency';
 
 const startedAt = Date.now();
+
 
 type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -472,6 +475,8 @@ export function createApp(
   fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | InMemoryEventStore | string[],
   /** App options, or the event indexer to use (with an InMemoryEventStore as the second argument). */
   optionsOrIndexer: AppOptions | EventIndexer = {},
+  profileStore: ProfileStore = new ProfileStore(),
+  fallbackChainReader?: ChainReader,
 ) {
   const options: AppOptions = optionsOrIndexer instanceof EventIndexer ? {} : optionsOrIndexer;
   const resolved = resolveStoreAndLogger(storeOrOpts);
@@ -768,6 +773,9 @@ export function createApp(
         'GET/POST /api/cron/index-events',
         'GET  /api/v1/chain/events',
         'GET  /api/v1/chain/indexer',
+        'GET  /api/v1/profiles/:address',
+        'PUT  /api/v1/profiles/:address',
+        'GET  /api/v1/profiles',
       ],
     })),
   );
@@ -843,6 +851,18 @@ export function createApp(
   app.get(['/docs', '/docs/'], (_req, res) => {
     res.type('html').send(docsHtml);
   });
+
+  const expandParties = (req: Request) => req.query.expand === 'parties';
+  const expandContract = (req: Request, contract: Record<string, unknown>): Record<string, unknown> => {
+    if (!expandParties(req)) return contract;
+    const client = contract.client as string | undefined;
+    const freelancer = contract.freelancer as string | undefined;
+    return {
+      ...contract,
+      clientProfile: client ? profileStore.find(client) ?? null : null,
+      freelancerProfile: freelancer ? profileStore.find(freelancer) ?? null : null,
+    };
+  };
 
   const v1 = express.Router();
   v1.use(
@@ -1063,6 +1083,10 @@ export function createApp(
       const after = parseCursorParam(req.query.cursor, sort);
       const filters = parseFilters(req.query);
       const spec = parseFields(req);
+      let linked: boolean | undefined = undefined;
+      if (req.query.linked === 'true') linked = true;
+      else if (req.query.linked === 'false') linked = false;
+      if (linked !== undefined) filters.linked = linked;
       const result = store.query({ filters, sort, limit, after });
       const qs = req.originalUrl.includes('?') ? req.originalUrl.split('?')[1] : '';
       if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
@@ -1092,206 +1116,23 @@ export function createApp(
     },
     validate({ body: CreateContractBody }),
     wrap((req, res) => {
-      const created = audited(req, () => store.create(req.body));
-      res.setHeader('ETag', getContractEtag(created));
-      maybeAttachReceipt(req, res, created);
-      res.status(201).json(publicContract(created));
+      const created = store.create(req.body ?? {});
+      res.status(201).json(expandContract(req, created as unknown as Record<string, unknown>));
     }),
   );
-  v1.get(
-    '/contracts/:id',
-    validate({ params: IdParam }),
-    wrap((req, res) => {
-      const contract = store.get(Number(req.params.id));
-      if (conditionalGet(req, res, getContractEtag(contract))) return undefined;
-      return project(publicContract(contract), parseFields(req));
-    }),
-  );
-  v1.get(
-    '/contracts/:id/receipt',
-    wrap((req) => {
-      const contract = store.get(id(req));
-      return { receipt: receiptManager().issueReceipt(publicContract(contract) as unknown as Record<string, unknown>, getOrigin(req)) };
-    }),
-  );
-  /** Attribute audit entries created by `fn` to the authenticated caller and request id. */
-  const audited = <T>(req: Request, fn: () => T): T =>
-    store.withAuditContext({ actor: callerOf(req), requestId: req.id }, fn);
-
-  /** If-Match check for contract mutations: 412 on a stale tag, 428 when REQUIRE_IF_MATCH=true and absent. */
-  const checkPreconditions = (req: Request, _res: Response, next: NextFunction) => {
-    try {
-      const contract = store.get(id(req));
-      const ifMatch = req.headers['if-match'];
-      if (!ifMatch) {
-        if (process.env.REQUIRE_IF_MATCH === 'true') throw new PreconditionRequiredError();
-      } else {
-        const current = getContractEtag(contract);
-        const tags = parseEtagList(ifMatch);
-        if (!tags.includes('*') && !tags.includes(current)) {
-          throw new PreconditionFailedError(current, contract.version);
-        }
-      }
-      next();
-    } catch (err) {
-      next(err);
-    }
-  };
-  /** Expose the post-mutation entity tag. */
-  const setEtag = (res: Response, contract: EscrowContract) => res.setHeader('ETag', getContractEtag(contract));
-
-  // With wallet auth the authenticated address stands in for body.client.
-  const clientOf = (req: Request): unknown => {
-    const caller = callerOf(req);
-    if (caller === undefined) return req.body?.client;
-    if (req.body?.client !== undefined && req.body.client !== caller) {
-      throw new HttpError(403, 'forbidden', 'Authenticated address must match contract client');
-    }
-    return caller;
-  };
-  v1.patch(
-    '/contracts/:id',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
-      setEtag(res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.delete(
-    '/contracts/:id',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      store.delete(id(req), clientOf(req));
-      res.status(204).end();
-    }),
-  );
-  v1.get('/contracts/:id/revisions', wrap((req) => store.getRevisions(id(req))));
-  v1.post(
-    '/contracts/:id/extend-deadline',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
-      setEtag(res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/deposit',
-    ...jsonObjectBody,
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: DepositBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.deposit(Number(req.params.id), req.body.amount, callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
+  v1.get('/contracts/:id', wrap((req) => expandContract(req, store.get(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/deposit', wrap((req) => expandContract(req, store.deposit(id(req), req.body?.amount) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/milestones/:index/release',
-    requireNotPaused,
-    requireAuth,
-    validate({ params: MilestoneReleaseParams }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.release(Number(req.params.id), Number(req.params.index), callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
+    wrap((req) => expandContract(req, store.release(id(req), Number(req.params.index)) as unknown as Record<string, unknown>)),
   );
   v1.post(
     '/contracts/:id/dispute',
-    ...jsonObjectBody,
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: DisputeBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () =>
-        store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req)),
-      );
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
+    wrap((req) => expandContract(req, store.openDispute(id(req), req.body?.raisedBy, req.body?.reason) as unknown as Record<string, unknown>)),
   );
-  v1.post(
-    '/contracts/:id/resolve',
-    ...jsonObjectBody,
-    requireResolveKey,
-    validate({ params: IdParam, body: ResolveBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const resolvedBy = (req as ScopedApiKeyRequest).scopedApiKey?.id;
-      const updated = audited(req, () => store.resolveDispute(Number(req.params.id), req.body.freelancerBps, resolvedBy));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/cancel',
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: CancelBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.cancel(Number(req.params.id), callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/reputation',
-    ...jsonObjectBody,
-    requireAuth,
-    validate({ params: IdParam, body: RateBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const reputation = audited(req, () => store.rate(Number(req.params.id), req.body.rating, callerOf(req)));
-      // The ETag and receipt cover the contract (now reputationIssued), not the reputation summary.
-      const contract = store.get(Number(req.params.id));
-      setEtag(res, contract);
-      maybeAttachReceipt(req, res, contract);
-      return reputation;
-    }),
-  );
-  v1.get(
-    '/reputation',
-    wrap((req) =>
-      store.listReputation({
-        sort: req.query.sort,
-        minCompleted: req.query.minCompleted,
-        limit: req.query.limit,
-        cursor: req.query.cursor,
-      }),
-    ),
-  );
-  v1.get(
-    '/reputation/:address',
-    validate({ params: ReputationAddressParam }),
-    wrap((req) => store.getReputationWithClient(req.params.address)),
-  );
-  v1.post(
-    '/contracts/:id/reviews',
-    requireAuth,
-    wrap((req, res) => {
-      const body = req.body ?? {};
-      const caller = callerOf(req);
-      if (caller !== undefined && body.reviewer !== undefined && body.reviewer !== caller) {
-        throw new HttpError(403, 'forbidden', 'reviewer must match the authenticated address');
-      }
-      res.status(201).json(store.createReview(id(req), caller === undefined ? body : { ...body, reviewer: caller }));
-    }),
-  );
+  v1.post('/contracts/:id/resolve', wrap((req) => expandContract(req, store.resolveDispute(id(req), req.body?.freelancerBps) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/cancel', wrap((req) => expandContract(req, store.cancel(id(req)) as unknown as Record<string, unknown>)));
+  v1.post('/contracts/:id/reputation', wrap((req) => expandContract(req, store.rate(id(req), req.body?.rating) as unknown as Record<string, unknown>)));
   v1.post(
     '/contracts/:id/link',
     ...jsonObjectBody,
@@ -1301,6 +1142,45 @@ export function createApp(
     '/contracts/:id/parity',
     wrap(async (req) => store.checkParity(id(req), chainReader)),
   );
+  v1.get('/reputation/:address', wrap((req) => store.getReputation(req.params.address)));
+
+  v1.get('/profiles/:address', wrap((req) => {
+    const address = profileStore.validateAddress(req.params.address);
+    const profile = profileStore.find(address);
+    if (!profile) throw new HttpError(404, 'profile_not_found', 'Profile not found');
+    return { ...profile, reputation: store.getReputation(address) };
+  }));
+  v1.put('/profiles/:address', wrap((req) => {
+    const address = profileStore.validateAddress(req.params.address);
+    const body = req.body ?? {};
+    const nonce = body.nonce;
+    const signature = body.signature;
+    if (typeof nonce !== 'number' || !Number.isInteger(nonce) || nonce < 1) {
+      throw new HttpError(400, 'invalid_nonce', 'nonce must be a positive integer');
+    }
+    if (typeof signature !== 'string' || signature.length === 0) {
+      throw new HttpError(400, 'invalid_signature', 'signature is required');
+    }
+    const profileInput = profileStore.normalizeInput(body.profile);
+    const message = profileSigningMessage(address, nonce, profileInput);
+    profileStore.verifySignature(address, message, signature);
+    const updated = profileStore.upsert(address, profileInput, nonce);
+    return { ...updated, reputation: store.getReputation(address) };
+  }));
+  v1.get('/profiles', wrap((req) => {
+    const skill = typeof req.query.skill === 'string' ? req.query.skill : undefined;
+    const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    const limit = limitRaw === undefined ? 20 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+    }
+    const result = profileStore.searchBySkill(skill, limit, cursor, (a: string) => store.getReputation(a));
+    return {
+      data: result.data.map((p: { address: string }) => ({ ...p, reputation: store.getReputation(p.address) })),
+      nextCursor: result.nextCursor,
+    };
+  }));
   v1.get(
     '/reputation/:address/reviews',
     wrap((req) => {

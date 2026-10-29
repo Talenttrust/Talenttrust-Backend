@@ -42,12 +42,18 @@ export const config = {
     NETWORK_PASSPHRASES[network.toLowerCase()] ||
     NETWORK_PASSPHRASES.testnet,
   contractId:
-    process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
+    process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFWWJEOKCHHIFJBGBKTXK5W',
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
   txTimeoutSeconds: Math.max(1, Number.parseInt(process.env.TX_TIMEOUT_SECONDS || '300', 10) || 300),
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
   disputeSlaHours: Number.isFinite(slaRaw) && slaRaw > 0 ? slaRaw : 72,
   version: '1.0.0',
+  profileMaxDisplayNameLength: 60,
+  profileMaxBioLength: 1000,
+  profileMaxSkills: 20,
+  profileMaxSkillLength: 30,
+  profileMaxPageSize: 100,
+  profileDefaultPageSize: 20,
   /** Per-call Soroban RPC timeout. */
   rpcTimeoutMs: intEnv(process.env.RPC_TIMEOUT_MS, 4000),
   /** How long a successful /api/v1/chain on-chain snapshot stays cached. */

@@ -6,7 +6,7 @@
 - Docs: https://talenttrust-frontend.vercel.app/docs
 - API: https://talenttrust-backend.vercel.app
 - API docs (Swagger UI): https://talenttrust-backend.vercel.app/docs
-- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W)
+- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFWWJEOKCHHIFJBZGBKTXK5Wo](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFWWJEOKCHHIFJBZGBKTXKX5Wo)
 
 Express + TypeScript API for TalentTrust, a milestone-based freelancer escrow protocol on Stellar.
 The API mirrors the state machine of the Soroban escrow contract
@@ -63,6 +63,9 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/reputation` | Ranked freelancer leaderboard (`?sort=score\|completed\|average&minCompleted=&limit=&cursor=`) |
 | GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
 | GET | `/api/v1/reputation/:address/reviews` | Reviews received (`?role=`, `?limit=`, `?cursor=`) |
+| GET | `/api/v1/profiles/:address` | Public profile plus embedded reputation |
+| PUT | `/api/v1/profiles/:address` | Signature-verified profile update |
+| GET | `/api/v1/profiles` | Search profiles (`?skill=`, `?limit=`, `?cursor=`) |
 | GET | `/.well-known/talenttrust-receipts.json` | Published ed25519 public keys for offline verification |
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
@@ -83,6 +86,57 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
+
+## Signed profile updates
+
+Profiles are keyed by Stellar address and can only be written by the holder of that
+address' key. No session or JWT is involved: every update carries an ed25519 signature
+over a canonical, replay-protected message.
+
+Shape:
+
+```json
+{
+  "profile": {
+    "displayName": "Ada",
+    "bio": "Optional, up to 1000 chars",
+    "skills": ["rust", "soroban"],
+    "links": { "website": "https://example.org", "github": "https://github.com/ada" }
+  },
+  "nonce": 1,
+  "signature": "<base64 ed25519 signature>"
+}
+```
+
+The signed message is:
+```
+talenttrust-profile:v1:<address>:<nonce>:<sha256(canonicalJSON(profile))>
+```
+
+where canonical JSON is recursively key-sorted with no whitespace. The helper
+`profileSigningMessage(address, nonce, profile)` exported from `src/profiles.ts` so
+wallets can reproduce it bit-for-bit.
+
+Validation and errors:
+
+- Address must be a `G`... str key -> `400 invalid_address`
+- Display name 1..60, bio ≤ 1000, ≤ 20 skills (each ≤ 30, lowercase slug), links https only -> `400 validation_error`
+- Bad signature -> `401 invalid_signature`
+- Nonce not strictly greater than stored -> `409 stale_nonce`
+- Unknown profile -> `404 profile_not_found`
+
+Example with the Stellar SDK:
+
+```ts
+import { Keypair } from '@stellar/stellar-sdk';
+import { profileSigningMessage } from './src/profiles';
+
+const k = Keypair.random();
+const profile = { displayName: 'Ada', skills: ['rust'] };
+const nonce = 1;
+const msg = profileSigningMessage(kp.publicKey(), nonce, profile);
+const signature = kp.sign(Buffer.from(msg)).toString('base64');
+```
 
 ## Webhooks
 
@@ -325,8 +379,7 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 
 ## Deployment
 
-Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and `vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod
