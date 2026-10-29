@@ -5,16 +5,19 @@
 - Website: https://talenttrust-frontend.vercel.app
 - Docs: https://talenttrust-frontend.vercel.app/docs
 - API: https://talenttrust-backend.vercel.app
-- API docs (Swagger UI): https://talenttrust-backend.vercel.app/docs
-- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W)
+- API docs (Swagger UI): https://talentrust-backend.vercel.app/docs
+- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKXXK5W`](https://stellarexpert.com/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKXXK5W)
 
 Express + TypeScript API for TalentTrust, a milestone-based freelancer escrow protocol on Stellar.
-The API mirrors the state machine of the Soroban escrow contract
-([Talenttrust-Contracts](https://github.com/Talenttrust/Talenttrust-Contracts)) so clients and
+The API mirrors the state machine of the Soroban escrow contract ([Talenttrust-Contracts](https://github.com/Talenttrust/Talenttrust-Contracts)) so clients and
 freelancers can create engagements, fund escrow, release milestones, raise disputes and build reputation.
 
 Storage is in-memory (seeded with demo data), so no database is required. On serverless hosting the
 data is per-instance and resets on redeploy.
+
+Every contract keeps a complete ledger of fund movements (deposits, milestone releases,
+dispute payouts and refunds). The invariant `depositedAmount == releasedAmount + refundedAmount +
+(fundedAmount - releasedAmount)` is enforced after every mutation.
 
 ## Endpoints
 
@@ -40,13 +43,14 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/parties/:address/statement.json` | Same rows as JSON |
 | GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
 | GET | `/api/v1/contracts/:id/actions?as=<address>` | Allowed actions now, with error codes/reasons, releasable indexes and remaining deposit capacity |
-| GET | `/api/v1/stats` | Aggregate statistics |
+| GET | `/api/v1/stats` | Aggregate statistics (totalDeposited, totalRefunded, releasedViaMilestones, releasedViaDisputes) |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
+| GET | `/api/v1/contracts/:id/ledger` | Chronological ledger of deposits, releases, dispute payouts and refunds |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
 | GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
@@ -266,8 +270,8 @@ wallet-authenticated callers and dispute resolution by scoped API keys, so their
 
 ```bash
 npm ci
-npm run dev      # http://localhost:3001
-npm run lint     # type check
+npom run dev      # http://localhost:3001
+npom run lint     # type check
 npm test
 npm run build && npm start
 ```
@@ -325,8 +329,7 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 
 ## Deployment
 
-Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and `vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod

@@ -103,9 +103,25 @@ export interface Dispute {
   reason: string;
   openedAt: string;
   freelancerBps?: number;
+  toFreelancer?: number;
+  toClient?: number;
   resolvedAt?: string;
   /** API key id that resolved the dispute (when scoped API keys are configured). */
   resolvedBy?: string;
+}
+
+export interface Settlement {
+  kind: 'cancel' | 'dispute';
+  toFreelancer: number;
+  toClient: number;
+  at: string;
+}
+
+export interface LedgerEntry {
+  type: 'deposit' | 'release' | 'dispute_payout' | 'refund';
+  amount: number;
+  milestoneIndex?: number;
+  at: string;
 }
 
 export interface DriftItem {
@@ -135,10 +151,11 @@ export interface EscrowContract {
   totalAmountUnits: string;
   /** @deprecated lossy above 2^53; use fundedAmountUnits */
   fundedAmount: number | string;
+  depositedAmount: number;
+  refundedAmount: number;
+  releasedAmount: number | string;
   /** Canonical decimal-string funded amount (base units). */
   fundedAmountUnits: string;
-  /** @deprecated lossy above 2^53; use releasedAmountUnits */
-  releasedAmount: number | string;
   /** Canonical decimal-string released amount (base units). */
   releasedAmountUnits: string;
   status: ContractStatus;
@@ -154,6 +171,7 @@ export interface EscrowContract {
   templateVersion?: number;
   createdAt: string;
   updatedAt: string;
+  settlement?: Settlement;
   /** Contracts still `Created` (not fully funded) at this instant expire. */
   fundingDeadline: string;
   expiredAt?: string;
@@ -929,6 +947,7 @@ export class EscrowStore {
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
       openedAt: this.nowIso(),
     };
+    assertBalanced(c);
     return this.touch(c);
   }
 
@@ -950,6 +969,8 @@ export class EscrowStore {
       c.dispute.resolvedAt = this.nowIso();
       if (resolvedBy !== undefined) c.dispute.resolvedBy = resolvedBy;
     }
+    c.settlement = { kind: 'dispute', toFreelancer, toClient, at };
+    assertBalanced(c);
     return this.touch(c);
   }
 
@@ -1076,6 +1097,41 @@ export class EscrowStore {
     const rating = this.validateRating(ratingRaw);
     this.createReview(id, { reviewer: c.client, rating });
     return this.getReputation(c.freelancer);
+  }
+
+  ledger(id: number): LedgerEntry[] {
+    const c = this.get(id);
+    const entries: LedgerEntry[] = [];
+    if (c.depositedAmount > 0) {
+      entries.push({ type: 'deposit', amount: c.depositedAmount, at: c.createdAt });
+    }
+    for (const m of c.milestones) {
+      if (m.released) {
+        entries.push({
+          type: 'release',
+          amount: m.amount,
+          milestoneIndex: m.index,
+          at: c.updatedAt,
+        });
+      }
+    }
+    if (c.settlement) {
+      if (c.settlement.kind === 'dispute') {
+        if (c.settlement.toFreelancer > 0) {
+          entries.push({
+            type: 'dispute_payout',
+            amount: c.settlement.toFreelancer,
+            at: c.settlement.at,
+          });
+        }
+        if (c.settlement.toClient > 0) {
+          entries.push({ type: 'refund', amount: c.settlement.toClient, at: c.settlement.at });
+        }
+      } else if (c.settlement.toClient > 0) {
+        entries.push({ type: 'refund', amount: c.settlement.toClient, at: c.settlement.at });
+      }
+    }
+    return entries;
   }
 
   async linkEscrow(
@@ -1678,7 +1734,7 @@ export class EscrowStore {
   seed(): this {
     const a = this.create({
       title: 'Landing page redesign',
-      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [
