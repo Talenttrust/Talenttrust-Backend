@@ -553,7 +553,9 @@ export class EscrowStore {
       this.priorWeightOverride = clockOrOptions.priorWeight;
       this.events = clockOrOptions.events ?? new StoreEventEmitter();
     }
-    this.events.setMaxListeners(MAX_EVENT_LISTENERS);
+    if (typeof (this.events as unknown as EventEmitter).setMaxListeners === 'function') {
+      (this.events as unknown as EventEmitter).setMaxListeners(MAX_EVENT_LISTENERS);
+    }
     // Count every domain mutation as ok / <error code> for the metrics endpoint, and
     // append an audit entry (before/after state) for every one that succeeds.
     for (const [method, action] of INSTRUMENTED_MUTATIONS) {
@@ -955,9 +957,7 @@ export class EscrowStore {
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
       openedAt: this.nowIso(),
     };
-    this.touch(c);
-    this.emit('dispute_opened', c);
-    return c;
+    return this.touch(c);
   }
 
   /** `resolvedBy` is the id of the scoped API key that authorised the resolution, if any. */
@@ -978,9 +978,7 @@ export class EscrowStore {
       c.dispute.resolvedAt = this.nowIso();
       if (resolvedBy !== undefined) c.dispute.resolvedBy = resolvedBy;
     }
-    this.touch(c);
-    this.emit('dispute_resolved', c);
-    return c;
+    return this.touch(c);
   }
 
   /** @security when `caller` is given it must equal contract.client — mirrors cancel_contract's client.require_auth() */

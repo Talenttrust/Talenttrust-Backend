@@ -177,6 +177,7 @@ export function handleStream(
 
   req.on('close', close);
   res.on('close', close);
+}
 
 import { randomUUID } from 'crypto';
 
