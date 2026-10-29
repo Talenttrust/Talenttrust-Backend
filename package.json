@@ -5,9 +5,9 @@
   "main": "dist/src/index.js",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/index.js",
-    "dev": "ts-node src/index.ts",
+    "build": "node init && tsc -p tsconfig.json",
+    "start": "node init && node dist/src/index.js",
+    "dev": "node init && ts-node src/index.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "jest",
     "apikey:new": "ts-node scripts/new-api-key.ts"
@@ -20,9 +20,11 @@
     "@stellar/stellar-sdk": "^13.3.0",
     "compression": "^1.8.2",
     "cors": "^2.8.5",
+    "dotenv": "^8.2.0",
     "express": "^4.21.2",
     "helmet": "^7.2.0",
     "lru-cache": "^11.5.3",
+    "node-fetch": "^3.3.2",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -45,7 +47,12 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "roots": ["<rootDir>/tests"],
-    "setupFiles": ["<rootDir>/tests/jest.setup.js", "<rootDir>/tests/setup/network-guard.ts"]
+    "roots": [
+      "<rootDir>/tests"
+    ],
+    "setupFiles": [
+      "<rootDir>/tests/jest.setup.js",
+      "<rootDir>/tests/setup/network-guard.ts"
+    ]
   }
 }
