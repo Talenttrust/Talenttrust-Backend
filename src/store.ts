@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * In-memory escrow store. Mirrors the state machine of the on-chain Soroban
  * escrow contract so the API can be used without a database. Data lives only
@@ -104,8 +106,23 @@ export interface Dispute {
   openedAt: string;
   freelancerBps?: number;
   resolvedAt?: string;
+  evidenceDigest?: string;
   /** API key id that resolved the dispute (when scoped API keys are configured). */
   resolvedBy?: string;
+}
+
+export type EvidenceKind = 'text' | 'link' | 'file_hash';
+
+export interface Evidence {
+  id: string;
+  contractId: number;
+  submittedBy: string;
+  kind: EvidenceKind;
+  text?: string;
+  url?: string;
+  sha256?: string;
+  fileName?: string;
+  submittedAt: string;
 }
 
 export interface DriftItem {
@@ -387,6 +404,11 @@ interface InternalContract {
 }
 
 const MAX_MILESTONES = 20;
+const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
+const MAX_EVIDENCE_PER_PARTY = 20;
+const MAX_EVIDENCE_TEXT = 4000;
+const MAX_EVIDENCE_FILENAME = 200;
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000e-\u001F\u007F]/;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const DEFAULT_FUNDING_WINDOW_MS = 14 * DAY_MS;
@@ -504,6 +526,7 @@ export class EscrowStore {
   readonly events: StoreEventEmitter;
   private reviews: Review[] = [];
   private nextReviewId = 1;
+  private evidence = new Map<number, Evidence[]>();
   private nextId = 1;
   private templates = new Map<number, InternalTemplate>();
   private nextTemplateId = 1;
@@ -932,6 +955,113 @@ export class EscrowStore {
     return this.touch(c);
   }
 
+  private normaliseText(value: unknown, field: string, max: number): string {
+    if (typeof value !== 'string') {
+      throw new HttpError(400, 'invalid_evidence', `${field} must be a string`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new HttpError(400, 'invalid_evidence', `${field} must not be empty`);
+    }
+    if (trimmed.length > max) {
+      throw new HttpError(400, 'invalid_evidence', `${field} must be at most ${max} characters`);
+    }
+    if (CONTROL_CHARS.test(trimmed)) {
+      throw new HttpError(400, 'invalid_evidence', `${field} contains control characters`);
+    }
+    return trimmed;
+  }
+
+  private canonicalEvidence(items: Evidence[]): string {
+    return JSON.stringify(
+      items.map((e) => ({
+        id: e.id,
+        contractId: e.contractId,
+        submittedBy: e.submittedBy,
+        kind: e.kind,
+        text: e.text ?? null,
+        url: e.url ?? null,
+        sha256: e.sha256 ?? null,
+        fileName: e.fileName ?? null,
+        submittedAt: e.submittedAt,
+      })),
+    );
+  }
+
+  evidenceDigest(items: Evidence[]): string {
+    return createHash('sha256').update(this.canonicalEvidence(items)).digest('hex');
+  }
+
+  listEvidence(id: number): { data: Evidence[]; digest: string } {
+    const c = this.get(id);
+    if (!c.dispute) {
+      throw new HttpError(409, 'dispute_not_open', 'Contract has no dispute');
+    }
+    const items = [...(this.evidence.get(id) ?? [])].sort((a, b) =>
+      a.submittedAt < b.submittedAt ? -1 : a.submittedAt > b.submittedAt ? 1 : 0,
+    );
+    return { data: items, digest: this.evidenceDigest(items) };
+  }
+
+  addEvidence(
+    id: number,
+    input: { submittedBy?: unknown; kind?: unknown; text?: unknown; url?: unknown; sha256?: unknown; fileName?: unknown },
+  ): Evidence {
+    const c = this.get(id);
+    if (input.submittedBy !== c.client && input.submittedBy !== c.freelancer) {
+      throw new HttpError(403, 'forbidden', 'Only the client or freelancer can submit evidence');
+    }
+    if (c.status === 'Resolved') {
+      throw new HttpError(409, 'dispute_closed', 'Dispute is already resolved');
+    }
+    if (c.status !== 'Disputed' || !c.dispute) {
+      throw new HttpError(409, 'dispute_not_open', 'Contract is not disputed');
+    }
+    const existing = this.evidence.get(id) ?? [];
+    const submittedBy = input.submittedBy as string;
+    const partyCount = existing.filter((e) => e.submittedBy === submittedBy).length;
+    if (partyCount >= MAX_EVIDENCE_PER_PARTY) {
+      throw new HttpError(409, 'evidence_limit_reached', `At most ${MAX_EVIDENCE_PER_PARTY} evidence items per party`);
+    }
+    const kind = input.kind;
+    if (kind !== 'text' && kind !== 'link' && kind !== 'file_hash') {
+      throw new HttpError(400, 'invalid_evidence', 'kind must be text, link or file_hash');
+    }
+    const item: Evidence = {
+      id: `ev_${id}_${existing.length + 1}`,
+      contractId: id,
+      submittedBy,
+      kind,
+      submittedAt: new Date().toISOString(),
+    };
+    if (kind === 'text') {
+      item.text = this.normaliseText(input.text, 'text', MAX_EVIDENCE_TEXT);
+    } else if (kind === 'link') {
+      const url = this.normaliseText(input.url, 'url', 2048);
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new HttpError(400, 'invalid_evidence', 'url must be a valid https URL');
+      }
+      if (parsed.protocol !== 'https:') {
+        throw new HttpError(400, 'invalid_evidence', 'url must use https');
+      }
+      item.url = url;
+    } else {
+      if (typeof input.sha256 !== 'string' || !/^[0-9a-fA-F]{64}$/.test(input.sha256)) {
+        throw new HttpError(400, 'invalid_evidence', 'sha256 must be 64 hex characters');
+      }
+      item.sha256 = input.sha256.toLowerCase();
+      if (input.fileName !== undefined) {
+        item.fileName = this.normaliseText(input.fileName, 'fileName', MAX_EVIDENCE_FILENAME);
+      }
+    }
+    existing.push(item);
+    this.evidence.set(id, existing);
+    return item;
+  }
+
   /** `resolvedBy` is the id of the scoped API key that authorised the resolution, if any. */
   resolveDispute(id: number, freelancerBpsRaw: unknown, resolvedBy?: string): EscrowContract {
     const c = this.getInternal(id);
@@ -948,6 +1078,8 @@ export class EscrowStore {
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
       c.dispute.resolvedAt = this.nowIso();
+      const items = this.evidence.get(id) ?? [];
+      c.dispute.evidenceDigest = this.evidenceDigest(items);
       if (resolvedBy !== undefined) c.dispute.resolvedBy = resolvedBy;
     }
     return this.touch(c);
@@ -1678,7 +1810,7 @@ export class EscrowStore {
   seed(): this {
     const a = this.create({
       title: 'Landing page redesign',
-      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [

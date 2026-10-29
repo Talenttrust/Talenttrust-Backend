@@ -2,7 +2,17 @@ import { createHash } from 'crypto';
 import { config, explorerUrl } from './config';
 import { ALLOWED_FIELDS } from './utils/project';
 
+
 const json = (schema: object) => ({ 'application/json': { schema } });
+const errContent = () => json({ $ref: '#/components/schemas/Error' });
+const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
+const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const reviewRef = { $ref: '#/components/schemas/Review' };
+const reviewerRef = { $ref: '#/components/schemas/Reputation' };
+const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
+const indexParam = { name: 'index', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } };
+const addressParam = { name: 'address', in: 'path', required: true, schema: { type: 'string' } };
+const reviewRef2 = reviewRef;
 const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
   200: { description, ...(headers ? { headers } : {}), content: json(schema) },
 });
@@ -13,6 +23,7 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 const created = (description: string, schema: object = { type: 'object' }) => ({
   201: { description, content: json(schema) },
 });
+const evidenceRef = { $ref: '#/components/schemas/DisputeEvidence' };
 const receiptQueryParam = {
   name: 'receipt',
   in: 'query',
@@ -56,32 +67,6 @@ const errorResponses = {
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
   },
 };
-
-const idParam = {
-  name: 'id',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
-  description: 'Contract ID (positive integer)',
-};
-const indexParam = {
-  name: 'index',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^(?:[0-9]|1[0-9])$' },
-  description: 'Milestone index (0-19)',
-};
-const addressParam = {
-  name: 'address',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', minLength: 1 },
-  description: 'Stellar address',
-};
-const contractRef = { $ref: '#/components/schemas/EscrowContract' };
-const reviewRef = { $ref: '#/components/schemas/Review' };
-const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
-const reputationRef = { $ref: '#/components/schemas/Reputation' };
 
 /**
  * `?fields=` query parameter shared by GET /contracts and GET /contracts/:id.
@@ -168,7 +153,7 @@ const spec = {
     { name: 'Parties', description: 'Per-address activity statements' },
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
-    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+    { name: 'Disputes', description: 'Dispute queue for evidence submission and sealed evidence digests. Admin queue requires the ADMIN_READ_TOKEN bearer token.' },
   ],
   paths: {
     '/api/v1/tx/submit': {
@@ -1111,6 +1096,67 @@ const spec = {
         responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses },
       },
     },
+    '/api/v1/contracts/{id}/dispute/evidence': {
+      post: {
+        tags: ['Disputes'],
+        summary: 'Submit a dispute evidence item',
+        description:
+          'Attaches a structured, content-hashed evidence item to an open dispute. ' +
+          'Only the contract client or freelancer may submit (403 forbidden). ' +
+          'Contract must be Disputed (409 dispute_not_open) and not yet resolved (409 dispute_closed). ' +
+          'At most 20 items per party per dispute (409 evidence_limit_reached). ' +
+          'Kind-specific fields are validated (400 invalid_evidence).',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['submittedBy', 'kind'],
+            properties: {
+              submittedBy: { type: 'string', description: 'Contract client or freelancer address' },
+              kind: { type: 'string', enum: ['text', 'link', 'file_hash'] },
+              text: { type: 'string', maxLength: 4000, description: 'Required for kind=text' },
+              url: { type: 'string', format: 'uri', description: 'Required for kind=link; must be https' },
+              sha256: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'Required for kind=file_hash; 64 lowercase hex' },
+              fileName: { type: 'string', maxLength: 200, description: 'Optional for kind=file_hash' },
+            },
+          }),
+        },
+        responses: {
+          201: { description: 'Evidence item created', content: json(evidenceRef) },
+          400: { description: 'invalid_evidence', content: errContent() },
+          403: { description: 'forbidden', content: errContent() },
+          404: { description: 'Contract not found', content: errContent() },
+          409: {
+            description: 'dispute_not_open | dispute_closed | evidence_limit_reached',
+            content: errContent(),
+          },
+        },
+      },
+      get: {
+        tags: ['Disputes'],
+        summary: 'List dispute evidence with integrity digest',
+        description:
+          'Returns all evidence items for the contract dispute ordered by submittedAt, ' +
+          'together with digest = sha256 over the canonical JSON of all items. The digest is ' +
+          'stored on the dispute as evidenceDigest when the dispute is resolved.',
+        parameters: [idParam],
+        responses: {
+          200: {
+            description: 'Evidence items and digest',
+            content: json({
+              type: 'object',
+              required: ['data', 'digest'],
+              properties: {
+                data: { type: 'array', items: evidenceRef },
+                digest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+              },
+            }),
+          },
+          404: { description: 'Contract not found', content: errContent() },
+        },
+      },
+    },
     '/api/v1/contracts/{id}/resolve': {
       post: {
         security: [{ apiKey: [] }],
@@ -1118,7 +1164,8 @@ const spec = {
           'Requires a scoped API key with `disputes:resolve` whenever API_KEYS is configured (fails closed in ' +
           'production without API_KEYS). 401 without/with an invalid key, 403 `insufficient_scope` otherwise.',
         tags: ['Contracts'],
-        summary: 'Resolve a dispute',
+        summary: 'Resolve a dispute (admin)',
+        description: 'Resolving a dispute seals the current evidence digest on the dispute as evidenceDigest.',
         parameters: [idParam],
         requestBody: { required: true, content: json({ $ref: '#/components/schemas/ResolveRequest' }) },
         responses: {
@@ -1867,6 +1914,21 @@ const spec = {
           expiresAt: { type: 'string', format: 'date-time' },
         },
       },
+      DisputeEvidence: {
+        type: 'object',
+        required: ['id', 'contractId', 'submittedBy', 'kind', 'submittedAt'],
+        properties: {
+          id: { type: 'string' },
+          contractId: { type: 'integer' },
+          submittedBy: { type: 'string' },
+          kind: { type: 'string', enum: ['text', 'link', 'file_hash'] },
+          text: { type: 'string', maxLength: 4000 },
+          url: { type: 'string', format: 'uri' },
+          sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+          fileName: { type: 'string', maxLength: 200 },
+          submittedAt: { type: 'string', format: 'date-time' },
+        },
+      },
       DriftItem: {
         type: 'object',
         properties: {
@@ -2147,12 +2209,22 @@ const spec = {
             description: 'Canonical decimal string released amount in token base units.',
           },
           status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          dispute: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              reason: { type: 'string' },
+              raisedBy: { type: 'string' },
+              openedAt: { type: 'string', format: 'date-time' },
+              evidenceCount: { type: 'integer', description: 'Number of evidence items attached to the dispute' },
+              evidenceDigest: { type: 'string', nullable: true, description: 'Sealed evidence digest set on resolution' },
+            },
+          },
           reputationIssued: { type: 'boolean' },
           fundingDeadline: { type: 'string', format: 'date-time' },
           expiredAt: { type: 'string', format: 'date-time' },
           refundableAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use refundableAmountUnits.' },
           refundableAmountUnits: { type: 'string', description: 'Partial funding returned to the client on expiry (base units).' },
-          dispute: { $ref: '#/components/schemas/Dispute' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
           templateId: { type: 'integer', description: 'Template the milestones were generated from' },

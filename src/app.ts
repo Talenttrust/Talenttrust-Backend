@@ -735,6 +735,8 @@ export function createApp(
         'POST /api/v1/contracts/:id/extend-deadline',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
+        'POST /api/v1/contracts/:id/dispute/evidence',
+        'GET  /api/v1/contracts/:id/dispute/evidence',
         'POST /api/v1/contracts/:id/resolve',
         'POST /api/v1/contracts/:id/cancel',
         'POST /api/v1/contracts/:id/reputation',
@@ -1292,6 +1294,16 @@ export function createApp(
       res.status(201).json(store.createReview(id(req), caller === undefined ? body : { ...body, reviewer: caller }));
     }),
   );
+  v1.post(
+    '/contracts/:id/dispute/evidence',
+    wrap((req, res) => {
+      res.status(201).json(store.addEvidence(id(req), req.body ?? {}));
+    }),
+  );
+  v1.get('/contracts/:id/dispute/evidence', wrap((req) => store.listEvidence(id(req))));
+  v1.post('/contracts/:id/resolve', wrap((req) => store.resolveDispute(id(req), req.body?.freelancerBps)));
+  v1.post('/contracts/:id/cancel', wrap((req) => store.cancel(id(req))));
+  v1.post('/contracts/:id/reputation', wrap((req) => store.rate(id(req), req.body?.rating)));
   v1.post(
     '/contracts/:id/link',
     ...jsonObjectBody,

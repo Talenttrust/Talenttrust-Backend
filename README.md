@@ -6,7 +6,7 @@
 - Docs: https://talenttrust-frontend.vercel.app/docs
 - API: https://talenttrust-backend.vercel.app
 - API docs (Swagger UI): https://talenttrust-backend.vercel.app/docs
-- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W)
+- Contract (Stellar testnet): [`CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCHIFIJBGZBKTXK5W`](https://stellar.expert/explorer/testnet/contract/CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCHIFIJBGZBKTXK5W)
 
 Express + TypeScript API for TalentTrust, a milestone-based freelancer escrow protocol on Stellar.
 The API mirrors the state machine of the Soroban escrow contract
@@ -46,7 +46,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
-| GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
+| GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`; includes `dispute.evidenceCount`) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
 | GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
@@ -54,6 +54,8 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/extend-deadline` | `{ "client": "G...", "fundingDeadline": "2026-01-15T00:00:00.000Z" }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
+| POST | `/api/v1/contracts/:id/dispute/evidence` | Submit evidence item `{ "submittedBy": "G...", "kind": "text" | "link" | "file_hash", ... }` |
+| GET | `/api/v1/contracts/:id/dispute/evidence` | List evidence items and sealed digest `{ data, digest }` |
 | POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` — requires a scoped API key with `disputes:resolve` (`X-API-Key`) when `API_KEYS` is set |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | Client rates freelancer: `{ "rating": 5 }` (backward-compatible) |
@@ -262,6 +264,23 @@ unavailable); empty, repeated or structured values return `400 invalid_actor`. I
 wallet-authenticated callers and dispute resolution by scoped API keys, so their roles are listed with
 `actorEnforced: false`.
 
+## Dispute evidence
+
+Both parties can attach structured, content-hashed evidence to an open dispute.
+Each item is `{ id, contractId, submittedBy, kind, text?, url?, sha256?, fileName?, submittedAt }`, where
+`kind` is one of `text` (text ≤ 4000), `link` (https URL) or `file_hash` (sha256 64 hex + fileName ≤ 200).
+
+Rules:
+
+- `submittedBy` must be the contract client or freelancer (else `403 forbidden`).
+- The contract must be in `Disputed` state (else `409 dispute_not_open`).
+- At most 20 items per party per dispute (else `409 evidence_limit_reached`).
+- Kind-specific fields are validated; invalid combinations return `400 invalid_evidence`.
+- Text is trimmed and control characters (other than newline and tab) are rejected.
+- After resolution the dispute is sealed: further submissions return `409 dispute_closed` and the `evidenceDigest` stored on the dispute equals the digest returned by `GET` before resolution.
+
+The digest is `sha256` over the canonical JSON of all evidence items for the dispute, ordered by `submittedAt`.
+
 ## Development
 
 ```bash
@@ -326,7 +345,7 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+`vercel.json` `rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod
