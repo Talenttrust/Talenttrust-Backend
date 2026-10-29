@@ -77,6 +77,7 @@ export function startServer({
   app.set('draining', false);
 
   let activeRequests = 0;
+  const sockets = new Set<Socket>();
   const server = app.listen(port, () => {
     const addr = server.address() as AddressInfo;
     log(`TalentTrust API listening on http://localhost:${addr.port}`);
@@ -85,6 +86,13 @@ export function startServer({
 
   server.keepAliveTimeout = resolved.keepAliveTimeoutMs;
   server.headersTimeout = resolved.headersTimeoutMs;
+
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => {
+      sockets.delete(socket);
+    });
+  });
 
   server.on('request', (_req, res) => {
     activeRequests++;
@@ -120,10 +128,14 @@ export function startServer({
         }
         if (Date.now() - start >= graceMs) {
           server.closeAllConnections();
+          for (const socket of sockets) {
+            socket.destroy();
+          }
+          sockets.clear();
           resolve({ forced: true });
           return;
         }
-        setTimeout(poll, 20);
+        setTimeout(poll, 20).unref();
       };
       poll();
     });
