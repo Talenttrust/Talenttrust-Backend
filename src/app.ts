@@ -184,6 +184,15 @@ const id = (req: Request) => {
 
 const optionalString = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : undefined);
 
+const parseBool = (v: unknown, fallback = false): boolean => {
+  if (typeof v === 'boolean') return v;
+  if (typeof v !== 'string') return fallback;
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+  return fallback;
+};
+
 /**
  * Parse the `?fields=` query param.  Returns `null` when the param is absent
  * (meaning "return all fields").  Throws {@link HttpError} 400 on invalid input.
@@ -490,6 +499,10 @@ export function createApp(
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
+  const demoData =
+    (storeOrOpts && typeof storeOrOpts === 'object' && 'seedDemoData' in storeOrOpts && storeOrOpts.seedDemoData !== undefined
+      ? storeOrOpts.seedDemoData
+      : shouldSeedDemoData()) === true;
   const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();
   const eventStore =
     fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore ? fallbackChainReaderOrReceiptManager : new InMemoryEventStore();
@@ -717,7 +730,7 @@ export function createApp(
       docs: '/docs',
       openapi: '/openapi.json',
       website: config.frontendUrl,
-      demoData: store.hasDemoData,
+      demoData,
       chain: { network: config.network, contractId: config.contractId, explorer: explorerUrl() },
       endpoints: [
         'GET  /health',
@@ -796,7 +809,7 @@ export function createApp(
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
-      demoData: store.hasDemoData,
+      demoData,
       ...(() => {
         // Non-blocking: the last known pause state; a stale cache refreshes in the background.
         const pause = pauseGuard.peek();

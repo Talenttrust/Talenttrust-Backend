@@ -22,6 +22,8 @@ import { openapi } from '../../src/openapi';
 
 // ── Spec model ────────────────────────────────────────────────────────────────────────────────────
 
+export { originalRequest };
+
 type SchemaObject = Record<string, unknown>;
 
 interface ResponseObject {
@@ -334,50 +336,18 @@ export class ConformanceTest {
   }
 
   private run(): Promise<ConformanceResult> {
-    return Promise.resolve()
-      .then(() => (this.test as PromiseLike<ConformanceResponse>).then())
-      .then((response) => {
+    return Promise.resolve(this.test as PromiseLike<ConformanceResponse>).then(
+      (response: ConformanceResponse) => {
         assertConformance(response, this.method, this.path);
         return response as unknown as ConformanceResult;
-      });
+      },
+    );
   }
 
   then(
     onfulfilled?: ((value: ConformanceResult) => unknown) | null,
     onrejected?: ((reason: unknown) => unknown) | null,
   ): Promise<ConformanceResult> {
-    return this.run().then(onfulfilled ?? undefined, onrejected ?? undefined) as Promise<
-      ConformanceResult
-    >;
+    return this.run().then(onfulfilled ?? undefined, onrejected ?? undefined);
   }
-
-  catch(onrejected?: ((reason: unknown) => unknown) | null): Promise<unknown> {
-    return this.run().catch(onrejected ?? undefined);
-  }
-}
-
-export interface ConformanceClient {
-  get(path: string): ConformanceTest;
-  post(path: string): ConformanceTest;
-  put(path: string): ConformanceTest;
-  patch(path: string): ConformanceTest;
-  delete(path: string): ConformanceTest;
-  head(path: string): ConformanceTest;
-}
-
-/** Drop-in replacement for supertest's `request(app)` with conformance checking. */
-export function request(app: Application): ConformanceClient {
-  const agent = originalRequest(app) as unknown as Record<string, (path: string) => unknown>;
-  const verb =
-    (name: string) =>
-    (path: string): ConformanceTest =>
-      new ConformanceTest(agent[name](path), name, path);
-  return {
-    get: verb('get'),
-    post: verb('post'),
-    put: verb('put'),
-    patch: verb('patch'),
-    delete: verb('delete'),
-    head: verb('head'),
-  };
 }

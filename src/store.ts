@@ -377,6 +377,7 @@ interface InternalContract {
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
+  demo?: boolean;
   revision: number;
   revisions: ContractRevision[];
   version: number;
@@ -482,6 +483,7 @@ function toPublic(c: InternalContract): EscrowContract {
     status: c.status,
     reputationIssued: c.reputationIssued,
     dispute: c.dispute,
+    demo: c.demo === true,
     chain: c.chain,
     revision: c.revision,
     version: c.version,
