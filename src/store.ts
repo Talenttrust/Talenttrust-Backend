@@ -152,12 +152,10 @@ export interface EscrowContract {
   /** @deprecated lossy above 2^53; use fundedAmountUnits */
   fundedAmount: number | string;
   depositedAmount: number;
-  releasedAmount: number | string;
   refundedAmount: number;
+  releasedAmount: number | string;
   /** Canonical decimal-string funded amount (base units). */
   fundedAmountUnits: string;
-  /** @deprecated lossy above 2^53; use releasedAmountUnits */
-  releasedAmount: number | string;
   /** Canonical decimal-string released amount (base units). */
   releasedAmountUnits: string;
   status: ContractStatus;
