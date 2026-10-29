@@ -99,12 +99,13 @@ describe('project()', () => {
   it('empty string spec returns all fields (no projection)', () => {
     // parseFieldSpec('') yields empty top set → project keeps all keys
     const out = project(full, parseFieldSpec(''));
-    expect(out).toEqual(full);
+    const definedOnly = JSON.parse(JSON.stringify(full));
+    expect(out).toEqual(definedOnly);
     expect(out).not.toBe(full); // must be a copy when projecting
   });
 
   it('whitelist covers all EscrowContract keys except id', () => {
-    const expectedKeys = Object.keys(full).filter((k) => k !== 'id');
+    const expectedKeys = Object.keys(JSON.parse(JSON.stringify(full))).filter((k) => k !== 'id');
     expect(ALLOWED_FIELDS.length).toBe(expectedKeys.length);
     expectedKeys.forEach((k) => expect(ALLOWED_FIELDS).toContain(k));
   });

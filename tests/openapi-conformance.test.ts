@@ -1,11 +1,11 @@
 import SwaggerParser from '@apidevtools/swagger-parser';
+import request from 'supertest';
 import { openapi } from '../src/openapi';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import {
   assertConformance,
   conformanceProblems,
-  request,
   type ConformanceResponse,
 } from './helpers/openapi';
 
