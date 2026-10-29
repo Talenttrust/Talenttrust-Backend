@@ -2,7 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import { config, explorerUrl } from './config';
+import { config, explorerUrl, shouldSeedDemoData } from './config';
 import {
   DEFAULT_DISPUTE_LIMIT,
   EscrowStore,
@@ -183,6 +183,15 @@ const id = (req: Request) => {
 };
 
 const optionalString = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : undefined);
+
+const parseBool = (v: unknown, fallback = false): boolean => {
+  if (typeof v === 'boolean') return v;
+  if (typeof v !== 'string') return fallback;
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+  return fallback;
+};
 
 /**
  * Parse the `?fields=` query param.  Returns `null` when the param is absent
@@ -422,6 +431,8 @@ export type AppDeps = {
   apiKeys?: ParsedApiKeys;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
+  /** Seed the in-memory store with demo data (defaults to the SEED_DEMO_DATA flag). */
+  seedDemoData?: boolean;
 };
 
 /**
@@ -440,7 +451,9 @@ function resolveAuth(deps: AppDeps) {
 }
 
 function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts: EscrowStore | AppDeps = shouldSeedDemoData()
+    ? new EscrowStore().seed()
+    : new EscrowStore(),
 ): { store: EscrowStore; logger: Logger; chainReader: ChainReader; txRpcServer?: RpcClient } {
   if (
     storeOrOpts &&
@@ -451,8 +464,15 @@ function resolveStoreAndLogger(
     return { store: storeOrOpts as EscrowStore, logger: createLogger(), chainReader: new SorobanRpcChainReader() };
   }
   const opts = (storeOrOpts as AppDeps | undefined) ?? {};
+  let store: EscrowStore;
+  if (opts.store) {
+    store = opts.store;
+  } else {
+    const seed = opts.seedDemoData ?? shouldSeedDemoData();
+    store = seed ? new EscrowStore().seed() : new EscrowStore();
+  }
   return {
-    store: opts.store ?? new EscrowStore().seed(),
+    store,
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
     txRpcServer: opts.txRpcServer,
@@ -467,7 +487,9 @@ export interface AppOptions {
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts: EscrowStore | AppDeps = shouldSeedDemoData()
+    ? new EscrowStore().seed()
+    : new EscrowStore(),
   /** A chain reader, receipt manager, tx relay or chain read client to inject, or the CORS origin allowlist. */
   fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | InMemoryEventStore | string[],
   /** App options, or the event indexer to use (with an InMemoryEventStore as the second argument). */
@@ -477,6 +499,10 @@ export function createApp(
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
+  const demoData =
+    (storeOrOpts && typeof storeOrOpts === 'object' && 'seedDemoData' in storeOrOpts && storeOrOpts.seedDemoData !== undefined
+      ? storeOrOpts.seedDemoData
+      : shouldSeedDemoData()) === true;
   const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();
   const eventStore =
     fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore ? fallbackChainReaderOrReceiptManager : new InMemoryEventStore();
@@ -704,6 +730,7 @@ export function createApp(
       docs: '/docs',
       openapi: '/openapi.json',
       website: config.frontendUrl,
+      demoData,
       chain: { network: config.network, contractId: config.contractId, explorer: explorerUrl() },
       endpoints: [
         'GET  /health',
@@ -782,6 +809,7 @@ export function createApp(
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
+      demoData,
       ...(() => {
         // Non-blocking: the last known pause state; a stale cache refreshes in the background.
         const pause = pauseGuard.peek();
@@ -1053,7 +1081,7 @@ export function createApp(
       return store.allowedActions(contractId, as as string | undefined);
     }),
   );
-  v1.get('/stats', wrap(() => store.stats()));
+  v1.get('/stats', wrap((req) => store.stats({ includeDemo: parseBool(req.query.includeDemo, false) })));
   v1.get(
     '/contracts',
     validate({ query: ListQuery }),

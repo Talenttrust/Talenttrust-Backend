@@ -10,6 +10,7 @@
  * deprecated and lossy above Number.MAX_SAFE_INTEGER.
  */
 
+import { shouldSeedDemoData } from './config';
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
@@ -144,6 +145,7 @@ export interface EscrowContract {
   status: ContractStatus;
   reputationIssued: boolean;
   dispute?: Dispute;
+  demo: boolean;
   chain?: ChainInfo;
   /** Term revision number; starts at 1 and increments on every edit. */
   revision: number;
@@ -201,6 +203,7 @@ export interface Reputation {
   completedContracts: number;
   totalRating: number;
   averageRating: number;
+  demo: boolean;
   /** Bayesian score: round2((C * m + total) / (C + completed)), m = global mean rating (3 when none). */
   score: number;
   /** 1-based rank by score among rated freelancers; null when unrated. */
@@ -374,6 +377,7 @@ interface InternalContract {
   reputationIssued: boolean;
   dispute?: Dispute;
   chain?: ChainInfo;
+  demo?: boolean;
   revision: number;
   revisions: ContractRevision[];
   version: number;
@@ -479,6 +483,7 @@ function toPublic(c: InternalContract): EscrowContract {
     status: c.status,
     reputationIssued: c.reputationIssued,
     dispute: c.dispute,
+    demo: c.demo === true,
     chain: c.chain,
     revision: c.revision,
     version: c.version,
@@ -504,6 +509,7 @@ export class EscrowStore {
   readonly events: StoreEventEmitter;
   private reviews: Review[] = [];
   private nextReviewId = 1;
+  private demoReputation = new Set<string>();
   private nextId = 1;
   private templates = new Map<number, InternalTemplate>();
   private nextTemplateId = 1;
@@ -683,11 +689,13 @@ export class EscrowStore {
     return c;
   }
 
-  list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
+  list(filter: { status?: string; party?: string; includeDemo?: boolean; linked?: boolean } = {}): EscrowContract[] {
+    const includeDemo = filter.includeDemo !== false;
     return [...this.contracts.values()]
       .map((c) => this.expireIfDue(c))
       .filter(
         (c) =>
+          (includeDemo || !c.demo) &&
           (!filter.status || c.status === filter.status) &&
           (!filter.party || c.client === filter.party || c.freelancer === filter.party) &&
           (filter.linked === undefined || (filter.linked ? !!c.chain : !c.chain)),
@@ -740,6 +748,7 @@ export class EscrowStore {
     fundingDeadline?: unknown;
     templateId?: unknown;
     budget?: unknown;
+    demo?: boolean;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
@@ -783,6 +792,7 @@ export class EscrowStore {
       releasedAmount: 0n,
       status: 'Created',
       reputationIssued: false,
+      demo: input.demo === true,
       revision: 1,
       version: 1,
       revisions: [],
@@ -1030,6 +1040,7 @@ export class EscrowStore {
     this.reviews.push(review);
     if (role === 'client_to_freelancer') {
       this.applyReputation(this.reputation, c.freelancer, rating);
+      if (c.demo) this.demoReputation.add(c.freelancer);
       c.reputationIssued = true;
     } else {
       this.applyReputation(this.clientReputation, c.client, rating);
@@ -1252,6 +1263,7 @@ export class EscrowStore {
         completedContracts: r.completed,
         totalRating: r.total,
         averageRating: round2(r.total / r.completed),
+        demo: this.demoReputation.has(address),
         score: round2((C * m + r.total) / (C + r.completed)),
         rank: null,
         histogram: [...r.histogram] as RatingHistogram,
@@ -1298,6 +1310,7 @@ export class EscrowStore {
       completedContracts: 0,
       totalRating: 0,
       averageRating: 0,
+      demo: this.demoReputation.has(address),
       score: cache.priorWeight > 0 ? round2(cache.globalMean) : 0,
       rank: null,
       histogram: [0, 0, 0, 0, 0],
@@ -1633,8 +1646,11 @@ export class EscrowStore {
       });
   }
 
-  stats() {
-    const all = [...this.contracts.values()].map((c) => this.expireIfDue(c));
+  stats(filter: { includeDemo?: boolean } = {}) {
+    const includeDemo = filter.includeDemo !== false;
+    const all = [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
+      .filter((c) => includeDemo || !c.demo);
     const byStatus: Record<string, number> = {};
     for (const c of all) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
 
@@ -1655,6 +1671,7 @@ export class EscrowStore {
       /** @deprecated lossy above 2^53; use totalReleasedUnits */
       totalReleased: Number(totalReleasedBig),
       totalReleasedUnits: totalReleasedBig.toString(),
+      demoData: all.some((c) => c.demo),
     };
   }
 
@@ -1676,10 +1693,12 @@ export class EscrowStore {
 
   /** Seed a few demo engagements so the API is explorable out of the box. */
   seed(): this {
+    if (this.contracts.size > 0) return this;
     const a = this.create({
       title: 'Landing page redesign',
-      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      client: 'GCLIENTDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       freelancer: 'GFREELANCERDEMOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      demo: true,
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [
         { title: 'Wireframes', amount: 2500000 },
@@ -1693,6 +1712,7 @@ export class EscrowStore {
       title: 'Smart contract audit',
       client: 'GCLIENTDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
       freelancer: 'GFREELANCERDEMOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+      demo: true,
       token: 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       milestones: [{ title: 'Audit report', amount: 20000000 }],
     });
@@ -1700,6 +1720,11 @@ export class EscrowStore {
     this.release(b.id, 0);
     this.rate(b.id, 5);
     return this;
+  }
+
+  /** Seed demo data only when configuration allows it. */
+  seedIfEnabled(): this {
+    return shouldSeedDemoData() ? this.seed() : this;
   }
 }
 

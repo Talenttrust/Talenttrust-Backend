@@ -13,8 +13,13 @@ The API mirrors the state machine of the Soroban escrow contract
 ([Talenttrust-Contracts](https://github.com/Talenttrust/Talenttrust-Contracts)) so clients and
 freelancers can create engagements, fund escrow, release milestones, raise disputes and build reputation.
 
-Storage is in-memory (seeded with demo data), so no database is required. On serverless hosting the
+Storage is in-memory, so no database is required. On serverless hosting the
 data is per-instance and resets on redeploy.
+
+Demo data is seeded only when explicitly enabled (the default is on for non-production
+and Vercel preview deployments, and off in production). Seeded contracts are marked
+with `demo: true` and are excluded from aggregate statistics by default. See
+`SEED_DEMO_DATA` in the configuration section below.
 
 ## Endpoints
 
@@ -24,8 +29,8 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/` | Service info and endpoint list (JSON) |
-| GET | `/health` | Health check (includes `paused`, `pauseSource` and, once a probe ran, the last readiness `checks`) |
+| GET | `/` | Service info and endpoint list (JSON), including `demoData` flag |
+| GET | `/health` | Health check (includes `paused`, `pauseSource`, `demoData` flag and, once a probe ran, the last readiness `checks`) |
 | GET | `/health/live` | Liveness probe (always 200 while the process is up) |
 | GET | `/health/ready` | Readiness probe: Soroban RPC, network passphrase, contract, storage |
 | GET | `/docs` | Swagger UI |
@@ -40,12 +45,12 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/parties/:address/statement.json` | Same rows as JSON |
 | GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
 | GET | `/api/v1/contracts/:id/actions?as=<address>` | Allowed actions now, with error codes/reasons, releasable indexes and remaining deposit capacity |
-| GET | `/api/v1/stats` | Aggregate statistics |
+| GET | `/api/v1/stats` | Aggregate statistics (`includeDemo`=true\|false, default false) |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
-| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
+| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?includeDemo=true\|false`, default true, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
@@ -61,7 +66,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation` | Ranked freelancer leaderboard (`?sort=score\|completed\|average&minCompleted=&limit=&cursor=`) |
-| GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
+| GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`; `demo` flag when entirely seeded) |
 | GET | `/api/v1/reputation/:address/reviews` | Reviews received (`?role=`, `?limit=`, `?cursor=`) |
 | GET | `/.well-known/talenttrust-receipts.json` | Published ed25519 public keys for offline verification |
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
@@ -83,6 +88,9 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
+
+Demo contracts are returned with `demo: true`; real contracts carry `demo: false`.
+Mutations on demo contracts are allowed and keep the `demo: true` marker.
 
 ## Webhooks
 
@@ -275,7 +283,7 @@ npm run build && npm start
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `SEED_DEMO_DATA`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off) and
 `INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
 result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
@@ -325,8 +333,7 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 
 ## Deployment
 
-Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
-`vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
+Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and `vercel.json` rewrites every path to it. `src/index.ts` only calls `listen()` when run directly.
 
 ```bash
 vercel deploy --prod

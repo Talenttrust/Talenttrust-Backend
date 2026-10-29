@@ -45,7 +45,12 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "roots": ["<rootDir>/tests"],
-    "setupFiles": ["<rootDir>/tests/jest.setup.js", "<rootDir>/tests/setup/network-guard.ts"]
+    "roots": [
+      "<rootDir>/tests"
+    ],
+    "setupFiles": [
+      "<rootDir>/tests/jest.setup.js",
+      "<rootDir>/tests/setup/network-guard.ts"
+    ]
   }
 }

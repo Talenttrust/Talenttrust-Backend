@@ -73,5 +73,16 @@ export const config = {
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
 };
 
-export const explorerUrl = (id: string = config.contractId) =>
-  `https://stellar.expert/explorer/${config.network}/contract/${id}`;
+export const explorerUrl = () =>
+  `https://stellar.expert/explorer/${config.network}/contract/${config.contractId}`;
+
+export const shouldSeedDemoData = (): boolean => {
+  const raw = process.env.SEED_DEMO_DATA;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw !== undefined && raw !== '') {
+    throw new Error(`SEED_DEMO_DATA must be 'true' or 'false', got '${raw}'`);
+  }
+  if (process.env.VERCEL_ENV === 'preview') return true;
+  return process.env.NODE_ENV !== 'production';
+};
