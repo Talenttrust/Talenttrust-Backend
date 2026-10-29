@@ -5,6 +5,14 @@ import { ALLOWED_FIELDS } from './utils/project';
 
 const json = (schema: object) => ({ 'application/json': { schema } });
 const errContent = () => json({ $ref: '#/components/schemas/Error' });
+const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
+const contractRef = { $ref: '#/components/schemas/EscrowContract' };
+const reviewRef = { $ref: '#/components/schemas/Review' };
+const reviewerRef = { $ref: '#/components/schemas/Reputation' };
+const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
+const indexParam = { name: 'index', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } };
+const addressParam = { name: 'address', in: 'path', required: true, schema: { type: 'string' } };
+const reviewRef2 = reviewRef;
 const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
   200: { description, ...(headers ? { headers } : {}), content: json(schema) },
 });
@@ -15,8 +23,6 @@ const errorResponse = (description: string, schema: object = { $ref: '#/componen
 const created = (description: string, schema: object = { type: 'object' }) => ({
   201: { description, content: json(schema) },
 });
-const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
-const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 const evidenceRef = { $ref: '#/components/schemas/DisputeEvidence' };
 const receiptQueryParam = {
   name: 'receipt',
@@ -61,32 +67,6 @@ const errorResponses = {
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
   },
 };
-
-const idParam = {
-  name: 'id',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
-  description: 'Contract ID (positive integer)',
-};
-const indexParam = {
-  name: 'index',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^(?:[0-9]|1[0-9])$' },
-  description: 'Milestone index (0-19)',
-};
-const addressParam = {
-  name: 'address',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', minLength: 1 },
-  description: 'Stellar address',
-};
-const contractRef = { $ref: '#/components/schemas/EscrowContract' };
-const reviewRef = { $ref: '#/components/schemas/Review' };
-const errorRef = { $ref: '#/components/schemas/ErrorResponse' };
-const reputationRef = { $ref: '#/components/schemas/Reputation' };
 
 /**
  * `?fields=` query parameter shared by GET /contracts and GET /contracts/:id.
@@ -2208,10 +2188,6 @@ const spec = {
             description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
             oneOf: [{ type: 'number' }, { type: 'string' }],
           },
-          totalAmount: {
-            description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
-            oneOf: [{ type: 'number' }, { type: 'string' }],
-          },
           totalAmountUnits: {
             type: 'string',
             description: 'Canonical decimal string total in token base units.',
@@ -2249,7 +2225,6 @@ const spec = {
           expiredAt: { type: 'string', format: 'date-time' },
           refundableAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use refundableAmountUnits.' },
           refundableAmountUnits: { type: 'string', description: 'Partial funding returned to the client on expiry (base units).' },
-          dispute: { $ref: '#/components/schemas/Dispute' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
           templateId: { type: 'integer', description: 'Template the milestones were generated from' },
