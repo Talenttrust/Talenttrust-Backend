@@ -182,6 +182,17 @@ export const ReputationAddressParam = z.object({
   address: z.string().min(1),
 });
 
+export const ReputationListQuery = z
+  .object({
+    sort: z.string().optional(),
+    minCompleted: z.string().optional(),
+    limit: z.string().optional(),
+    cursor: z.string().optional(),
+    since: z.string().optional(),
+    windowDays: z.string().optional(),
+  })
+  .strict();
+
 export type IdParamType = z.infer<typeof IdParam>;
 export type MilestoneIndexParamType = z.infer<typeof MilestoneIndexParam>;
 export type MilestoneReleaseParamsType = z.infer<typeof MilestoneReleaseParams>;
@@ -193,3 +204,4 @@ export type RateBodyType = z.infer<typeof RateBody>;
 export type CancelBodyType = z.infer<typeof CancelBody>;
 export type ListQueryType = z.infer<typeof ListQuery>;
 export type ReputationAddressParamType = z.infer<typeof ReputationAddressParam>;
+export type ReputationListQueryType = z.infer<typeof ReputationListQuery>;
