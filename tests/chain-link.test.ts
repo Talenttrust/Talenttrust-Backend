@@ -1,7 +1,16 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { ChainReader, ChainReaderResult, ChainUnavailableError, OnChainEscrow } from '../src/chain';
+import {
+  ChainReader,
+  ChainReaderResult,
+  ChainUnavailableError,
+  DEMO_ESCROW_3,
+  isDemoChainFixtureEnabled,
+  OnChainEscrow,
+  SorobanRpcChainReader,
+} from '../src/chain';
+import { RpcTransport } from '../src/stellar/rpc';
 
 const DEFAULT_TOKEN = 'CDEMOTOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
@@ -539,5 +548,120 @@ describe('Soroban Escrow Linking & Parity Verification', () => {
       expect(unlinked.body.data.length).toBe(1);
       expect(unlinked.body.data[0].id).toBe(c2.id);
     });
+  });
+});
+
+describe('SorobanRpcChainReader demo fixture gating', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalFlag = process.env.ENABLE_DEMO_CHAIN_FIXTURE;
+
+  afterEach(() => {
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+    if (originalFlag === undefined) {
+      delete process.env.ENABLE_DEMO_CHAIN_FIXTURE;
+    } else {
+      process.env.ENABLE_DEMO_CHAIN_FIXTURE = originalFlag;
+    }
+    jest.restoreAllMocks();
+  });
+
+  it('defaults fixture to false in production and true in development/test, with explicit flag override', () => {
+    expect(isDemoChainFixtureEnabled({ NODE_ENV: 'production' })).toBe(false);
+    expect(isDemoChainFixtureEnabled({ NODE_ENV: 'production', ENABLE_DEMO_CHAIN_FIXTURE: 'true' })).toBe(true);
+    expect(isDemoChainFixtureEnabled({ NODE_ENV: 'development' })).toBe(true);
+    expect(isDemoChainFixtureEnabled({ NODE_ENV: 'test' })).toBe(true);
+    expect(isDemoChainFixtureEnabled({ NODE_ENV: 'test', ENABLE_DEMO_CHAIN_FIXTURE: 'false' })).toBe(false);
+    expect(isDemoChainFixtureEnabled({})).toBe(false);
+  });
+
+  it('returns DEMO_ESCROW_3 in test mode without performing any outbound fetch', async () => {
+    process.env.NODE_ENV = 'test';
+    delete process.env.ENABLE_DEMO_CHAIN_FIXTURE;
+
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    const reader = new SorobanRpcChainReader();
+
+    const result = await reader.getContract('3');
+    expect(result).not.toBeNull();
+    expect(result?.contract).toEqual(DEMO_ESCROW_3);
+    expect(result?.latestLedger).toBe(1000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses the shared RPC transport getLatestLedger for the demo fixture when provided', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.ENABLE_DEMO_CHAIN_FIXTURE = 'true';
+
+    const transport: RpcTransport = {
+      getLatestLedger: jest.fn().mockResolvedValue({ sequence: 987654 }),
+      simulateTransaction: jest.fn(),
+    };
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    const reader = new SorobanRpcChainReader(
+      'https://soroban-testnet.stellar.org',
+      'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
+      undefined,
+      transport,
+    );
+
+    const result = await reader.getContract('3');
+    expect(result?.contract).toEqual(DEMO_ESCROW_3);
+    expect(result?.latestLedger).toBe(987654);
+    expect(transport.getLatestLedger).toHaveBeenCalledTimes(1);
+    expect(transport.simulateTransaction).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('reads escrow id 3 from the chain in production mode when flag is unset', async () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.ENABLE_DEMO_CHAIN_FIXTURE;
+
+    const transport: RpcTransport = {
+      getLatestLedger: jest.fn(),
+      simulateTransaction: jest.fn().mockResolvedValue({
+        id: '1',
+        latestLedger: 555555,
+        error: 'Error(Contract, #5)',
+      }),
+    };
+    const reader = new SorobanRpcChainReader(
+      'https://soroban-testnet.stellar.org',
+      'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
+      undefined,
+      transport,
+    );
+
+    const result = await reader.getContract('3');
+    expect(result).toBeNull();
+    expect(transport.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(transport.getLatestLedger).not.toHaveBeenCalled();
+  });
+
+  it('reads escrow id 3 from the chain when ENABLE_DEMO_CHAIN_FIXTURE=false in test mode', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.ENABLE_DEMO_CHAIN_FIXTURE = 'false';
+
+    const transport: RpcTransport = {
+      getLatestLedger: jest.fn(),
+      simulateTransaction: jest.fn().mockResolvedValue({
+        id: '1',
+        latestLedger: 555555,
+        error: 'Error(Contract, #5)',
+      }),
+    };
+    const reader = new SorobanRpcChainReader(
+      'https://soroban-testnet.stellar.org',
+      'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
+      undefined,
+      transport,
+    );
+
+    const result = await reader.getContract('3');
+    expect(result).toBeNull();
+    expect(transport.simulateTransaction).toHaveBeenCalledTimes(1);
   });
 });
