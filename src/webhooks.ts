@@ -10,9 +10,15 @@ export interface WebhookSubscriptionPublic {
   id: string;
   url: string;
   events: string[];
+  filter?: WebhookSubscriptionFilter;
   active: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WebhookSubscriptionFilter {
+  parties?: string[];
+  contractIds?: number[];
 }
 
 interface WebhookSubscription extends WebhookSubscriptionPublic {
@@ -132,7 +138,16 @@ const publicSubscription = (subscription: WebhookSubscription): WebhookSubscript
   return safe;
 };
 
-const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => subscription.active && (subscription.events.includes('*') || subscription.events.includes(event.eventType));
+const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => {
+  if (!subscription.active || (!subscription.events.includes('*') && !subscription.events.includes(event.eventType))) return false;
+  if (!subscription.filter) return true;
+  const contract = event.data.contract;
+  if (!contract || typeof contract !== 'object') return false;
+  const record = contract as Record<string, unknown>;
+  if (subscription.filter.contractIds && !subscription.filter.contractIds.includes(record.id as number)) return false;
+  if (subscription.filter.parties && !subscription.filter.parties.some((party) => party === record.client || party === record.freelancer)) return false;
+  return true;
+};
 
 export class WebhookManager {
   private readonly subscriptions = new Map<string, WebhookSubscription>();
@@ -154,11 +169,12 @@ export class WebhookManager {
     events.on((event) => { void this.dispatch(event); });
   }
 
-  async create(input: { url?: unknown; events?: unknown; eventType?: unknown }): Promise<{ subscription: WebhookSubscriptionPublic; secret: string }> {
+  async create(input: { url?: unknown; events?: unknown; eventType?: unknown; filter?: unknown }): Promise<{ subscription: WebhookSubscriptionPublic; secret: string }> {
+    const filter = this.parseFilter(input.filter);
     const url = await validateWebhookUrl(String(input.url ?? ''));
     const events = this.parseEvents(input.events ?? input.eventType);
     const now = new Date(this.now()).toISOString();
-    const subscription: WebhookSubscription = { id: randomUUID(), url: url.toString(), events, active: true, secret: `whsec_${randomBytes(32).toString('base64')}`, createdAt: now, updatedAt: now };
+    const subscription: WebhookSubscription = { id: randomUUID(), url: url.toString(), events, ...(filter ? { filter } : {}), active: true, secret: `whsec_${randomBytes(32).toString('base64')}`, createdAt: now, updatedAt: now };
     this.subscriptions.set(subscription.id, subscription);
     return { subscription: publicSubscription(subscription), secret: subscription.secret };
   }
@@ -166,10 +182,15 @@ export class WebhookManager {
   list(): WebhookSubscriptionPublic[] { return [...this.subscriptions.values()].map(publicSubscription); }
   get(id: string): WebhookSubscriptionPublic { return publicSubscription(this.require(id)); }
 
-  async update(id: string, input: { url?: unknown; events?: unknown; eventType?: unknown; active?: unknown }): Promise<WebhookSubscriptionPublic> {
+  async update(id: string, input: { url?: unknown; events?: unknown; eventType?: unknown; active?: unknown; filter?: unknown }): Promise<WebhookSubscriptionPublic> {
     const subscription = this.require(id);
+    const filter = input.filter === undefined ? undefined : this.parseFilter(input.filter);
     if (input.url !== undefined) subscription.url = (await validateWebhookUrl(String(input.url))).toString();
     if (input.events !== undefined || input.eventType !== undefined) subscription.events = this.parseEvents(input.events ?? input.eventType);
+    if (input.filter !== undefined) {
+      if (filter) subscription.filter = filter;
+      else delete subscription.filter;
+    }
     if (input.active !== undefined) {
       if (typeof input.active !== 'boolean') throw new HttpError(400, 'invalid_active', 'active must be boolean');
       subscription.active = input.active;
@@ -204,6 +225,25 @@ export class WebhookManager {
       throw new HttpError(400, 'invalid_events', 'events must contain supported event types or *');
     }
     return [...new Set(values as string[])];
+  }
+
+  private parseFilter(raw: unknown): WebhookSubscriptionFilter | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const invalid = () => { throw new HttpError(400, 'invalid_filter', 'filter must contain parties and/or contractIds arrays with at most 50 entries each'); };
+    if (typeof raw !== 'object' || Array.isArray(raw)) return invalid();
+    const value = raw as Record<string, unknown>;
+    if (Object.keys(value).some((key) => key !== 'parties' && key !== 'contractIds')) return invalid();
+    const filter: WebhookSubscriptionFilter = {};
+    if (value.parties !== undefined) {
+      if (!Array.isArray(value.parties) || value.parties.length < 1 || value.parties.length > 50 || value.parties.some((party) => typeof party !== 'string' || !party.trim())) return invalid();
+      filter.parties = [...new Set(value.parties as string[])];
+    }
+    if (value.contractIds !== undefined) {
+      if (!Array.isArray(value.contractIds) || value.contractIds.length < 1 || value.contractIds.length > 50 || value.contractIds.some((id) => !Number.isSafeInteger(id) || (id as number) <= 0)) return invalid();
+      filter.contractIds = [...new Set(value.contractIds as number[])];
+    }
+    if (!filter.parties && !filter.contractIds) return invalid();
+    return filter;
   }
 
   private async dispatch(event: EscrowEvent): Promise<void> {

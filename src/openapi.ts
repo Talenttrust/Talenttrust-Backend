@@ -305,14 +305,19 @@ const spec = {
       post: {
         tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
         security: [{ webhookAdmin: [] }],
-        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
-        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL, event selection, or filter (invalid_filter)' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
       },
       get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
     },
     '/api/v1/webhook-subscriptions/{id}': {
       get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
-      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      patch: {
+        tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: { content: json({ type: 'object', properties: { filter: { allOf: [{ $ref: '#/components/schemas/WebhookSubscriptionFilter' }], nullable: true, description: 'Set the filter, or null to clear it' } } }) },
+        responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update, including invalid_filter' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
       delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
@@ -1611,7 +1616,8 @@ const spec = {
           allowed: { type: 'array', items: { type: 'string' } },
         },
       },
-      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } } } },
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
