@@ -1,4 +1,5 @@
 import { config } from './config';
+import { ContractReader, RpcTransport } from './stellar/rpc';
 
 /**
  * On-chain escrow contract structure matching Soroban escrow contract:
@@ -77,32 +78,42 @@ export const DEMO_ESCROW_3: OnChainEscrow = {
   reputationIssued: false,
 };
 
+export function isDemoChainFixtureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.ENABLE_DEMO_CHAIN_FIXTURE === 'true') return true;
+  if (env.ENABLE_DEMO_CHAIN_FIXTURE === 'false') return false;
+  return env.NODE_ENV === 'development' || env.NODE_ENV === 'test';
+}
+
 export class SorobanRpcChainReader implements ChainReader {
   constructor(
     private rpcUrl: string = config.rpcUrl,
     private contractId: string = config.contractId,
     private networkPassphrase?: string,
+    private transport?: RpcTransport,
   ) {}
 
   async getContract(escrowId: string): Promise<ChainReaderResult | null> {
-    // Demo seed mapping for local testing and verification
-    if (escrowId === '3') {
+    // Demo seed mapping for local exploration & testing when explicitly enabled
+    if (escrowId === '3' && isDemoChainFixtureEnabled()) {
       let latestLedger = 1000;
-      try {
-        const res = await fetch(this.rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
-        });
-        const data = (await res.json()) as { result?: { latestLedger?: number } };
-        if (data?.result?.latestLedger) {
-          latestLedger = data.result.latestLedger;
+      if (this.transport || process.env.NODE_ENV !== 'test') {
+        try {
+          const reader = new ContractReader({
+            rpcUrl: this.rpcUrl,
+            contractId: this.contractId,
+            network: config.network,
+            transport: this.transport,
+          });
+          latestLedger = await reader.getLatestLedger();
+        } catch {
+          // Fall back to 1000 if RPC is unreachable
         }
-      } catch {
-        // Fall back to 1000 if RPC is unreachable
       }
       return {
-        contract: { ...DEMO_ESCROW_3 },
+        contract: {
+          ...DEMO_ESCROW_3,
+          milestones: DEMO_ESCROW_3.milestones.map((m) => ({ ...m })),
+        },
         latestLedger,
       };
     }
@@ -124,7 +135,7 @@ export class SorobanRpcChainReader implements ChainReader {
           ? StellarSdk.Networks.PUBLIC
           : StellarSdk.Networks.TESTNET);
 
-      const rpcServer = new StellarSdk.rpc.Server(this.rpcUrl);
+      const rpcServer = this.transport ?? new StellarSdk.rpc.Server(this.rpcUrl);
       const contract = new StellarSdk.Contract(this.contractId);
       const dummyAccount = new StellarSdk.Account(
         'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7',
