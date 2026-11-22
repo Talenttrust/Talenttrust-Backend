@@ -323,6 +323,20 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 | Malformed JSON | 400 | `invalid_json` |
 | Request aborted before the body was received | 400 | `request_aborted` |
 
+## Snapshot persistence (self-hosted)
+
+For self-hosted deployments running `src/index.ts`, set `STORE_SNAPSHOT_PATH` to persist `EscrowStore` state (contracts, revisions, templates, reputation, reviews, ID counters, and the hash-chained audit log) to a JSON file without introducing a database dependency.
+
+- `STORE_SNAPSHOT_PATH`: path to the snapshot file (unset = disabled, pure in-memory mode).
+- `STORE_SNAPSHOT_INTERVAL_MS`: periodic flush interval in milliseconds (default `30000`).
+
+Snapshots are written atomically (temp file in the same directory + rename) on each interval and on graceful shutdown (`SIGTERM`/`SIGINT`). On startup, an existing snapshot is loaded and validated (including `schemaVersion` and the audit hash chain); a corrupt or newer-version file aborts startup immediately with a clear error.
+
+**Limitations:**
+- **Not enabled on Vercel** (`api/index.ts` remains pure in-memory; serverless filesystems are ephemeral).
+- **Single-process only**: concurrent writers sharing one snapshot file are not supported.
+- **Crash window**: an ungraceful crash (`SIGKILL`, power loss) can lose mutations made since the last interval flush.
+
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
