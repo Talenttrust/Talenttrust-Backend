@@ -5,6 +5,7 @@
 import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import { EventIndexer } from '../src/indexer/indexer';
 import { InMemoryEventStore } from '../src/indexer/store';
+import { IndexedEvent, escrowIdOf } from '../src/indexer/types';
 
 class FakeServer {
   private events: Array<{
@@ -194,5 +195,144 @@ describe('EventIndexer', () => {
 
     const events = store.query({});
     expect(events.data[0].event.type).toBe('Unknown');
+  });
+});
+
+describe('InMemoryEventStore', () => {
+  const makeEvent = (
+    id: string,
+    ledger: number,
+    type: 'Created' | 'Deposit' | 'Paused' | 'Unknown' = 'Created',
+    escrowId = 'escrow-1',
+  ): IndexedEvent => {
+    const base = {
+      id,
+      ledger,
+      ledgerClosedAt: '2024-01-01T00:00:00Z',
+      txHash: `tx-${id}`,
+    };
+    if (type === 'Created') {
+      return {
+        ...base,
+        event: {
+          type: 'Created',
+          data: { escrowId, client: 'C', freelancer: 'F', total: '100' },
+        },
+      };
+    }
+    if (type === 'Deposit') {
+      return {
+        ...base,
+        event: {
+          type: 'Deposit',
+          data: { escrowId, amount: '50' },
+        },
+      };
+    }
+    if (type === 'Paused') {
+      return {
+        ...base,
+        event: {
+          type: 'Paused',
+          data: { paused: true },
+        },
+      };
+    }
+    return {
+      ...base,
+      event: {
+        type: 'Unknown',
+        data: { topics: [], value: '' },
+      },
+    };
+  };
+
+  it('orders out-of-order inserts newest-first with id tie-break', () => {
+    const store = new InMemoryEventStore();
+    store.append([
+      makeEvent('e-2', 10),
+      makeEvent('e-1', 10),
+      makeEvent('e-3', 5),
+      makeEvent('e-4', 20),
+    ]);
+
+    const { data } = store.query({});
+    expect(data.map((e) => e.id)).toEqual(['e-4', 'e-2', 'e-1', 'e-3']);
+  });
+
+  it('filters by escrowId, type, and both using indexes', () => {
+    const store = new InMemoryEventStore();
+    store.append([
+      makeEvent('e-1', 10, 'Created', 'esc-1'),
+      makeEvent('e-2', 11, 'Deposit', 'esc-1'),
+      makeEvent('e-3', 12, 'Created', 'esc-2'),
+      makeEvent('e-4', 13, 'Paused'),
+      makeEvent('e-5', 14, 'Unknown'),
+    ]);
+
+    expect(store.query({ escrowId: 'esc-1' }).data.map((e) => e.id)).toEqual(['e-2', 'e-1']);
+    expect(store.query({ type: 'Created' }).data.map((e) => e.id)).toEqual(['e-3', 'e-1']);
+    expect(store.query({ escrowId: 'esc-1', type: 'Deposit' }).data.map((e) => e.id)).toEqual([
+      'e-2',
+    ]);
+    expect(store.query({ escrowId: 'nonexistent' }).data).toEqual([]);
+  });
+
+  it('paginates with cursor across unfiltered and filtered queries', () => {
+    const store = new InMemoryEventStore();
+    store.append([
+      makeEvent('e-1', 1, 'Created', 'esc-1'),
+      makeEvent('e-2', 2, 'Deposit', 'esc-1'),
+      makeEvent('e-3', 3, 'Created', 'esc-2'),
+      makeEvent('e-4', 4, 'Deposit', 'esc-1'),
+      makeEvent('e-5', 5, 'Created', 'esc-1'),
+    ]);
+
+    const p1 = store.query({ limit: 2 });
+    expect(p1.data.map((e) => e.id)).toEqual(['e-5', 'e-4']);
+    expect(p1.nextCursor).toBe('e-4');
+
+    const p2 = store.query({ limit: 2, cursor: p1.nextCursor });
+    expect(p2.data.map((e) => e.id)).toEqual(['e-3', 'e-2']);
+    expect(p2.nextCursor).toBe('e-2');
+
+    const p3 = store.query({ limit: 2, cursor: p2.nextCursor });
+    expect(p3.data.map((e) => e.id)).toEqual(['e-1']);
+    expect(p3.nextCursor).toBe('e-1');
+
+    const p4 = store.query({ limit: 2, cursor: p3.nextCursor });
+    expect(p4.data).toEqual([]);
+    expect(p4.nextCursor).toBeUndefined();
+
+    // Filtered cursor pagination
+    const f1 = store.query({ escrowId: 'esc-1', limit: 2 });
+    expect(f1.data.map((e) => e.id)).toEqual(['e-5', 'e-4']);
+    const f2 = store.query({ escrowId: 'esc-1', limit: 2, cursor: f1.nextCursor });
+    expect(f2.data.map((e) => e.id)).toEqual(['e-2', 'e-1']);
+
+    // Unknown cursor falls back to start
+    const unknown = store.query({ limit: 2, cursor: 'does-not-exist' });
+    expect(unknown.data.map((e) => e.id)).toEqual(['e-5', 'e-4']);
+  });
+
+  it('evicts oldest events beyond MAX_EVENTS from all indexes', () => {
+    const store = new InMemoryEventStore();
+    const batch: IndexedEvent[] = [];
+    for (let i = 0; i < 10_005; i++) {
+      batch.push(makeEvent(`e-${String(i).padStart(5, '0')}`, i, 'Created', i < 5 ? 'old-esc' : 'new-esc'));
+    }
+    store.append(batch);
+
+    expect(store.getEventsStored()).toBe(10_000);
+    expect(store.query({ escrowId: 'old-esc' }).data).toEqual([]);
+    const newest = store.query({ limit: 1 });
+    expect(newest.data[0].id).toBe('e-10004');
+  });
+
+  it('escrowIdOf extracts escrowId only for escrow-scoped events', () => {
+    expect(escrowIdOf(makeEvent('1', 1, 'Created', 'esc-9').event)).toBe('esc-9');
+    expect(escrowIdOf(makeEvent('2', 1, 'Deposit', 'esc-9').event)).toBe('esc-9');
+    expect(escrowIdOf(makeEvent('3', 1, 'Paused').event)).toBeUndefined();
+    expect(escrowIdOf(makeEvent('4', 1, 'Unknown').event)).toBeUndefined();
   });
 });
