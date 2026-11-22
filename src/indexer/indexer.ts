@@ -20,6 +20,8 @@ export class EventIndexer {
   private lastError: string | null = null;
   private lastRunAt: string | null = null;
   private latestLedger: number = 0;
+  /** Highest raw.ledger seen across all processed events. -1 means no run has completed yet. */
+  private lastIndexedLedger: number = -1;
 
   constructor(store: EventStore, rpcUrl?: string) {
     this.store = store;
@@ -69,6 +71,23 @@ export class EventIndexer {
 
       this.store.append(decodedEvents);
 
+      // Track the highest ledger we have actually processed so that
+      // getState() can report an accurate lag instead of using the
+      // cursor presence as a proxy for "fully caught up".
+      for (const raw of rawEvents) {
+        if (raw.ledger > this.lastIndexedLedger) {
+          this.lastIndexedLedger = raw.ledger;
+        }
+      }
+      // When the response contained no events:
+      //   - If a cursor was present we were already caught up, so the
+      //     last indexed ledger equals the chain head.
+      //   - Otherwise initialise to the start ledger so the lag reflects
+      //     the distance from the configured start point.
+      if (this.lastIndexedLedger === -1) {
+        this.lastIndexedLedger = cursor ? response.latestLedger : this.getStartLedger();
+      }
+
       if (response.cursor) {
         this.store.setCursor(response.cursor);
       }
@@ -89,7 +108,15 @@ export class EventIndexer {
   }
 
   getState(): IndexerState {
-    const lagLedgers = this.latestLedger > 0 ? this.latestLedger - (this.store.getCursor() ? 0 : this.getStartLedger()) : 0;
+    // Use the highest ledger we have actually processed.  Before any run
+    // completes, fall back to getStartLedger() so the lag reflects the
+    // distance from the configured start, not the full chain height.
+    const anchor = this.lastIndexedLedger >= 0
+      ? this.lastIndexedLedger
+      : this.getStartLedger();
+    const lagLedgers = this.latestLedger > 0
+      ? Math.max(0, this.latestLedger - anchor)
+      : 0;
 
     return {
       cursor: this.store.getCursor(),
