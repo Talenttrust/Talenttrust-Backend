@@ -282,7 +282,7 @@ export class PreconditionFailedError extends HttpError {
     public currentEtag: string,
     public currentVersion: number,
   ) {
-    super(412, 'precondition_failed', 'Precondition failed');
+    super(412, 'precondition_failed', 'Precondition failed', { currentVersion });
   }
 }
 
@@ -1613,19 +1613,15 @@ export function createApp(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = req.id;
-    if (err instanceof PreconditionFailedError) {
-      res.setHeader('ETag', err.currentEtag);
-      res.status(412).json({ error: err.code, message: err.message, currentVersion: err.currentVersion });
-      return;
-    }
-    if (err instanceof PreconditionRequiredError) {
-      res.status(428).json({ error: err.code, message: err.message });
-      return;
-    }
     // RFC 9457 problem+json; `error`/`message` stay for existing clients.
     const sendProblem = (e: HttpError) => {
       res.status(e.status).type('application/problem+json').json({ ...e.toProblemBody(), requestId });
     };
+    if (err instanceof PreconditionFailedError) {
+      res.setHeader('ETag', err.currentEtag);
+      sendProblem(err);
+      return;
+    }
     if (err instanceof HttpError) {
       sendProblem(err);
       return;
@@ -1643,14 +1639,14 @@ export function createApp(
       return;
     }
     if (err instanceof TxBuildError) {
-      res
-        .status(err.status)
-        .json({
-          error: err.code,
-          message: err.message,
-          ...(err.contractError ? { contractError: err.contractError } : {}),
-          requestId,
-        });
+      sendProblem(
+        new HttpError(
+          err.status,
+          err.code,
+          err.message,
+          err.contractError ? { contractError: err.contractError } : undefined,
+        ),
+      );
       return;
     }
     // body-parser failures: stable 4xx codes instead of a 500 that invites retries.
