@@ -2,8 +2,9 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { parseApiKeysConfig, sha256Hex, type ParsedApiKeys } from '../src/auth/apiKeysConfig';
-import { extractApiKeyFromHeaders } from '../src/auth/scopedApiKeyMiddleware';
+import { parseApiKeysConfig, parseExpiresAt, sha256Hex, type ParsedApiKeys } from '../src/auth/apiKeysConfig';
+import { extractApiKeyFromHeaders, matchApiKey } from '../src/auth/scopedApiKeyMiddleware';
+import { expiresAtFromDays, parseNewApiKeyArgs } from '../scripts/new-api-key';
 import { SCOPES, isValidScope } from '../src/auth/scopes';
 
 function sha256(plaintext: string): string {
@@ -225,7 +226,7 @@ describe('GET /api/v1/auth/whoami', () => {
   it('returns the key id and scopes', async () => {
     const app = createApp({ store: new EscrowStore(), apiKeys: makeApiKeys({ scopes: ['disputes:resolve', 'admin:read'] }) });
     const res = await request(app).get('/api/v1/auth/whoami').set('X-API-Key', SECRET).expect(200);
-    expect(res.body).toEqual({ keyId: 'test-key-1', scopes: ['disputes:resolve', 'admin:read'] });
+    expect(res.body).toEqual({ keyId: 'test-key-1', scopes: ['disputes:resolve', 'admin:read'], expiresAt: null });
     expect(JSON.stringify(res.body)).not.toContain(SECRET);
   });
 
@@ -248,5 +249,157 @@ describe('sha256Hex', () => {
 
   it('differs for different inputs', () => {
     expect(sha256Hex('test')).not.toBe(sha256Hex('test2'));
+  });
+});
+
+// ── Key expiry (#1695) ────────────────────────────────────────────────────
+describe('API key expiry', () => {
+  const NOW = Date.parse('2027-01-15T12:00:00.000Z');
+  const clock = () => NOW;
+  const keysWith = (expiresAt: unknown, id = 'contractor-1') =>
+    JSON.stringify([{ id, hash: sha256(SECRET), scopes: ['disputes:resolve', 'admin:read'], expiresAt }]);
+
+  describe('parseApiKeysConfig expiresAt', () => {
+    it('accepts an ISO date-time and normalises it to UTC', () => {
+      const parsed = parseApiKeysConfig(keysWith('2027-02-01T10:00:00+01:00'));
+      expect(parsed.keys[0].expiresAt).toBe('2027-02-01T09:00:00.000Z');
+    });
+
+    it('accepts a bare ISO date as UTC midnight', () => {
+      expect(parseApiKeysConfig(keysWith('2027-02-01')).keys[0].expiresAt).toBe('2027-02-01T00:00:00.000Z');
+    });
+
+    it('treats a missing or null expiresAt as never expiring', () => {
+      expect(parseApiKeysConfig(keysWith(undefined)).keys[0].expiresAt).toBeUndefined();
+      expect(parseApiKeysConfig(keysWith(null)).keys[0].expiresAt).toBeUndefined();
+    });
+
+    it.each([
+      ['not-a-date'],
+      ['2027-02-30'],
+      ['2027-13-01T00:00:00Z'],
+      ['2027-02-01T10:00:00'], // no timezone: ambiguous across servers
+      ['2027-02-01T25:00:00Z'],
+      ['01/02/2027'],
+      [''],
+      [1798761600000],
+      [true],
+    ])('fails startup on invalid expiresAt %p, naming the key id', (bad) => {
+      expect(() => parseApiKeysConfig(keysWith(bad, 'contractor-7'))).toThrow(
+        /API_KEYS: entry "contractor-7" has an invalid "expiresAt"/,
+      );
+    });
+
+    it('parseExpiresAt returns the instant for valid values and null otherwise', () => {
+      expect(parseExpiresAt('2027-01-15T12:00:00Z')).toBe(NOW);
+      expect(parseExpiresAt('2027-01-15T12:00:00.000Z')).toBe(NOW);
+      expect(parseExpiresAt('2024-02-29')).toBe(Date.parse('2024-02-29T00:00:00Z'));
+      expect(parseExpiresAt('2027-02-29')).toBeNull();
+      expect(parseExpiresAt(undefined)).toBeNull();
+    });
+  });
+
+  describe('matchApiKey with an injected clock', () => {
+    it('returns valid before expiresAt and carries the expiry', () => {
+      const keys = parseApiKeysConfig(keysWith('2027-01-15T12:00:00.001Z'));
+      expect(matchApiKey(keys, SECRET, clock)).toEqual({
+        status: 'valid',
+        key: { id: 'contractor-1', scopes: ['disputes:resolve', 'admin:read'], expiresAt: '2027-01-15T12:00:00.001Z' },
+      });
+    });
+
+    it('treats a key as expired from expiresAt on (boundary inclusive)', () => {
+      const keys = parseApiKeysConfig(keysWith('2027-01-15T12:00:00.000Z'));
+      expect(matchApiKey(keys, SECRET, clock)).toEqual({
+        status: 'expired',
+        id: 'contractor-1',
+        expiresAt: '2027-01-15T12:00:00.000Z',
+      });
+    });
+
+    it('returns null for an unknown key regardless of expiry', () => {
+      const keys = parseApiKeysConfig(keysWith('2020-01-01'));
+      expect(matchApiKey(keys, 'tt__other', clock)).toBeNull();
+    });
+
+    it('leaves non-expiring keys unchanged', () => {
+      const keys = makeApiKeys({ scopes: ['admin:read'] });
+      expect(matchApiKey(keys, SECRET, () => Number.MAX_SAFE_INTEGER)).toEqual({
+        status: 'valid',
+        key: { id: 'test-key-1', scopes: ['admin:read'] },
+      });
+    });
+  });
+
+  describe('HTTP', () => {
+    const appWith = (expiresAt: unknown) =>
+      createApp({ store: new EscrowStore(), apiKeys: parseApiKeysConfig(keysWith(expiresAt)), apiKeyClock: clock });
+
+    it('rejects an expired key on whoami with 401 "API key expired"', async () => {
+      const res = await request(appWith('2027-01-15T11:59:59Z')).get('/api/v1/auth/whoami').set('X-API-Key', SECRET).expect(401);
+      expect(JSON.stringify(res.body)).toContain('API key expired');
+      expect(JSON.stringify(res.body)).not.toContain(SECRET);
+    });
+
+    it('rejects an expired key on dispute resolution with 401 and leaves the dispute open', async () => {
+      const { store, id } = disputedApp(makeApiKeys());
+      const app = createApp({ store, apiKeys: parseApiKeysConfig(keysWith('2027-01-01')), apiKeyClock: clock });
+      const res = await request(app)
+        .post(`/api/v1/contracts/${id}/resolve`)
+        .set('Authorization', `ApiKey ${SECRET}`)
+        .send({ freelancerBps: 5000 })
+        .expect(401);
+      expect(JSON.stringify(res.body)).toContain('API key expired');
+      expect(store.get(id).status).toBe('Disputed');
+      expect(store.get(id).dispute?.resolvedBy).toBeUndefined();
+    });
+
+    it('whoami reports expiresAt for a key that has not expired yet', async () => {
+      const res = await request(appWith('2027-02-01T00:00:00Z')).get('/api/v1/auth/whoami').set('X-API-Key', SECRET).expect(200);
+      expect(res.body).toEqual({
+        keyId: 'contractor-1',
+        scopes: ['disputes:resolve', 'admin:read'],
+        expiresAt: '2027-02-01T00:00:00.000Z',
+      });
+    });
+
+    it('an unknown key is still "Invalid API key", not "expired"', async () => {
+      const res = await request(appWith('2020-01-01')).get('/api/v1/auth/whoami').set('X-API-Key', 'tt__nope').expect(401);
+      expect(JSON.stringify(res.body)).toContain('Invalid API key');
+    });
+  });
+
+  describe('scripts/new-api-key --expires-in-days', () => {
+    it('parses the flag in both forms and keeps id and scopes', () => {
+      expect(parseNewApiKeyArgs(['--expires-in-days', '30', 'ops-1', 'admin:read'])).toEqual({
+        id: 'ops-1',
+        scopes: ['admin:read'],
+        expiresInDays: 30,
+      });
+      expect(parseNewApiKeyArgs(['ops-1', 'admin:read', '--expires-in-days=7'])).toEqual({
+        id: 'ops-1',
+        scopes: ['admin:read'],
+        expiresInDays: 7,
+      });
+    });
+
+    it('omits expiry when the flag is absent', () => {
+      expect(parseNewApiKeyArgs(['ops-1', 'disputes:resolve']).expiresInDays).toBeUndefined();
+    });
+
+    it.each([['0'], ['-3'], ['1.5'], ['abc'], [undefined]])('rejects --expires-in-days %p', (v) => {
+      const argv = v === undefined ? ['ops-1', 'admin:read', '--expires-in-days'] : ['--expires-in-days', v, 'ops-1', 'admin:read'];
+      expect(() => parseNewApiKeyArgs(argv)).toThrow(/positive whole number/);
+    });
+
+    it('requires an id and at least one scope', () => {
+      expect(() => parseNewApiKeyArgs(['--expires-in-days', '3', 'ops-1'])).toThrow(/Usage/);
+    });
+
+    it('computes expiresAt n days ahead, and it round-trips through parseApiKeysConfig', () => {
+      const expiresAt = expiresAtFromDays(30, NOW);
+      expect(expiresAt).toBe('2027-02-14T12:00:00.000Z');
+      expect(parseApiKeysConfig(keysWith(expiresAt)).keys[0].expiresAt).toBe(expiresAt);
+    });
   });
 });

@@ -420,6 +420,8 @@ export type AppDeps = {
   chainReadClient?: ChainReadClient;
   /** Scoped API keys (defaults to the API_KEYS env var). */
   apiKeys?: ParsedApiKeys;
+  /** Clock for scoped API key expiry checks (defaults to `Date.now`; tests inject one). */
+  apiKeyClock?: () => number;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
 };
@@ -511,6 +513,7 @@ export function createApp(
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
   // Fail fast on a malformed API_KEYS value.
   const apiKeys: ParsedApiKeys = deps.apiKeys ?? parseApiKeysConfig(process.env.API_KEYS);
+  const apiKeyAuthOptions = { now: deps.apiKeyClock };
   /**
    * Dispute resolution needs a key with `disputes:resolve` once any API key is configured. Production
    * without API_KEYS fails closed (nobody can resolve); dev/test without keys keeps the open behaviour.
@@ -522,7 +525,7 @@ export function createApp(
       }
       return next();
     }
-    authenticateScopedApiKey(apiKeys)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
       err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
     );
   };
@@ -970,10 +973,10 @@ export function createApp(
   // Lets integrators check which scoped API key they are using.
   v1.get(
     '/auth/whoami',
-    authenticateScopedApiKey(apiKeys),
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions),
     wrap((req) => {
       const key = (req as ScopedApiKeyRequest).scopedApiKey!;
-      return { keyId: key.id, scopes: key.scopes };
+      return { keyId: key.id, scopes: key.scopes, expiresAt: key.expiresAt ?? null };
     }),
   );
   // --- Per-address activity statements ---
