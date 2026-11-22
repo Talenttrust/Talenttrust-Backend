@@ -63,6 +63,15 @@ export function resolveTimeouts(env: NodeJS.ProcessEnv): ServerTimeouts {
   return { keepAliveTimeoutMs: keepAlive, headersTimeoutMs: headers, requestTimeoutMs: request };
 }
 
+export function resolveShutdownGraceMs(env: NodeJS.ProcessEnv): number {
+  const grace = env.SHUTDOWN_GRACE_MS ? Number(env.SHUTDOWN_GRACE_MS) : DEFAULT_SHUTDOWN_GRACE_MS;
+
+  if (!Number.isFinite(grace) || grace <= 0) {
+    throw new Error(`Invalid SHUTDOWN_GRACE_MS: "${env.SHUTDOWN_GRACE_MS}". Must be a positive number.`);
+  }
+  return grace;
+}
+
 export function startServer({
   app,
   port,
@@ -86,6 +95,7 @@ export function startServer({
 
   server.keepAliveTimeout = resolved.keepAliveTimeoutMs;
   server.headersTimeout = resolved.headersTimeoutMs;
+  server.requestTimeout = resolved.requestTimeoutMs;
 
   server.on('request', (_req, res) => {
     activeRequests++;
