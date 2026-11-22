@@ -79,6 +79,23 @@ export interface IndexedEvent extends EventMetadata {
   event: EscrowEvent;
 }
 
+export function escrowIdOf(event: EscrowEvent): string | undefined {
+  switch (event.type) {
+    case 'Created':
+    case 'Deposit':
+    case 'Release':
+    case 'Dispute':
+    case 'Resolved':
+    case 'Cancel':
+    case 'Reputation':
+      return event.data.escrowId;
+    case 'Paused':
+    case 'Init':
+    case 'Unknown':
+      return undefined;
+  }
+}
+
 export interface EventStore {
   getCursor(): string | null;
   setCursor(cursor: string): void;
