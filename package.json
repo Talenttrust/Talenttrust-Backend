@@ -9,6 +9,7 @@
     "start": "node dist/src/index.js",
     "dev": "ts-node src/index.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "openapi:export": "ts-node scripts/export-openapi.ts",
     "test": "jest",
     "apikey:new": "ts-node scripts/new-api-key.ts"
   },

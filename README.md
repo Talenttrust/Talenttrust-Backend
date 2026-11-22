@@ -270,6 +270,23 @@ unavailable); empty, repeated or structured values return `400 invalid_actor`. I
 wallet-authenticated callers and dispute resolution by scoped API keys, so their roles are listed with
 `actorEnforced: false`.
 
+## OpenAPI specification
+
+The single source of truth for the OpenAPI document is `src/openapi.ts`, served
+at `GET /openapi.json`. The committed `docs/openapi.json` is generated from
+that exact export, using the app's default Stellar network and contract settings
+so local environment variables cannot change the snapshot.
+
+Regenerate the document after changing the API specification:
+
+```bash
+npm run openapi:export
+npx jest tests/openapi-conformance.test.ts --runInBand
+```
+
+The conformance suite fails if `docs/openapi.json` is out of date. Do not edit
+the generated JSON manually.
+
 ## Development
 
 ```bash
