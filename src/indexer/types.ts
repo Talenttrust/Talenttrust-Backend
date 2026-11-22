@@ -108,6 +108,19 @@ export interface EventStore {
   }): { data: IndexedEvent[]; nextCursor?: string };
 }
 
+export interface RunOnceOptions {
+  limit?: number;
+  maxPages?: number;
+  timeBudgetMs?: number;
+}
+
+export interface RunOnceResult {
+  processed: number;
+  pages: number;
+  cursor: string;
+  latestLedger: number;
+}
+
 export interface IndexerState {
   cursor: string | null;
   lastRunAt: string | null;
