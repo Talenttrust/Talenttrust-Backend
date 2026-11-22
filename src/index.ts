@@ -1,16 +1,18 @@
 import { createApp } from './app';
 import { config } from './config';
-import { startServer, parsePort } from './server';
+import { startServer, parsePort, resolveTimeouts, resolveShutdownGraceMs } from './server';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer, withBackoff } from './indexer/indexer';
 
 const port = parsePort(process.env.PORT);
+const timeouts = resolveTimeouts(process.env);
+const shutdownGraceMs = resolveShutdownGraceMs(process.env);
 
 if (require.main === module) {
   // The poller and the API share one event store, so indexed events are served by /api/v1/chain/events.
   const eventStore = new InMemoryEventStore();
   const indexer = new EventIndexer(eventStore);
-  startServer({ app: createApp(undefined, eventStore, indexer), port });
+  startServer({ app: createApp(undefined, eventStore, indexer), port, timeouts, shutdownGraceMs });
 
   if (config.indexerIntervalMs > 0) {
     const poll = async () => {
