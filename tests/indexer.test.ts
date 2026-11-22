@@ -196,6 +196,110 @@ describe('EventIndexer', () => {
     const events = store.query({});
     expect(events.data[0].event.type).toBe('Unknown');
   });
+
+  describe('lagLedgers', () => {
+    it('is 0 when the last processed ledger equals latestLedger', async () => {
+      const store = new InMemoryEventStore();
+      const fakeServer = new FakeServer() as any;
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).rpc = fakeServer;
+
+      const symbol = xdr.ScVal.scvSymbol('created');
+      const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
+      const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+      const amount = nativeToScVal(100n, { type: 'u128' });
+
+      // Event sits exactly at the chain head (ledger 100 == latestLedger 100).
+      fakeServer.addEvent({
+        id: 'event-head',
+        ledger: 100,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-head',
+        topic: [symbol, u64, address, address],
+        value: amount,
+      });
+      fakeServer.setLatestLedger(100);
+
+      await indexer.runOnce();
+
+      expect(indexer.getState().lagLedgers).toBe(0);
+    });
+
+    it('is positive and correct after a run that returns events below the chain head', async () => {
+      const store = new InMemoryEventStore();
+      const fakeServer = new FakeServer() as any;
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).rpc = fakeServer;
+
+      const symbol = xdr.ScVal.scvSymbol('created');
+      const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
+      const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+      const amount = nativeToScVal(100n, { type: 'u128' });
+
+      // Last event is at ledger 90; chain head is at 100 → lag = 10.
+      fakeServer.addEvent({
+        id: 'event-behind',
+        ledger: 90,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-behind',
+        topic: [symbol, u64, address, address],
+        value: amount,
+      });
+      fakeServer.setLatestLedger(100);
+
+      await indexer.runOnce();
+
+      expect(indexer.getState().lagLedgers).toBe(10);
+    });
+
+    it('never goes negative', async () => {
+      const store = new InMemoryEventStore();
+      const fakeServer = new FakeServer() as any;
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).rpc = fakeServer;
+
+      const symbol = xdr.ScVal.scvSymbol('created');
+      const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
+      const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+      const amount = nativeToScVal(100n, { type: 'u128' });
+
+      // Event ledger is ahead of reported latestLedger (edge case / clock skew).
+      fakeServer.addEvent({
+        id: 'event-ahead',
+        ledger: 110,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-ahead',
+        topic: [symbol, u64, address, address],
+        value: amount,
+      });
+      fakeServer.setLatestLedger(100);
+
+      await indexer.runOnce();
+
+      expect(indexer.getState().lagLedgers).toBeGreaterThanOrEqual(0);
+    });
+
+    it('reports correct lag with a stored cursor and no new events', async () => {
+      const store = new InMemoryEventStore();
+      const fakeServer = new FakeServer() as any;
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).rpc = fakeServer;
+
+      // Pre-seed a cursor so the first runOnce uses cursor-based pagination.
+      store.setCursor('cursor-0');
+      fakeServer.setLatestLedger(200);
+
+      // No events in the response — the indexer is caught up.
+      await indexer.runOnce();
+
+      // lagLedgers should NOT equal the whole chain height (the old bug).
+      // It should be 0 or at most a small number based on getStartLedger().
+      const { lagLedgers } = indexer.getState();
+      expect(lagLedgers).toBeGreaterThanOrEqual(0);
+      // Specifically, it must NOT be 200 (the full latestLedger value).
+      expect(lagLedgers).not.toBe(200);
+    });
+  });
 });
 
 describe('InMemoryEventStore', () => {
