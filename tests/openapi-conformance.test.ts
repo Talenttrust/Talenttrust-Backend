@@ -2,11 +2,29 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import SwaggerParser from '@apidevtools/swagger-parser';
-import { openapi } from '../src/openapi';
+import type { z } from 'zod';
+import { listQueryDocs, openapi, requestSchema } from '../src/openapi';
+import {
+  CancelBody,
+  CREATE_CONTRACT_RULES,
+  CreateContractBody,
+  CreateTemplateBody,
+  DeleteTemplateBody,
+  DepositBody,
+  DisputeBody,
+  IdParam,
+  ListQuery,
+  RateBody,
+  ResolveBody,
+  TEMPLATE_RULES,
+  TemplateOwnerQuery,
+  UpdateTemplateBody,
+} from '../src/validation/schemas';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import {
   assertConformance,
+  compileSpecSchema,
   conformanceProblems,
   request,
   type ConformanceResponse,
@@ -233,5 +251,224 @@ describe('live responses conform to the spec', () => {
     await request(app).get('/api/v1/contracts/999').expect(404);
     await request(app).post('/api/v1/contracts').send({ client: 'GA', freelancer: 'GA', milestones: [1] }).expect(400);
     await request(app).get('/definitely-not-a-route').expect(404);
+  });
+});
+
+// ── Request schemas are derived from the zod validators (#1719) ────────────────────────────────────
+
+type RequestOperation = {
+  description?: string;
+  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: Record<string, unknown> }>;
+  requestBody?: { content?: Record<string, { schema?: Record<string, unknown> } | undefined> };
+};
+const components = (openapi as unknown as { components: { schemas: Record<string, Record<string, unknown>> } }).components
+  .schemas;
+const operation = (method: string, path: string) =>
+  (paths[path] as unknown as Record<string, RequestOperation | undefined>)[method];
+const resolveSchema = (schema: Record<string, unknown> | undefined) => {
+  const ref = typeof schema?.$ref === 'string' ? /^#\/components\/schemas\/(.+)$/.exec(schema.$ref)?.[1] : undefined;
+  return ref ? components[ref] : schema;
+};
+const documentedBody = (method: string, path: string) =>
+  resolveSchema(operation(method, path)?.requestBody?.content?.['application/json']?.schema);
+
+const milestones = (n: number) => Array.from({ length: n }, (_, i) => ({ title: `M${i}`, amount: 10 }));
+
+type BodyCase = {
+  op: string;
+  zod: z.ZodType;
+  /** Accepted by the zod validator, so they must also match the documented schema. */
+  valid: unknown[];
+  /** Rejected by the documented schema and by zod: the schema carries the constraint. */
+  invalid: unknown[];
+  /** Match the documented schema but fail a `.refine` rule; the description must name the rule. */
+  refinements?: Array<{ body: unknown; message: string }>;
+};
+
+const bodyCases: BodyCase[] = [
+  {
+    op: 'post /api/v1/contracts',
+    zod: CreateContractBody,
+    valid: [
+      { client: 'GA', freelancer: 'GB', milestones: [100, { title: 'Design', amount: '250' }] },
+      { client: 'GA', freelancer: 'GB', milestones: milestones(20), token: 'USDC', fundingDeadline: '2027-01-01T00:00:00Z' },
+      { client: 'GA', freelancer: 'GB', templateId: 3, budget: 1000 },
+    ],
+    invalid: [
+      { client: 'GA', freelancer: 'GB', milestones: milestones(21) },
+      { client: 'GA', freelancer: 'GB', milestones: [] },
+      { client: 'GA', freelancer: 'GB', milestones: [0] },
+      { client: 'GA', freelancer: 'GB', milestones: ['0100'] },
+      { client: 'GA', freelancer: 'GB', milestones: [{ title: 'x'.repeat(121), amount: 1 }] },
+      { client: 'GA', freelancer: 'GB', milestones: [1], extra: true },
+      { freelancer: 'GB', milestones: [1] },
+      { client: 'GA', freelancer: 'GB', templateId: 0 },
+      { client: 'GA', freelancer: 'GB', milestones: [1], token: 'T'.repeat(65) },
+    ],
+    refinements: [
+      { body: { client: 'GA', freelancer: 'GA', milestones: [1] }, message: CREATE_CONTRACT_RULES.distinctParties },
+      { body: { client: 'GA', freelancer: 'GB', milestones: [1], templateId: 1 }, message: CREATE_CONTRACT_RULES.notBoth },
+      { body: { client: 'GA', freelancer: 'GB' }, message: CREATE_CONTRACT_RULES.oneOf },
+      { body: { client: 'GA', freelancer: 'GB', milestones: [1], budget: 5 }, message: CREATE_CONTRACT_RULES.budgetOnlyWithTemplate },
+    ],
+  },
+  {
+    op: 'post /api/v1/contracts/{id}/deposit',
+    zod: DepositBody,
+    valid: [{ amount: 150 }, { amount: '1' + '0'.repeat(38) }],
+    invalid: [{}, { amount: 0 }, { amount: -5 }, { amount: 1.5 }, { amount: '1' + '0'.repeat(39) }, { amount: 1, note: 'x' }],
+  },
+  {
+    op: 'post /api/v1/contracts/{id}/dispute',
+    zod: DisputeBody,
+    valid: [{}, { raisedBy: 'GB' }, { raisedBy: 'GB', reason: 'late' }],
+    invalid: [{ raisedBy: '' }, { reason: 'x'.repeat(1001) }, { raisedBy: 'GB', severity: 'high' }],
+  },
+  {
+    op: 'post /api/v1/contracts/{id}/resolve',
+    zod: ResolveBody,
+    valid: [{ freelancerBps: 0 }, { freelancerBps: 10000 }],
+    invalid: [{}, { freelancerBps: 10001 }, { freelancerBps: -1 }, { freelancerBps: 50.5 }],
+  },
+  {
+    op: 'post /api/v1/contracts/{id}/reputation',
+    zod: RateBody,
+    valid: [{ rating: 1 }, { rating: 5 }],
+    invalid: [{}, { rating: 0 }, { rating: 6 }, { rating: 4.5 }, { rating: 5, comment: 'great' }],
+  },
+  {
+    op: 'post /api/v1/contracts/{id}/cancel',
+    zod: CancelBody,
+    valid: [{}],
+    invalid: [{ reason: 'changed my mind' }],
+  },
+  {
+    op: 'post /api/v1/templates',
+    zod: CreateTemplateBody,
+    valid: [
+      { owner: 'GA', name: 'Three steps', mode: 'fixed', milestones: [{ amount: 100 }, { title: 'Final', amount: '200' }] },
+      { owner: 'GA', name: 'Halves', mode: 'percent', milestones: [{ percentBps: 5000 }, { percentBps: 5000 }] },
+    ],
+    invalid: [
+      { owner: 'GA', name: 'x', mode: 'fixed' },
+      { owner: 'GA', name: 'x'.repeat(81), mode: 'fixed', milestones: [{ amount: 1 }] },
+      { owner: 'GA', name: 'x', mode: 'hourly', milestones: [{ amount: 1 }] },
+      { owner: 'GA', name: 'x', mode: 'percent', milestones: [{ percentBps: 10001 }] },
+      { owner: 'GA', name: 'x', mode: 'fixed', milestones: Array.from({ length: 21 }, () => ({ amount: 1 })) },
+    ],
+    refinements: [
+      { body: { owner: 'GA', name: 'x', mode: 'fixed', milestones: [{ percentBps: 10000 }] }, message: TEMPLATE_RULES.matchMode },
+      { body: { owner: 'GA', name: 'x', mode: 'percent', milestones: [{ percentBps: 4000 }] }, message: TEMPLATE_RULES.percentSum },
+    ],
+  },
+  {
+    op: 'put /api/v1/templates/{id}',
+    zod: UpdateTemplateBody,
+    valid: [{ owner: 'GA' }, { owner: 'GA', name: 'Renamed' }, { owner: 'GA', mode: 'fixed', milestones: [{ amount: 1 }] }],
+    invalid: [{ name: 'Renamed' }, { owner: 'GA', name: '' }, { owner: 'GA', milestones: [] }],
+    refinements: [
+      { body: { owner: 'GA', milestones: [{ amount: 1 }, { percentBps: 10000 }] }, message: TEMPLATE_RULES.updateNoMix },
+    ],
+  },
+  {
+    op: 'delete /api/v1/templates/{id}',
+    zod: DeleteTemplateBody,
+    valid: [{ owner: 'GA' }],
+    invalid: [{}, { owner: '' }, { owner: 'GA', force: true }],
+  },
+];
+
+describe('request schemas match their zod validators', () => {
+  describe.each(bodyCases)('$op', ({ op, zod, valid, invalid, refinements }) => {
+    const [method, path] = op.split(' ');
+
+    it('documents exactly the schema generated from the validator', () => {
+      expect(documentedBody(method, path)).toEqual(requestSchema(zod));
+    });
+
+    it('accepts, in both, what the validator accepts', () => {
+      const documented = compileSpecSchema(documentedBody(method, path)!);
+      for (const body of valid) {
+        expect(zod.safeParse(body).success).toBe(true);
+        expect({ body, errors: documented(body) ? null : documented.errors }).toEqual({ body, errors: null });
+      }
+    });
+
+    it('rejects, in both, what the schema constrains', () => {
+      const documented = compileSpecSchema(documentedBody(method, path)!);
+      for (const body of invalid) {
+        expect({ body, zod: zod.safeParse(body).success }).toEqual({ body, zod: false });
+        expect({ body, documented: documented(body) }).toEqual({ body, documented: false });
+      }
+    });
+
+    if (refinements) {
+      it('names every rule the schema cannot express in the operation description', () => {
+        const documented = compileSpecSchema(documentedBody(method, path)!);
+        const description = operation(method, path)?.description ?? '';
+        for (const { body, message } of refinements) {
+          expect({ body, documented: documented(body) }).toEqual({ body, documented: true });
+          const result = zod.safeParse(body);
+          expect(result.success).toBe(false);
+          expect(result.error?.issues.map((i) => i.message)).toContain(message);
+          expect(description).toContain(message);
+        }
+      });
+    }
+  });
+
+  it('follows a changed zod limit without editing openapi.ts', () => {
+    // Load the spec against a validator module whose limits differ: 1–10 stars, 25 milestones.
+    let spec: { components: { schemas: Record<string, any> } } | undefined;
+    jest.isolateModules(() => {
+      jest.doMock('../src/validation/schemas', () => {
+        const actual = jest.requireActual('../src/validation/schemas');
+        const { z: zod } = jest.requireActual('zod');
+        return {
+          ...actual,
+          RateBody: zod.object({ rating: zod.number().int().min(1).max(10) }).strict(),
+          Milestones: zod.array(actual.MilestoneItem).min(1).max(25),
+        };
+      });
+      spec = require('../src/openapi').openapi;
+    });
+    jest.dontMock('../src/validation/schemas');
+    expect(spec!.components.schemas.RateRequest.properties.rating.maximum).toBe(10);
+    expect(components.RateRequest).toMatchObject({ properties: { rating: { maximum: 5 } } });
+    const patch = (spec as any).paths['/api/v1/contracts/{id}'].patch.requestBody.content['application/json'].schema;
+    expect(patch.properties.milestones.maxItems).toBe(25);
+  });
+
+  it('documents the path id parameter from IdParam on every contract operation', () => {
+    const generatedId = (requestSchema(IdParam) as { properties: { id: object } }).properties.id;
+    for (const [path, item] of Object.entries(paths)) {
+      if (!path.startsWith('/api/v1/contracts/{id}')) continue;
+      for (const op of Object.values(item as unknown as Record<string, RequestOperation>)) {
+        const id = op.parameters?.find((p) => p.in === 'path' && p.name === 'id');
+        if (id) expect({ path, schema: id.schema }).toEqual({ path, schema: generatedId });
+      }
+    }
+  });
+
+  it('documents exactly the ListQuery keys as GET /contracts query parameters', () => {
+    const params = operation('get', '/api/v1/contracts')?.parameters ?? [];
+    const queryNames = params.filter((p) => p.in === 'query').map((p) => p.name);
+    expect(queryNames.sort()).toEqual(Object.keys(ListQuery.shape).sort());
+    expect(Object.keys(listQueryDocs).filter((k) => !(k in ListQuery.shape))).toEqual([]);
+    // Every value the spec enumerates for a route-checked parameter passes the validator.
+    for (const p of params) {
+      for (const value of (p.schema?.enum as unknown[] | undefined) ?? []) {
+        expect({ [p.name]: ListQuery.safeParse({ [p.name]: String(value) }).success }).toEqual({ [p.name]: true });
+      }
+    }
+    expect(params.find((p) => p.name === 'party')?.schema).toMatchObject({ maxLength: 64 });
+    expect(ListQuery.safeParse({ party: 'x'.repeat(65) }).success).toBe(false);
+    expect(ListQuery.safeParse({ nope: '1' }).success).toBe(false);
+  });
+
+  it('documents GET /templates owner from TemplateOwnerQuery', () => {
+    const params = operation('get', '/api/v1/templates')?.parameters ?? [];
+    expect(params).toEqual([{ name: 'owner', in: 'query', required: true, schema: { type: 'string', minLength: 1 } }]);
+    expect(TemplateOwnerQuery.safeParse({ owner: '' }).success).toBe(false);
   });
 });

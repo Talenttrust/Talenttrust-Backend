@@ -1,6 +1,71 @@
 import { createHash } from 'crypto';
 import { config, explorerUrl } from './config';
 import { ALLOWED_FIELDS } from './utils/project';
+import { z } from 'zod';
+import {
+  Amount,
+  CancelBody,
+  CREATE_CONTRACT_RULES,
+  CreateContractBody,
+  CreateTemplateBody,
+  DeleteTemplateBody,
+  DepositBody,
+  DisputeBody,
+  IdParam,
+  ListQuery,
+  MilestoneIndexParam,
+  Milestones,
+  RateBody,
+  ResolveBody,
+  TEMPLATE_RULES,
+  TemplateOwnerQuery,
+  UpdateTemplateBody,
+} from './validation/schemas';
+
+/**
+ * OpenAPI 3.0 schema for a zod validator, as the request side sees it. The
+ * request body and parameter schemas below come from src/validation/schemas.ts
+ * through this function, so a validator change (a limit, a new field) changes
+ * the published spec without editing this file. `.refine` rules have no JSON
+ * Schema form; they are listed in the operation description (see `rules`).
+ */
+export function requestSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _dialect, ...rest } = z.toJSONSchema(schema, {
+    target: 'openapi-3.0',
+    io: 'input',
+    unrepresentable: 'any',
+  }) as Record<string, unknown>;
+  return rest;
+}
+
+type ParamDoc = { description?: string; schema?: Record<string, unknown> };
+
+/**
+ * One OpenAPI parameter per key of a zod object schema, in shape order.
+ * `docs` adds a description, and for query strings (which zod sees as plain
+ * strings) the constraints the route checks itself, such as `limit` 1–100.
+ */
+export function zodParameters(
+  schema: z.ZodObject,
+  location: 'path' | 'query',
+  docs: Record<string, ParamDoc> = {},
+): Array<Record<string, unknown>> {
+  const object = requestSchema(schema) as { properties: Record<string, object>; required?: string[] };
+  return Object.entries(object.properties).map(([name, propertySchema]) => ({
+    name,
+    in: location,
+    required: location === 'path' || (object.required ?? []).includes(name),
+    ...(docs[name]?.description ? { description: docs[name].description } : {}),
+    schema: { ...propertySchema, ...docs[name]?.schema },
+  }));
+}
+
+/** "Also checked by the validator" note for `.refine` rules a JSON Schema cannot express. */
+const rules = (messages: Record<string, string>) =>
+  'Also checked by the validator (400 `validation_failed`), beyond the schema:\n' +
+  Object.values(messages)
+    .map((m) => `- ${m}`)
+    .join('\n');
 
 const json = (schema: object) => ({ 'application/json': { schema } });
 const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
@@ -57,20 +122,8 @@ const errorResponses = {
   },
 };
 
-const idParam = {
-  name: 'id',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
-  description: 'Contract ID (positive integer)',
-};
-const indexParam = {
-  name: 'index',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^(?:[0-9]|1[0-9])$' },
-  description: 'Milestone index (0-19)',
-};
+const [idParam] = zodParameters(IdParam, 'path', { id: { description: 'Contract ID (positive integer)' } });
+const [indexParam] = zodParameters(MilestoneIndexParam, 'path', { index: { description: 'Milestone index (0-19)' } });
 const addressParam = {
   name: 'address',
   in: 'path',
@@ -104,6 +157,24 @@ const fieldsParam = {
   },
 };
 
+/** Descriptions, plus the constraints GET /contracts checks itself, for the ListQuery parameters. */
+export const listQueryDocs: Record<string, ParamDoc> = {
+  status: { description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
+  party: { description: 'Client or freelancer address' },
+  role: { description: 'Restricts `party` to the given role; requires `party`', schema: { enum: ['client', 'freelancer'] } },
+  token: { description: 'Exact token match' },
+  createdAfter: { description: 'ISO-8601 lower bound on createdAt', schema: { format: 'date-time' } },
+  createdBefore: { description: 'ISO-8601 upper bound on createdAt', schema: { format: 'date-time' } },
+  limit: { description: 'Page size', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+  cursor: { description: 'Opaque cursor returned in `page.nextCursor`' },
+  sort: {
+    description: 'Sort field and direction',
+    schema: { enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' },
+  },
+  linked: { description: 'Filter by whether contract is linked to on-chain escrow' },
+  fields: { description: fieldsParam.description, schema: fieldsParam.schema },
+};
+
 const fieldsError = {
   400: {
     description: 'Invalid `?fields=` value. The response body lists valid field names.',
@@ -111,28 +182,8 @@ const fieldsError = {
   },
 };
 
-const amountSchema = {
-  oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$' }],
-  description: 'Amount in token base units. Must be a positive integer.',
-};
-const milestonesSchema = {
-  type: 'array',
-  minItems: 1,
-  maxItems: 20,
-  items: {
-    oneOf: [
-      amountSchema,
-      {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          amount: amountSchema,
-        },
-        required: ['amount'],
-      },
-    ],
-  },
-};
+const amountSchema = requestSchema(Amount);
+const milestonesSchema = requestSchema(Milestones);
 
 const spec = {
   openapi: '3.0.3',
@@ -351,13 +402,14 @@ const spec = {
       post: {
         tags: ['Templates'],
         summary: 'Create a milestone template (fixed amounts or percent of a budget)',
+        description: rules({ matchMode: TEMPLATE_RULES.matchMode, percentSum: TEMPLATE_RULES.percentSum }),
         requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
         responses: { 201: { description: 'Created', content: json({ $ref: '#/components/schemas/Template' }) }, 400: errorResponse('Invalid template') },
       },
       get: {
         tags: ['Templates'],
         summary: 'List templates of an owner',
-        parameters: [{ name: 'owner', in: 'query', required: true, schema: { type: 'string' } }],
+        parameters: zodParameters(TemplateOwnerQuery, 'query'),
         responses: { ...ok('Templates', { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } }), 400: errorResponse('owner is required') },
       },
     },
@@ -371,8 +423,9 @@ const spec = {
       put: {
         tags: ['Templates'],
         summary: 'Update a template (owner only; bumps version)',
+        description: rules({ updateNoMix: TEMPLATE_RULES.updateNoMix }),
         parameters: [idParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateUpdateInput' }) },
         responses: {
           ...ok('Updated template', { $ref: '#/components/schemas/Template' }),
           400: errorResponse('Invalid template'),
@@ -384,7 +437,7 @@ const spec = {
         tags: ['Templates'],
         summary: 'Delete a template (owner only; existing contracts are unaffected)',
         parameters: [idParam],
-        requestBody: { required: true, content: json({ type: 'object', required: ['owner'], properties: { owner: { type: 'string' } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateDeleteRequest' }) },
         responses: {
           ...ok('Deleted', { type: 'object', properties: { success: { type: 'boolean' } } }),
           403: errorResponse('Not the owner'),
@@ -963,19 +1016,9 @@ const spec = {
           '`page.nextCursor` back as `cursor` (with the same `sort`) for the next page; ties are broken by id. ' +
           'Use `?fields=` to request a sparse response — only the listed fields are included, ' +
           'reducing payload size for list views.',
-        parameters: [
-          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Page size' },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
-          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
-          { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
-          { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
-          { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
-          { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
-          { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
-          { name: 'createdBefore', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 upper bound on createdAt' },
-          fieldsParam,
-          { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
-        ],
+        // Names, presence and zod constraints come from ListQuery. The extra
+        // schema keywords below are checked by the route itself (400 invalid_query).
+        parameters: zodParameters(ListQuery, 'query', listQueryDocs),
         responses: {
           ...ok('Paginated contracts', {
             type: 'object',
@@ -999,34 +1042,9 @@ const spec = {
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        description: rules(CREATE_CONTRACT_RULES),
         parameters: [receiptQueryParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['client', 'freelancer'],
-            properties: {
-              title: { type: 'string' },
-              client: { type: 'string' },
-              freelancer: { type: 'string' },
-              token: { type: 'string', default: 'XLM' },
-              fundingDeadline: {
-                type: 'string',
-                format: 'date-time',
-                description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)',
-              },
-              templateId: {
-                type: 'integer',
-                description: 'Create from a milestone template instead of `milestones` (exactly one of the two is required)',
-              },
-              budget: {
-                ...amountSchema,
-                description: 'Total budget in base units; required for percent templates, forbidden otherwise',
-              },
-              milestones: milestonesSchema,
-            },
-          }),
-        },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/CreateContractRequest' }) },
         responses: {
           201: { description: 'Created', content: json(contractRef) },
           400: errorResponse('Invalid contract input'),
@@ -1126,7 +1144,7 @@ const spec = {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/DepositRequest' }) },
         responses: ok('Updated contract', contractRef),
       },
     },
@@ -1166,7 +1184,7 @@ const spec = {
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
+      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], requestBody: { required: false, content: json({ $ref: '#/components/schemas/CancelRequest' }) }, responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -1176,7 +1194,7 @@ const spec = {
           'Backward-compatible endpoint. Creates a client-to-freelancer review without a comment ' +
           'and sets the contract reputationIssued flag.',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/RateRequest' }) },
         responses: {
           ...ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
           400: { description: 'invalid_rating', content: json(errorRef) },
@@ -1755,27 +1773,9 @@ const spec = {
           updatedAt: { type: 'string', format: 'date-time' },
         },
       },
-      TemplateInput: {
-        type: 'object',
-        required: ['owner'],
-        properties: {
-          owner: { type: 'string' },
-          name: { type: 'string', maxLength: 80 },
-          description: { type: 'string', maxLength: 500 },
-          mode: { type: 'string', enum: ['fixed', 'percent'] },
-          milestones: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 20,
-            items: {
-              oneOf: [
-                { type: 'object', required: ['amount'], properties: { title: { type: 'string' }, amount: amountSchema } },
-                { type: 'object', required: ['percentBps'], properties: { title: { type: 'string' }, percentBps: { type: 'integer', minimum: 1, maximum: 10000 } } },
-              ],
-            },
-          },
-        },
-      },
+      TemplateInput: requestSchema(CreateTemplateBody),
+      TemplateUpdateInput: requestSchema(UpdateTemplateBody),
+      TemplateDeleteRequest: requestSchema(DeleteTemplateBody),
       AuditEntry: {
         type: 'object',
         description:
@@ -2371,70 +2371,13 @@ const spec = {
         },
         required: ['error', 'message', 'details'],
       },
-      CreateContractRequest: {
-        type: 'object',
-        required: ['client', 'freelancer', 'milestones'],
-        properties: {
-          title: { type: 'string', maxLength: 120 },
-          client: { type: 'string', minLength: 1 },
-          freelancer: { type: 'string', minLength: 1 },
-          token: { type: 'string', maxLength: 64 },
-          fundingDeadline: { type: 'string', format: 'date-time' },
-          milestones: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 20,
-            items: {
-              oneOf: [
-                amountSchema,
-                {
-                  type: 'object',
-                  properties: {
-                    title: { type: 'string', maxLength: 120 },
-                    amount: amountSchema,
-                  },
-                  required: ['amount'],
-                  additionalProperties: false,
-                },
-              ],
-            },
-          },
-        },
-        additionalProperties: false,
-      },
-      DepositRequest: {
-        type: 'object',
-        required: ['amount'],
-        properties: {
-          amount: amountSchema,
-        },
-        additionalProperties: false,
-      },
-      DisputeRequest: {
-        type: 'object',
-        required: ['raisedBy'],
-        properties: {
-          raisedBy: { type: 'string', minLength: 1 },
-          reason: { type: 'string', minLength: 1, maxLength: 1000 },
-        },
-        additionalProperties: false,
-      },
-      ResolveRequest: {
-        type: 'object',
-        required: ['freelancerBps'],
-        properties: {
-          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
-        },
-        additionalProperties: false,
-      },
-      RateRequest: {
-        type: 'object',
-        required: ['rating'],
-        properties: {
-          rating: { type: 'integer', minimum: 1, maximum: 5 },
-        },
-        additionalProperties: false,
-      },
+      // Request bodies, derived from the zod validators in src/validation/schemas.ts.
+      CreateContractRequest: requestSchema(CreateContractBody),
+      DepositRequest: requestSchema(DepositBody),
+      DisputeRequest: requestSchema(DisputeBody),
+      ResolveRequest: requestSchema(ResolveBody),
+      RateRequest: requestSchema(RateBody),
+      CancelRequest: requestSchema(CancelBody),
     },
   },
 };

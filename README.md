@@ -362,6 +362,13 @@ Snapshots are written atomically (temp file in the same directory + rename) on e
 - **Single-process only**: concurrent writers sharing one snapshot file are not supported.
 - **Crash window**: an ungraceful crash (`SIGKILL`, power loss) can lose mutations made since the last interval flush.
 
+The request body and parameter schemas published at `/openapi.json` (contracts: create, deposit, dispute,
+resolve, reputation, cancel, the list query; templates: create, update, delete, owner query) are generated from
+the zod validators in `src/validation/schemas.ts` with `z.toJSONSchema`, so changing a validator changes the spec.
+Rules a JSON Schema cannot express (`.refine`, such as "client and freelancer must differ") are listed in the
+operation's description. `tests/openapi-conformance.test.ts` fails if a documented request schema drifts from its
+validator.
+
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
