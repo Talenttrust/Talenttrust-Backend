@@ -44,6 +44,13 @@ export interface VerifyResult {
   brokenAt?: number;
 }
 
+export interface AuditSnapshot {
+  entries: AuditEntry[];
+  nextSeq: number;
+  prevHash: string;
+  truncatedBeforeSeq: number | null;
+}
+
 /**
  * Canonical JSON serialization with sorted keys for stable hashing.
  */
@@ -246,6 +253,28 @@ export class AuditStore {
    */
   getTruncatedBeforeSeq(): number | null {
     return this.truncatedBeforeSeq;
+  }
+
+  /**
+   * Export a deep-cloned snapshot of the audit store state.
+   */
+  toSnapshot(): AuditSnapshot {
+    return {
+      entries: structuredClone(this.entries),
+      nextSeq: this.nextSeq,
+      prevHash: this.prevHash,
+      truncatedBeforeSeq: this.truncatedBeforeSeq,
+    };
+  }
+
+  /**
+   * Restore audit store state from a snapshot.
+   */
+  loadSnapshot(snapshot: AuditSnapshot): void {
+    this.entries = structuredClone(snapshot.entries);
+    this.nextSeq = snapshot.nextSeq;
+    this.prevHash = snapshot.prevHash;
+    this.truncatedBeforeSeq = snapshot.truncatedBeforeSeq;
   }
 
   /**
