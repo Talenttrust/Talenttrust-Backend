@@ -1,6 +1,13 @@
 import { createApp } from './app';
 import { config } from './config';
 import { startServer, parsePort, resolveTimeouts, resolveShutdownGraceMs } from './server';
+import { EscrowStore } from './store';
+import {
+  loadSnapshotFile,
+  parseSnapshotIntervalMs,
+  startSnapshotPersistence,
+  type SnapshotController,
+} from './persistence';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer, withBackoff } from './indexer/indexer';
 
@@ -31,6 +38,11 @@ if (require.main === module) {
   const eventStore = new InMemoryEventStore();
   const indexer = new EventIndexer(eventStore);
   startServer({ app: createApp(undefined, eventStore, indexer), port, timeouts, shutdownGraceMs });
+  startServer({
+    app: createApp(store, eventStore, indexer),
+    port,
+    onShutdown: snapshotController ? () => snapshotController.stop() : undefined,
+  });
 
   if (config.indexerIntervalMs > 0) {
     const poll = async () => {
