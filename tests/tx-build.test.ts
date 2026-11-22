@@ -116,9 +116,16 @@ describe('POST /api/v1/tx/build', () => {
       .send({ action: 'deposit_funds', source, args: { id: '1', amount: '1' } });
 
     expect(res.status).toBe(422);
+    expect(res.headers['content-type']).toContain('application/problem+json');
     expect(res.body).toMatchObject({
+      type: 'https://talenttrust-backend.vercel.app/errors/contract_error',
+      title: 'Contract error',
+      status: 422,
+      detail: 'OverFunded',
       error: 'contract_error',
+      message: 'OverFunded',
       contractError: { name: 'OverFunded', code: 9 },
+      requestId: expect.any(String),
     });
   });
 
@@ -129,7 +136,15 @@ describe('POST /api/v1/tx/build', () => {
       .send({ action: 'cancel_contract', source, args: { id: '1' } });
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toBe('source_account_not_found');
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect(res.body).toMatchObject({
+      type: 'https://talenttrust-backend.vercel.app/errors/source_account_not_found',
+      title: 'Source account not found',
+      status: 404,
+      error: 'source_account_not_found',
+      message: expect.any(String),
+      requestId: expect.any(String),
+    });
   });
 
   it('returns 503 chain_unavailable when RPC is down', async () => {
@@ -199,7 +214,15 @@ describe('POST /api/v1/tx/build', () => {
       .send({ action: 'no_such_action', source, args: {} });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('invalid_action');
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect(res.body).toMatchObject({
+      type: 'https://talenttrust-backend.vercel.app/errors/invalid_action',
+      title: 'Invalid action',
+      status: 400,
+      error: 'invalid_action',
+      message: expect.any(String),
+      requestId: expect.any(String),
+    });
   });
 
   it('rejects admin-only resolve_dispute with 403', async () => {
