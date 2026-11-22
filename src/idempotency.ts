@@ -1,6 +1,9 @@
 import { createHash } from 'crypto';
 import { NextFunction, Request, Response } from 'express';
 import { HttpError } from './store';
+import { verifyWalletToken } from './auth/jwt';
+import type { ParsedApiKeys } from './auth/apiKeysConfig';
+import { extractApiKeyFromHeaders, matchApiKey } from './auth/scopedApiKeyMiddleware';
 
 export interface StoredResponse {
   fingerprint: string;
@@ -87,10 +90,40 @@ export const fingerprint = (body: unknown) =>
 const KEY_RE = /^[\x20-\x7e]{1,255}$/;
 const REPLAY_HEADERS = ['location'];
 
-const principalOf = (req: Request): string | null => {
+const principalOf = (req: Request, opts: IdempotencyOptions): string | null => {
   const id = (req as Request & { user?: { id?: unknown } }).user?.id;
-  return id === undefined || id === null ? null : String(id);
+  if (id !== undefined && id !== null) return String(id);
+
+  const authorization = req.headers.authorization;
+  if (opts.authSecret && typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+    try {
+      const result = verifyWalletToken(authorization.slice(7).trim(), opts.authSecret, opts.now);
+      if (result.ok) return `wallet:${result.address}`;
+    } catch {
+      // Invalid credentials are left for requireAuth to reject after this middleware.
+    }
+  }
+
+  if (opts.apiKeys) {
+    const rawKey = extractApiKeyFromHeaders(req.headers as Record<string, string | string[] | undefined>);
+    if (rawKey) {
+      try {
+        const matched = matchApiKey(opts.apiKeys, rawKey);
+        if (matched) return `api-key:${matched.id}`;
+      } catch {
+        // An unrecognized key remains anonymous; route middleware handles auth.
+      }
+    }
+  }
+  return null;
 };
+
+export interface IdempotencyOptions {
+  required?: boolean;
+  authSecret?: string;
+  now?: () => number;
+  apiKeys?: ParsedApiKeys;
+}
 
 const pickHeaders = (res: Response) => {
   const out: Record<string, string> = {};
@@ -101,7 +134,7 @@ const pickHeaders = (res: Response) => {
   return out;
 };
 
-export function idempotency(store: IdempotencyStore, opts: { required?: boolean } = {}) {
+export function idempotency(store: IdempotencyStore, opts: IdempotencyOptions = {}) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'POST') return next();
     try {
@@ -116,7 +149,7 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         throw new HttpError(400, 'invalid_idempotency_key', 'Idempotency-Key must be 1-255 printable ASCII characters');
       }
 
-      const scope = JSON.stringify([req.method, req.baseUrl + req.path, principalOf(req), key]);
+      const scope = JSON.stringify([req.method, req.baseUrl + req.path, principalOf(req, opts), key]);
       const fp = fingerprint(req.body);
 
       const replay = (hit: StoredResponse) => {

@@ -104,6 +104,8 @@ export function startServer({
   async function close(): Promise<{ forced: boolean }> {
     draining = true;
     app.set('draining', true);
+    const closeSseStreams = app.locals.closeSseStreams;
+    if (typeof closeSseStreams === 'function') closeSseStreams();
 
     return new Promise((resolve) => {
       server.close(() => {

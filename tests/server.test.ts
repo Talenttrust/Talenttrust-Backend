@@ -40,6 +40,15 @@ describe('Server lifecycle', () => {
     await close();
   });
 
+  it('closes registered SSE streams as graceful shutdown begins', async () => {
+    const app = express();
+    const closeStreams = jest.fn();
+    app.locals.closeSseStreams = closeStreams;
+    const { close } = startServer({ app, port: 0 });
+    await close();
+    expect(closeStreams).toHaveBeenCalledTimes(1);
+  });
+
   it('waits for in-flight request to complete, refuses new connections', async () => {
     const app = express();
     app.get('/slow', (_req, res) => {

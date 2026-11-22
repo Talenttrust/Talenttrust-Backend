@@ -1059,6 +1059,23 @@ const spec = {
         },
       },
     },
+    '/api/v1/contracts/{id}/stream': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Stream live contract events',
+        description:
+          'Opens a Server-Sent Events stream for one contract. Send `Last-Event-ID` to replay retained events; the per-process replay buffer holds up to 500 events.',
+        parameters: [
+          idParam,
+          { name: 'Last-Event-ID', in: 'header', required: false, schema: { type: 'string' }, description: 'Resume after this event ID.' },
+        ],
+        responses: {
+          200: { description: 'SSE stream; each message has an event type, event ID, and public JSON data.', content: { 'text/event-stream': { schema: { type: 'string' } } } },
+          404: errorResponse('Contract not found'),
+          503: errorResponse('SSE connection limit reached or server is draining'),
+        },
+      },
+    },
     '/api/v1/contracts/{id}/revisions': {
       get: {
         tags: ['Contracts'],

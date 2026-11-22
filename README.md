@@ -47,6 +47,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
+| GET | `/api/v1/contracts/:id/stream` | Live contract events via Server-Sent Events (`Last-Event-ID` resumes from the in-process 500-event buffer) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
 | GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
@@ -277,7 +278,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off) and
-`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
+`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `SSE_MAX_CONNECTIONS` (maximum concurrent contract event streams per app process; default 100), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
 result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
