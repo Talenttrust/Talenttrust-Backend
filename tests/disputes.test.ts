@@ -81,6 +81,24 @@ describe('Admin dispute queue', () => {
       expect(JSON.stringify(res.body)).not.toContain(TOKEN);
       expect(JSON.stringify(res.headers)).not.toContain(TOKEN);
     });
+
+    it('marks dispute queue responses (success and error) no-store', async () => {
+      const ok = await admin(request(app).get('/api/v1/disputes')).expect(200);
+      expect(ok.headers['cache-control']).toBe('no-store');
+      expect(ok.headers['pragma']).toBe('no-cache');
+
+      const detail = await admin(request(app).get('/api/v1/disputes/99999')).expect(404);
+      expect(detail.headers['cache-control']).toBe('no-store');
+      expect(detail.headers['pragma']).toBe('no-cache');
+
+      const invalid = await admin(request(app).get('/api/v1/disputes?limit=0')).expect(400);
+      expect(invalid.headers['cache-control']).toBe('no-store');
+
+      const unauthorized = await request(app).get('/api/v1/disputes');
+      expect(unauthorized.status).toBe(401);
+      expect(unauthorized.headers['cache-control']).toBe('no-store');
+      expect(unauthorized.headers['pragma']).toBe('no-cache');
+    });
   });
 
   describe('queue contents, sorting, and summary', () => {
