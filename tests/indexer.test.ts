@@ -41,7 +41,7 @@ class FakeServer {
 
     return {
       events: page,
-      cursor: page.length > 0 ? `cursor-${start + page.length}` : this.cursor,
+      cursor: page.length > 0 ? `cursor-${start + page.length}` : (_options.cursor ?? this.cursor),
       latestLedger: this.latestLedger,
     };
   }
@@ -55,39 +55,176 @@ class FakeServer {
   }
 }
 
+function populateEvents(server: FakeServer, count: number) {
+  const symbol = xdr.ScVal.scvSymbol('created');
+  const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
+  const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+  const amount = nativeToScVal(100n, { type: 'u128' });
+
+  for (let i = 0; i < count; i++) {
+    server.addEvent({
+      id: `event-${i}`,
+      ledger: 100 + i,
+      ledgerClosedAt: '2024-01-01T00:00:00Z',
+      txHash: `hash-${i}`,
+      topic: [symbol, u64, address, address],
+      value: amount,
+    });
+  }
+}
+
 describe('EventIndexer', () => {
-  it('paginates across 3 pages', async () => {
+  it('drains a backlog of 250 events across 3 pages in one run', async () => {
     const store = new InMemoryEventStore();
     const fakeServer = new FakeServer() as any;
     const indexer = new EventIndexer(store, undefined);
     (indexer as any).rpc = fakeServer;
 
-    const symbol = xdr.ScVal.scvSymbol('created');
-    const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
-    const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
-    const amount = nativeToScVal(100n, { type: 'u128' });
+    populateEvents(fakeServer, 250);
 
-    for (let i = 0; i < 15; i++) {
-      fakeServer.addEvent({
-        id: `event-${i}`,
-        ledger: 100 + i,
-        ledgerClosedAt: '2024-01-01T00:00:00Z',
-        txHash: `hash-${i}`,
-        topic: [symbol, u64, address, address],
-        value: amount,
-      });
+    const result = await indexer.runOnce({ limit: 100 });
+    expect(result.processed).toBe(250);
+    expect(result.pages).toBe(3);
+    expect(result.cursor).toBe('cursor-250');
+    expect(result.latestLedger).toBe(100);
+    expect(store.getEventsStored()).toBe(250);
+    expect(store.getCursor()).toBe('cursor-250');
+  });
+
+  it('stops when maxPages is reached', async () => {
+    const store = new InMemoryEventStore();
+    const fakeServer = new FakeServer() as any;
+    const indexer = new EventIndexer(store, undefined);
+    (indexer as any).rpc = fakeServer;
+
+    populateEvents(fakeServer, 250);
+
+    const result1 = await indexer.runOnce({ limit: 50, maxPages: 2 });
+    expect(result1.pages).toBe(2);
+    expect(result1.processed).toBe(100);
+    expect(store.getEventsStored()).toBe(100);
+    expect(store.getCursor()).toBe('cursor-100');
+
+    const result2 = await indexer.runOnce({ limit: 50, maxPages: 2 });
+    expect(result2.pages).toBe(2);
+    expect(result2.processed).toBe(100);
+    expect(store.getEventsStored()).toBe(200);
+    expect(store.getCursor()).toBe('cursor-200');
+  });
+
+  it('stops when time budget is exceeded', async () => {
+    const store = new InMemoryEventStore();
+    const fakeServer = new FakeServer() as any;
+    const indexer = new EventIndexer(store, undefined);
+    (indexer as any).rpc = fakeServer;
+
+    populateEvents(fakeServer, 250);
+
+    const originalGetEvents = fakeServer.getEvents.bind(fakeServer);
+    fakeServer.getEvents = async (opts: any) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return originalGetEvents(opts);
+    };
+
+    const result = await indexer.runOnce({ limit: 50, timeBudgetMs: 30 });
+    expect(result.pages).toBe(1);
+    expect(result.processed).toBe(50);
+    expect(store.getEventsStored()).toBe(50);
+    expect(store.getCursor()).toBe('cursor-50');
+  });
+
+  it('stops when time budget from INDEXER_MAX_RUN_MS environment variable is exceeded', async () => {
+    process.env.INDEXER_MAX_RUN_MS = '30';
+    try {
+      const store = new InMemoryEventStore();
+      const fakeServer = new FakeServer() as any;
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).rpc = fakeServer;
+
+      populateEvents(fakeServer, 250);
+
+      const originalGetEvents = fakeServer.getEvents.bind(fakeServer);
+      fakeServer.getEvents = async (opts: any) => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return originalGetEvents(opts);
+      };
+
+      const result = await indexer.runOnce({ limit: 50 });
+      expect(result.pages).toBe(1);
+      expect(result.processed).toBe(50);
+      expect(store.getEventsStored()).toBe(50);
+      expect(store.getCursor()).toBe('cursor-50');
+    } finally {
+      delete process.env.INDEXER_MAX_RUN_MS;
     }
+  });
 
-    const result1 = await indexer.runOnce({ limit: 5 });
+  it('persists cursor after each page so a failure keeps progress', async () => {
+    const store = new InMemoryEventStore();
+    const fakeServer = new FakeServer() as any;
+    const indexer = new EventIndexer(store, undefined);
+    (indexer as any).rpc = fakeServer;
+
+    populateEvents(fakeServer, 150);
+
+    let calls = 0;
+    const originalGetEvents = fakeServer.getEvents.bind(fakeServer);
+    fakeServer.getEvents = async (opts: any) => {
+      calls++;
+      if (calls === 2) {
+        throw new Error('RPC transient drop');
+      }
+      return originalGetEvents(opts);
+    };
+
+    await expect(indexer.runOnce({ limit: 50 })).rejects.toThrow('RPC transient drop');
+    expect(store.getCursor()).toBe('cursor-50');
+    expect(store.getEventsStored()).toBe(50);
+    expect(indexer.getState().lastError).toBe('RPC transient drop');
+
+    // Resuming completes the remaining 100 events across 2 pages
+    const resume = await indexer.runOnce({ limit: 50 });
+    expect(resume.pages).toBe(2);
+    expect(resume.processed).toBe(100);
+    expect(store.getEventsStored()).toBe(150);
+    expect(store.getCursor()).toBe('cursor-150');
+  });
+
+  it('drains across 3 pages in a single run', async () => {
+    const store = new InMemoryEventStore();
+    const fakeServer = new FakeServer() as any;
+    const indexer = new EventIndexer(store, undefined);
+    (indexer as any).rpc = fakeServer;
+
+    populateEvents(fakeServer, 15);
+
+    const result = await indexer.runOnce({ limit: 5 });
+    expect(result.processed).toBe(15);
+    expect(result.pages).toBe(3);
+    expect(store.getEventsStored()).toBe(15);
+  });
+
+  it('can be constrained to single-page runs via maxPages: 1', async () => {
+    const store = new InMemoryEventStore();
+    const fakeServer = new FakeServer() as any;
+    const indexer = new EventIndexer(store, undefined);
+    (indexer as any).rpc = fakeServer;
+
+    populateEvents(fakeServer, 15);
+
+    const result1 = await indexer.runOnce({ limit: 5, maxPages: 1 });
     expect(result1.processed).toBe(5);
+    expect(result1.pages).toBe(1);
     expect(store.getEventsStored()).toBe(5);
 
-    const result2 = await indexer.runOnce({ limit: 5 });
+    const result2 = await indexer.runOnce({ limit: 5, maxPages: 1 });
     expect(result2.processed).toBe(5);
+    expect(result2.pages).toBe(1);
     expect(store.getEventsStored()).toBe(10);
 
-    const result3 = await indexer.runOnce({ limit: 5 });
+    const result3 = await indexer.runOnce({ limit: 5, maxPages: 1 });
     expect(result3.processed).toBe(5);
+    expect(result3.pages).toBe(1);
     expect(store.getEventsStored()).toBe(15);
   });
 

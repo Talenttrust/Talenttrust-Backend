@@ -728,6 +728,7 @@ const spec = {
               type: 'object',
               properties: {
                 processed: { type: 'integer' },
+                pages: { type: 'integer' },
                 cursor: { type: 'string' },
                 latestLedger: { type: 'integer' },
               },

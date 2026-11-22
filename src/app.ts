@@ -1562,11 +1562,16 @@ export function createApp(
     if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
       throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
     }
+    const limitParam = typeof req.query.limit === 'string' && /^[1-9]\d*$/.test(req.query.limit) ? Number(req.query.limit) : undefined;
+    const maxPagesParam = typeof req.query.maxPages === 'string' && /^[1-9]\d*$/.test(req.query.maxPages) ? Number(req.query.maxPages) : undefined;
     // Few, short retries (the batch must fit in a serverless invocation); a busy indexer is not retried.
     let delay = 500;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await eventIndexer.runOnce();
+        return await eventIndexer.runOnce({
+          ...(limitParam !== undefined ? { limit: limitParam } : {}),
+          ...(maxPagesParam !== undefined ? { maxPages: maxPagesParam } : {}),
+        });
       } catch (err) {
         if (err instanceof Error && err.message === 'indexer_busy') {
           throw new HttpError(409, 'indexer_busy', 'Indexer is already running');
