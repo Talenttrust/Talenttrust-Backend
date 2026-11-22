@@ -831,7 +831,7 @@ export class EscrowStore {
       }
     }
 
-    const at = new Date().toISOString();
+    const at = this.nowIso();
     if (title !== undefined) c.title = title;
     if (milestones && totalAmount !== undefined) {
       c.milestones = milestones;
@@ -1023,7 +1023,7 @@ export class EscrowStore {
       reviewee,
       role,
       rating,
-      createdAt: new Date().toISOString(),
+      createdAt: this.nowIso(),
     };
     if (comment !== undefined) review.comment = comment;
     if (c.status === 'Resolved') review.context = 'disputed';
@@ -1153,7 +1153,7 @@ export class EscrowStore {
       throw new HttpError(409, 'chain_mismatch', 'API contract does not match on-chain escrow parameters', { mismatches });
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     c.chain = { escrowId, linkedAt: now, lastVerifiedAt: now, status: 'in_sync', drift: [] };
     return this.touch(c);
   }
@@ -1221,7 +1221,7 @@ export class EscrowStore {
       }
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const parityStatus = drift.length > 0 ? 'drift' : 'in_sync';
     c.chain.lastVerifiedAt = now;
     c.chain.status = parityStatus;
