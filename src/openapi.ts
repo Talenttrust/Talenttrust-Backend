@@ -370,7 +370,33 @@ const spec = {
       post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/deliveries': {
-      get: { tags: ['Webhooks'], summary: 'List bounded webhook delivery history', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Delivery history' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      get: {
+        tags: ['Webhooks'],
+        summary: 'List webhook delivery history, newest first',
+        security: [{ webhookAdmin: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          {
+            name: 'limit', in: 'query', required: false,
+            description: 'Maximum number of newest deliveries to return (default 50)',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+          },
+          {
+            name: 'status', in: 'query', required: false,
+            description: 'Only return deliveries with this status',
+            schema: { type: 'string', enum: ['pending', 'success', 'failed'] },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Delivery history, newest first, limited to `limit` records',
+            content: json({ type: 'object', required: ['data'], properties: { data: { type: 'array', items: { type: 'object' } } } }),
+          },
+          400: { description: 'Invalid query: limit must be an integer from 1 to 100; status must be pending, success or failed' },
+          401: { description: 'Unauthorized' },
+          404: { description: 'Not found or disabled' },
+        },
+      },
     },
     '/api/v1/templates': {
       post: {
@@ -583,15 +609,24 @@ const spec = {
     '/api/v1/auth/whoami': {
       get: {
         tags: ['Auth'],
-        summary: 'Show the scoped API key in use (id and scopes)',
+        summary: 'Show the scoped API key in use (id, scopes and expiry)',
         security: [{ apiKey: [] }],
         responses: {
-          ...ok('Key id and scopes', {
+          ...ok('Key id, scopes and expiry', {
             type: 'object',
-            required: ['keyId', 'scopes'],
-            properties: { keyId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+            required: ['keyId', 'scopes', 'expiresAt'],
+            properties: {
+              keyId: { type: 'string' },
+              scopes: { type: 'array', items: { type: 'string' } },
+              expiresAt: {
+                type: 'string',
+                format: 'date-time',
+                nullable: true,
+                description: 'When the key stops working (ISO 8601 UTC); null for a key that never expires.',
+              },
+            },
           }),
-          401: errorResponse('Missing or invalid API key'),
+          401: errorResponse('Missing, invalid or expired API key'),
         },
       },
     },
@@ -772,6 +807,7 @@ const spec = {
               type: 'object',
               properties: {
                 processed: { type: 'integer' },
+                pages: { type: 'integer' },
                 cursor: { type: 'string' },
                 latestLedger: { type: 'integer' },
               },

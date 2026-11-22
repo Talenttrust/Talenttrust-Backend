@@ -29,7 +29,14 @@ import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './h
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
-import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
+import {
+  DEFAULT_WEBHOOK_HISTORY_LIMIT,
+  isWebhookAdminTokenValid,
+  MAX_WEBHOOK_HISTORY_LIMIT,
+  WEBHOOK_DELIVERY_STATUSES,
+  WebhookDeliveryStatus,
+  WebhookManager,
+} from './webhooks';
 import { type ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
 import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
@@ -282,7 +289,7 @@ export class PreconditionFailedError extends HttpError {
     public currentEtag: string,
     public currentVersion: number,
   ) {
-    super(412, 'precondition_failed', 'Precondition failed');
+    super(412, 'precondition_failed', 'Precondition failed', { currentVersion });
   }
 }
 
@@ -420,6 +427,8 @@ export type AppDeps = {
   chainReadClient?: ChainReadClient;
   /** Scoped API keys (defaults to the API_KEYS env var). */
   apiKeys?: ParsedApiKeys;
+  /** Clock for scoped API key expiry checks (defaults to `Date.now`; tests inject one). */
+  apiKeyClock?: () => number;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
 };
@@ -511,6 +520,7 @@ export function createApp(
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
   // Fail fast on a malformed API_KEYS value.
   const apiKeys: ParsedApiKeys = deps.apiKeys ?? parseApiKeysConfig(process.env.API_KEYS);
+  const apiKeyAuthOptions = { now: deps.apiKeyClock };
   /**
    * Dispute resolution needs a key with `disputes:resolve` once any API key is configured. Production
    * without API_KEYS fails closed (nobody can resolve); dev/test without keys keeps the open behaviour.
@@ -522,7 +532,7 @@ export function createApp(
       }
       return next();
     }
-    authenticateScopedApiKey(apiKeys)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
       err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
     );
   };
@@ -970,10 +980,10 @@ export function createApp(
   // Lets integrators check which scoped API key they are using.
   v1.get(
     '/auth/whoami',
-    authenticateScopedApiKey(apiKeys),
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions),
     wrap((req) => {
       const key = (req as ScopedApiKeyRequest).scopedApiKey!;
-      return { keyId: key.id, scopes: key.scopes };
+      return { keyId: key.id, scopes: key.scopes, expiresAt: key.expiresAt ?? null };
     }),
   );
   // --- Per-address activity statements ---
@@ -1401,6 +1411,26 @@ export function createApp(
       throw new HttpError(401, 'unauthorized', 'Webhook administration authentication is required');
     }
   };
+  /** `?limit=` on delivery history: an integer from 1 to 100, defaulting to 50. */
+  const webhookHistoryLimit = (raw: unknown): number => {
+    if (raw === undefined) return DEFAULT_WEBHOOK_HISTORY_LIMIT;
+    if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    const limit = Number(raw);
+    if (limit < 1 || limit > MAX_WEBHOOK_HISTORY_LIMIT) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    return limit;
+  };
+  /** `?status=` on delivery history: pending, success or failed. */
+  const webhookHistoryStatus = (raw: unknown): WebhookDeliveryStatus | undefined => {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string' || !WEBHOOK_DELIVERY_STATUSES.includes(raw as WebhookDeliveryStatus)) {
+      throw new HttpError(400, 'invalid_status', `status must be one of ${WEBHOOK_DELIVERY_STATUSES.join(', ')}`);
+    }
+    return raw as WebhookDeliveryStatus;
+  };
   const webhookRouter = express.Router();
   webhookRouter.post(
     '/',
@@ -1450,7 +1480,12 @@ export function createApp(
     '/:id/deliveries',
     wrap((req) => {
       webhookAuth(req);
-      return { data: webhooks.history(req.params.id) };
+      return {
+        data: webhooks.history(req.params.id, {
+          limit: webhookHistoryLimit(req.query.limit),
+          status: webhookHistoryStatus(req.query.status),
+        }),
+      };
     }),
   );
   v1.use('/webhook-subscriptions', webhookRouter);
@@ -1559,11 +1594,16 @@ export function createApp(
     if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
       throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
     }
+    const limitParam = typeof req.query.limit === 'string' && /^[1-9]\d*$/.test(req.query.limit) ? Number(req.query.limit) : undefined;
+    const maxPagesParam = typeof req.query.maxPages === 'string' && /^[1-9]\d*$/.test(req.query.maxPages) ? Number(req.query.maxPages) : undefined;
     // Few, short retries (the batch must fit in a serverless invocation); a busy indexer is not retried.
     let delay = 500;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await eventIndexer.runOnce();
+        return await eventIndexer.runOnce({
+          ...(limitParam !== undefined ? { limit: limitParam } : {}),
+          ...(maxPagesParam !== undefined ? { maxPages: maxPagesParam } : {}),
+        });
       } catch (err) {
         if (err instanceof Error && err.message === 'indexer_busy') {
           throw new HttpError(409, 'indexer_busy', 'Indexer is already running');
@@ -1610,19 +1650,15 @@ export function createApp(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = req.id;
-    if (err instanceof PreconditionFailedError) {
-      res.setHeader('ETag', err.currentEtag);
-      res.status(412).json({ error: err.code, message: err.message, currentVersion: err.currentVersion });
-      return;
-    }
-    if (err instanceof PreconditionRequiredError) {
-      res.status(428).json({ error: err.code, message: err.message });
-      return;
-    }
     // RFC 9457 problem+json; `error`/`message` stay for existing clients.
     const sendProblem = (e: HttpError) => {
       res.status(e.status).type('application/problem+json').json({ ...e.toProblemBody(), requestId });
     };
+    if (err instanceof PreconditionFailedError) {
+      res.setHeader('ETag', err.currentEtag);
+      sendProblem(err);
+      return;
+    }
     if (err instanceof HttpError) {
       sendProblem(err);
       return;
@@ -1640,14 +1676,14 @@ export function createApp(
       return;
     }
     if (err instanceof TxBuildError) {
-      res
-        .status(err.status)
-        .json({
-          error: err.code,
-          message: err.message,
-          ...(err.contractError ? { contractError: err.contractError } : {}),
-          requestId,
-        });
+      sendProblem(
+        new HttpError(
+          err.status,
+          err.code,
+          err.message,
+          err.contractError ? { contractError: err.contractError } : undefined,
+        ),
+      );
       return;
     }
     // body-parser failures: stable 4xx codes instead of a 500 that invites retries.

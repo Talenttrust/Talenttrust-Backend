@@ -1,9 +1,17 @@
 import http from 'http';
+import { lookup } from 'dns/promises';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { StoreEventEmitter } from '../src/events';
 import { EscrowStore } from '../src/store';
 import { validateWebhookUrl, verifyWebhookSignature, WebhookManager } from '../src/webhooks';
+
+jest.mock('dns/promises', () => {
+  const actual = jest.requireActual('dns/promises');
+  return { ...actual, lookup: jest.fn(actual.lookup) };
+});
+
+const lookupMock = lookup as unknown as jest.Mock;
 
 const event = (eventType: 'milestone.released' = 'milestone.released') => ({
   id: 'event-id', eventId: 'event-id', eventType, timestamp: new Date().toISOString(), data: { contractId: 1 },
@@ -133,6 +141,174 @@ describe('webhook delivery', () => {
   });
 });
 
+describe('webhook reserved address ranges', () => {
+  const rejectedIpv4 = [
+    // Newly prohibited ranges, including their boundaries.
+    '192.0.0.1', '192.0.0.255',
+    '192.0.2.1', '192.0.2.255',
+    '198.18.0.1', '198.19.255.255',
+    '198.51.100.1', '198.51.100.255',
+    '203.0.113.1', '203.0.113.255',
+    '224.0.0.1', '239.255.255.255',
+    '240.0.0.1', '255.255.255.254', '255.255.255.255',
+    // Existing private/reserved protections.
+    '0.0.0.0', '10.0.0.1', '100.64.0.1', '127.0.0.1',
+    '169.254.169.254', '172.16.0.1', '172.31.255.255', '192.168.1.1',
+  ];
+
+  it.each(rejectedIpv4)('rejects IPv4 %s', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  const acceptedIpv4 = [
+    '8.8.8.8', '1.1.1.1', '93.184.216.34',
+    // Just outside each newly prohibited range.
+    '192.0.1.1', '192.0.3.1', '198.17.255.255', '198.20.0.1', '198.51.101.1', '203.0.114.1', '223.255.255.255',
+  ];
+
+  it.each(acceptedIpv4)('keeps public IPv4 %s accepted', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).resolves.toBeInstanceOf(URL);
+  });
+
+  const rejectedIpv6 = [
+    // Newly prohibited ranges: multicast, site-local, NAT64, plus compressed/expanded equivalents.
+    '[ff00::]', '[ff02::1]', '[ffff::1]',
+    '[fec0::1]', '[feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]',
+    '[64:ff9b::1]', '[64:ff9b::192.0.2.1]', '[0064:ff9b:0000:0000:0000:0000:0000:0001]',
+    // Boundary neighbours of the link-local and site-local blocks.
+    '[fe80::1]', '[febf:ffff::1]',
+    // IPv4-mapped and IPv4-compatible bypass attempts.
+    '[::ffff:127.0.0.1]', '[::ffff:10.0.0.1]', '[::ffff:192.168.0.1]', '[::ffff:169.254.169.254]',
+    '[0:0:0:0:0:ffff:7f00:1]', '[::ffff:7f00:1]', '[::7f00:1]',
+    // Existing protections.
+    '[::]', '[::1]', '[fc00::1]', '[fd12:3456::1]', '[2001:db8::1]',
+  ];
+
+  it.each(rejectedIpv6)('rejects IPv6 %s', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  const acceptedIpv6 = [
+    '[2606:4700:4700::1111]', '[2001:4860:4860::8888]', '[2a00:1450:4001:80f::200e]', '[::ffff:8.8.8.8]',
+  ];
+
+  it.each(acceptedIpv6)('keeps public IPv6 %s accepted', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).resolves.toBeInstanceOf(URL);
+  });
+
+  it('rejects hostnames whose DNS results are prohibited addresses', async () => {
+    const resolved: Array<{ address: string; family: number }> = [
+      { address: '224.0.0.1', family: 4 },
+      { address: '198.51.100.7', family: 4 },
+      { address: 'ff02::1', family: 6 },
+      { address: 'fec0::1', family: 6 },
+      { address: '64:ff9b::1', family: 6 },
+      { address: '::ffff:10.0.0.1', family: 6 },
+    ];
+    for (const record of resolved) {
+      lookupMock.mockResolvedValueOnce([record]);
+      await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    }
+  });
+
+  it('accepts a hostname when every DNS result is public', async () => {
+    lookupMock.mockResolvedValueOnce([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toBeInstanceOf(URL);
+  });
+
+  it('fails safely for malformed IP literals', async () => {
+    await expect(validateWebhookUrl('https://[not-an-ip]/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    await expect(validateWebhookUrl('https://[::gggg]/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    lookupMock.mockRejectedValueOnce(new Error('ENOTFOUND'));
+    await expect(validateWebhookUrl('https://999.999.999.999/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  it('rejects a hostname whose DNS lookup fails', async () => {
+    lookupMock.mockRejectedValueOnce(new Error('ENOTFOUND'));
+    await expect(validateWebhookUrl('https://does-not-exist.example/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+});
+
+describe('webhook delivery history', () => {
+  const build = async (statuses: Array<'success' | 'failed'>) => {
+    let clock = 0;
+    const responses = [...statuses];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() === 'failed' ? 400 : 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      sleep: async () => undefined,
+      now: () => (clock += 1000),
+    });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    const eventIds = statuses.map(() => events.emit('contract.created', {}).eventId);
+    await waitFor(() => {
+      const history = manager.history(id, { limit: statuses.length });
+      return history.length === statuses.length && history.every((delivery) => delivery.status !== 'pending');
+    });
+    return { manager, id, eventIds };
+  };
+
+  it('returns the newest 50 deliveries by default, newest first', async () => {
+    const { manager, id, eventIds } = await build(Array.from({ length: 60 }, () => 'success' as const));
+    const history = manager.history(id);
+    expect(history).toHaveLength(50);
+    expect(history[0].eventId).toBe(eventIds[59]);
+    expect(history[49].eventId).toBe(eventIds[10]);
+    const timestamps = history.map((delivery) => Date.parse(delivery.createdAt));
+    expect([...timestamps].sort((a, b) => b - a)).toEqual(timestamps);
+  });
+
+  it('honours explicit limits of 1 and 100 without ever returning more than requested', async () => {
+    const { manager, id, eventIds } = await build(Array.from({ length: 120 }, () => 'success' as const));
+    const single = manager.history(id, { limit: 1 });
+    expect(single).toHaveLength(1);
+    expect(single[0].eventId).toBe(eventIds[119]);
+    const hundred = manager.history(id, { limit: 100 });
+    expect(hundred).toHaveLength(100);
+    expect(hundred[0].eventId).toBe(eventIds[119]);
+    expect(hundred[99].eventId).toBe(eventIds[20]);
+  });
+
+  it('filters by status before limiting and returns the newest matching records', async () => {
+    const statuses: Array<'success' | 'failed'> = Array.from({ length: 20 }, (_, i) => (i >= 18 ? 'failed' : 'success'));
+    const { manager, id, eventIds } = await build(statuses);
+    const failed = manager.history(id, { status: 'failed', limit: 2 });
+    expect(failed.map((delivery) => delivery.eventId)).toEqual([eventIds[19], eventIds[18]]);
+    expect(failed.every((delivery) => delivery.status === 'failed')).toBe(true);
+    // A naive limit-then-filter would find no successes in the newest two records.
+    const successes = manager.history(id, { status: 'success', limit: 2 });
+    expect(successes.map((delivery) => delivery.eventId)).toEqual([eventIds[17], eventIds[16]]);
+    expect(manager.history(id, { status: 'success', limit: 100 })).toHaveLength(18);
+  });
+
+  it('filters pending deliveries while they are still in flight', async () => {
+    let release!: () => void;
+    const client = jest.fn(() => new Promise<{ statusCode: number }>((resolve) => { release = () => resolve({ statusCode: 200 }); }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(id, { status: 'pending' }).length === 1);
+    expect(manager.history(id, { status: 'success' })).toEqual([]);
+    release();
+    await waitFor(() => manager.history(id).every((delivery) => delivery.status === 'success'));
+  });
+
+  it('returns an empty history when there are no deliveries and 404 for unknown subscriptions', async () => {
+    const manager = new WebhookManager(new StoreEventEmitter());
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    expect(manager.history(created.subscription.id)).toEqual([]);
+    expect(() => manager.history('missing-subscription')).toThrow();
+    expect(() => manager.history('missing-subscription', { status: 'failed', limit: 1 })).toThrow();
+  });
+});
+
 describe('webhook management routes', () => {
   const token = 'test-admin-token';
   const auth = { Authorization: `Bearer ${token}` };
@@ -163,9 +339,44 @@ describe('webhook management routes', () => {
     await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['unknown.event'] }).expect(400);
   });
 
+  it('validates delivery history limit and status query parameters', async () => {
+    const app = createApp(new EscrowStore());
+    const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'] }).expect(201);
+    const url = `/api/v1/webhook-subscriptions/${created.body.id}/deliveries`;
+    expect((await request(app).get(url).set(auth).expect(200)).body).toEqual({ data: [] });
+    await request(app).get(`${url}?limit=1`).set(auth).expect(200);
+    await request(app).get(`${url}?limit=100`).set(auth).expect(200);
+    for (const status of ['pending', 'success', 'failed']) {
+      await request(app).get(`${url}?status=${status}`).set(auth).expect(200);
+    }
+    for (const invalid of ['0', '-1', '101', '1.5', 'abc', '', '1e2']) {
+      const response = await request(app).get(`${url}?limit=${encodeURIComponent(invalid)}`).set(auth).expect(400);
+      expect(response.body.error).toBe('invalid_limit');
+    }
+    const repeated = await request(app).get(`${url}?limit=1&limit=2`).set(auth).expect(400);
+    expect(repeated.body.error).toBe('invalid_limit');
+    for (const invalid of ['bogus', 'SUCCESS', '']) {
+      const response = await request(app).get(`${url}?status=${encodeURIComponent(invalid)}`).set(auth).expect(400);
+      expect(response.body.error).toBe('invalid_status');
+    }
+    const repeatedStatus = await request(app).get(`${url}?status=success&status=failed`).set(auth).expect(400);
+    expect(repeatedStatus.body.error).toBe('invalid_status');
+    await request(app).get('/api/v1/webhook-subscriptions/missing/deliveries').set(auth).expect(404);
+  });
+
   it('serves a valid OpenAPI 3.0.3 document', async () => {
     const response = await request(createApp(new EscrowStore())).get('/openapi.json').expect(200);
     expect(response.body.openapi).toBe('3.0.3');
     expect(response.body.paths['/api/v1/webhook-subscriptions']).toBeDefined();
+  });
+
+  it('documents the delivery history limit and status query parameters', async () => {
+    const response = await request(createApp(new EscrowStore())).get('/openapi.json').expect(200);
+    const operation = response.body.paths['/api/v1/webhook-subscriptions/{id}/deliveries'].get;
+    const limit = operation.parameters.find((parameter: { name: string }) => parameter.name === 'limit');
+    expect(limit).toMatchObject({ in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } });
+    const status = operation.parameters.find((parameter: { name: string }) => parameter.name === 'status');
+    expect(status).toMatchObject({ in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'success', 'failed'] } });
+    expect(operation.responses['400']).toBeDefined();
   });
 });

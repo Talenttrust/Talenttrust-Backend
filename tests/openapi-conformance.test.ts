@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import SwaggerParser from '@apidevtools/swagger-parser';
 import type { z } from 'zod';
 import { listQueryDocs, openapi, requestSchema } from '../src/openapi';
@@ -59,6 +62,34 @@ const contractBody = () => ({
 });
 
 describe('OpenAPI document', () => {
+  it('keeps committed docs/openapi.json byte-for-byte equal to the served spec export', () => {
+    const root = resolve(__dirname, '..');
+    // Generate in a fresh process, not from Jest's cached import of src/openapi.
+    // Deliberately set deployment-specific variables to prove the exporter
+    // produces the canonical document regardless of a developer's local env.
+    const generated = execFileSync(
+      process.execPath,
+      [
+        '-r',
+        'ts-node/register',
+        '-e',
+        'process.stdout.write(require("./scripts/export-openapi").generateOpenApiJson())',
+      ],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          STELLAR_NETWORK: 'mainnet',
+          ESCROW_CONTRACT_ID: 'ENV_OVERRIDE_MUST_NOT_LEAK_INTO_DOCS',
+          TX_CACHE_MAX: '77',
+        },
+      },
+    );
+
+    expect(readFileSync(resolve(root, 'docs/openapi.json'), 'utf8')).toBe(generated);
+  });
+
   it('is a structurally valid OpenAPI 3.0.3 document', async () => {
     const clone = JSON.parse(JSON.stringify(openapi));
     await expect(SwaggerParser.validate(clone)).resolves.toBeTruthy();
