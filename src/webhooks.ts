@@ -19,12 +19,19 @@ interface WebhookSubscription extends WebhookSubscriptionPublic {
   secret: string;
 }
 
+export type WebhookDeliveryStatus = 'pending' | 'success' | 'failed';
+
+export const WEBHOOK_DELIVERY_STATUSES: readonly WebhookDeliveryStatus[] = ['pending', 'success', 'failed'];
+
+export const DEFAULT_WEBHOOK_HISTORY_LIMIT = 50;
+export const MAX_WEBHOOK_HISTORY_LIMIT = 100;
+
 export interface WebhookDelivery {
   id: string;
   subscriptionId: string;
   eventId: string;
   eventType: string;
-  status: 'pending' | 'success' | 'failed';
+  status: WebhookDeliveryStatus;
   attempts: number;
   statusCode?: number;
   lastError?: string;
@@ -37,6 +44,13 @@ export interface HttpClientResponse {
 }
 
 export type WebhookHttpClient = (url: URL, body: string, headers: Record<string, string>, timeoutMs: number) => Promise<HttpClientResponse>;
+
+export interface WebhookHistoryOptions {
+  /** Maximum number of newest deliveries to return (defaults to 50). */
+  limit?: number;
+  /** Only return deliveries in this status. */
+  status?: WebhookDeliveryStatus;
+}
 
 export interface WebhookManagerOptions {
   now?: () => number;
@@ -201,6 +215,8 @@ const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => 
 export class WebhookManager {
   private readonly subscriptions = new Map<string, WebhookSubscription>();
   private readonly deliveries = new Map<string, WebhookDelivery>();
+  // Per-subscription deliveries in creation order, so history never scans other subscriptions.
+  private readonly deliveriesBySubscription = new Map<string, WebhookDelivery[]>();
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -251,9 +267,18 @@ export class WebhookManager {
     return { subscription: publicSubscription(subscription), secret: subscription.secret };
   }
 
-  history(id: string): WebhookDelivery[] {
+  history(id: string, options: WebhookHistoryOptions = {}): WebhookDelivery[] {
     this.require(id);
-    return [...this.deliveries.values()].filter((delivery) => delivery.subscriptionId === id);
+    const limit = options.limit ?? DEFAULT_WEBHOOK_HISTORY_LIMIT;
+    const deliveries = this.deliveriesBySubscription.get(id) ?? [];
+    const history: WebhookDelivery[] = [];
+    // Walk newest-first, filtering by status before counting against the limit.
+    for (let i = deliveries.length - 1; i >= 0 && history.length < limit; i -= 1) {
+      const delivery = deliveries[i];
+      if (options.status && delivery.status !== options.status) continue;
+      history.push(delivery);
+    }
+    return history;
   }
 
   private require(id: string): WebhookSubscription {
@@ -278,6 +303,9 @@ export class WebhookManager {
   private async deliver(subscription: WebhookSubscription, event: EscrowEvent): Promise<void> {
     const delivery: WebhookDelivery = { id: randomUUID(), subscriptionId: subscription.id, eventId: event.eventId, eventType: event.eventType, status: 'pending', attempts: 0, createdAt: new Date(this.now()).toISOString(), updatedAt: new Date(this.now()).toISOString() };
     this.deliveries.set(delivery.id, delivery);
+    const perSubscription = this.deliveriesBySubscription.get(subscription.id);
+    if (perSubscription) perSubscription.push(delivery);
+    else this.deliveriesBySubscription.set(subscription.id, [delivery]);
     while (delivery.attempts < this.maxAttempts) {
       delivery.attempts += 1;
       delivery.updatedAt = new Date(this.now()).toISOString();
@@ -308,6 +336,16 @@ export class WebhookManager {
   }
 
   private trimHistory() {
-    while (this.deliveries.size > this.maxHistory) this.deliveries.delete(this.deliveries.keys().next().value as string);
+    while (this.deliveries.size > this.maxHistory) {
+      const oldestId = this.deliveries.keys().next().value as string;
+      const oldest = this.deliveries.get(oldestId);
+      this.deliveries.delete(oldestId);
+      if (!oldest) continue;
+      const perSubscription = this.deliveriesBySubscription.get(oldest.subscriptionId);
+      if (!perSubscription) continue;
+      const index = perSubscription.findIndex((delivery) => delivery.id === oldestId);
+      if (index >= 0) perSubscription.splice(index, 1);
+      if (!perSubscription.length) this.deliveriesBySubscription.delete(oldest.subscriptionId);
+    }
   }
 }

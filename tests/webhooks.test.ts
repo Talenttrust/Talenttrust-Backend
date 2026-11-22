@@ -232,6 +232,83 @@ describe('webhook reserved address ranges', () => {
   });
 });
 
+describe('webhook delivery history', () => {
+  const build = async (statuses: Array<'success' | 'failed'>) => {
+    let clock = 0;
+    const responses = [...statuses];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() === 'failed' ? 400 : 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      sleep: async () => undefined,
+      now: () => (clock += 1000),
+    });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    const eventIds = statuses.map(() => events.emit('contract.created', {}).eventId);
+    await waitFor(() => {
+      const history = manager.history(id, { limit: statuses.length });
+      return history.length === statuses.length && history.every((delivery) => delivery.status !== 'pending');
+    });
+    return { manager, id, eventIds };
+  };
+
+  it('returns the newest 50 deliveries by default, newest first', async () => {
+    const { manager, id, eventIds } = await build(Array.from({ length: 60 }, () => 'success' as const));
+    const history = manager.history(id);
+    expect(history).toHaveLength(50);
+    expect(history[0].eventId).toBe(eventIds[59]);
+    expect(history[49].eventId).toBe(eventIds[10]);
+    const timestamps = history.map((delivery) => Date.parse(delivery.createdAt));
+    expect([...timestamps].sort((a, b) => b - a)).toEqual(timestamps);
+  });
+
+  it('honours explicit limits of 1 and 100 without ever returning more than requested', async () => {
+    const { manager, id, eventIds } = await build(Array.from({ length: 120 }, () => 'success' as const));
+    const single = manager.history(id, { limit: 1 });
+    expect(single).toHaveLength(1);
+    expect(single[0].eventId).toBe(eventIds[119]);
+    const hundred = manager.history(id, { limit: 100 });
+    expect(hundred).toHaveLength(100);
+    expect(hundred[0].eventId).toBe(eventIds[119]);
+    expect(hundred[99].eventId).toBe(eventIds[20]);
+  });
+
+  it('filters by status before limiting and returns the newest matching records', async () => {
+    const statuses: Array<'success' | 'failed'> = Array.from({ length: 20 }, (_, i) => (i >= 18 ? 'failed' : 'success'));
+    const { manager, id, eventIds } = await build(statuses);
+    const failed = manager.history(id, { status: 'failed', limit: 2 });
+    expect(failed.map((delivery) => delivery.eventId)).toEqual([eventIds[19], eventIds[18]]);
+    expect(failed.every((delivery) => delivery.status === 'failed')).toBe(true);
+    // A naive limit-then-filter would find no successes in the newest two records.
+    const successes = manager.history(id, { status: 'success', limit: 2 });
+    expect(successes.map((delivery) => delivery.eventId)).toEqual([eventIds[17], eventIds[16]]);
+    expect(manager.history(id, { status: 'success', limit: 100 })).toHaveLength(18);
+  });
+
+  it('filters pending deliveries while they are still in flight', async () => {
+    let release!: () => void;
+    const client = jest.fn(() => new Promise<{ statusCode: number }>((resolve) => { release = () => resolve({ statusCode: 200 }); }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(id, { status: 'pending' }).length === 1);
+    expect(manager.history(id, { status: 'success' })).toEqual([]);
+    release();
+    await waitFor(() => manager.history(id).every((delivery) => delivery.status === 'success'));
+  });
+
+  it('returns an empty history when there are no deliveries and 404 for unknown subscriptions', async () => {
+    const manager = new WebhookManager(new StoreEventEmitter());
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    expect(manager.history(created.subscription.id)).toEqual([]);
+    expect(() => manager.history('missing-subscription')).toThrow();
+    expect(() => manager.history('missing-subscription', { status: 'failed', limit: 1 })).toThrow();
+  });
+});
+
 describe('webhook management routes', () => {
   const token = 'test-admin-token';
   const auth = { Authorization: `Bearer ${token}` };
@@ -262,9 +339,44 @@ describe('webhook management routes', () => {
     await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['unknown.event'] }).expect(400);
   });
 
+  it('validates delivery history limit and status query parameters', async () => {
+    const app = createApp(new EscrowStore());
+    const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'] }).expect(201);
+    const url = `/api/v1/webhook-subscriptions/${created.body.id}/deliveries`;
+    expect((await request(app).get(url).set(auth).expect(200)).body).toEqual({ data: [] });
+    await request(app).get(`${url}?limit=1`).set(auth).expect(200);
+    await request(app).get(`${url}?limit=100`).set(auth).expect(200);
+    for (const status of ['pending', 'success', 'failed']) {
+      await request(app).get(`${url}?status=${status}`).set(auth).expect(200);
+    }
+    for (const invalid of ['0', '-1', '101', '1.5', 'abc', '', '1e2']) {
+      const response = await request(app).get(`${url}?limit=${encodeURIComponent(invalid)}`).set(auth).expect(400);
+      expect(response.body.error).toBe('invalid_limit');
+    }
+    const repeated = await request(app).get(`${url}?limit=1&limit=2`).set(auth).expect(400);
+    expect(repeated.body.error).toBe('invalid_limit');
+    for (const invalid of ['bogus', 'SUCCESS', '']) {
+      const response = await request(app).get(`${url}?status=${encodeURIComponent(invalid)}`).set(auth).expect(400);
+      expect(response.body.error).toBe('invalid_status');
+    }
+    const repeatedStatus = await request(app).get(`${url}?status=success&status=failed`).set(auth).expect(400);
+    expect(repeatedStatus.body.error).toBe('invalid_status');
+    await request(app).get('/api/v1/webhook-subscriptions/missing/deliveries').set(auth).expect(404);
+  });
+
   it('serves a valid OpenAPI 3.0.3 document', async () => {
     const response = await request(createApp(new EscrowStore())).get('/openapi.json').expect(200);
     expect(response.body.openapi).toBe('3.0.3');
     expect(response.body.paths['/api/v1/webhook-subscriptions']).toBeDefined();
+  });
+
+  it('documents the delivery history limit and status query parameters', async () => {
+    const response = await request(createApp(new EscrowStore())).get('/openapi.json').expect(200);
+    const operation = response.body.paths['/api/v1/webhook-subscriptions/{id}/deliveries'].get;
+    const limit = operation.parameters.find((parameter: { name: string }) => parameter.name === 'limit');
+    expect(limit).toMatchObject({ in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } });
+    const status = operation.parameters.find((parameter: { name: string }) => parameter.name === 'status');
+    expect(status).toMatchObject({ in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'success', 'failed'] } });
+    expect(operation.responses['400']).toBeDefined();
   });
 });
