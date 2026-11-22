@@ -323,6 +323,13 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 | Malformed JSON | 400 | `invalid_json` |
 | Request aborted before the body was received | 400 | `request_aborted` |
 
+The request body and parameter schemas published at `/openapi.json` (contracts: create, deposit, dispute,
+resolve, reputation, cancel, the list query; templates: create, update, delete, owner query) are generated from
+the zod validators in `src/validation/schemas.ts` with `z.toJSONSchema`, so changing a validator changes the spec.
+Rules a JSON Schema cannot express (`.refine`, such as "client and freelancer must differ") are listed in the
+operation's description. `tests/openapi-conformance.test.ts` fails if a documented request schema drifts from its
+validator.
+
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and

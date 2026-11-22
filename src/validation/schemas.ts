@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+/*
+ * These validators are the single source of truth for the request schemas in
+ * the published OpenAPI document: src/openapi.ts derives them with
+ * z.toJSONSchema (see requestSchema there). `.meta({ description })` text ends
+ * up in the spec. Rules a JSON Schema cannot express (`.refine`) use the
+ * message constants below, which the spec lists in the operation description.
+ */
+
 export const ContractStatusEnum = z.enum([
   'Created',
   'Funded',
@@ -30,10 +38,15 @@ export const MilestoneReleaseParams = z.object({
  * string (no sign, no leading zeros, no exponent) for values beyond 2^53.
  * Mirrors parseAmount() in src/amount.ts; the store still enforces the i128 cap.
  */
-export const Amount = z.union([
-  z.number().int().positive().refine(Number.isSafeInteger, 'amount must be a safe integer; use a decimal string for larger values'),
-  z.string().regex(/^[1-9][0-9]{0,38}$/, 'amount string must be a positive decimal integer without leading zeros'),
-]);
+export const Amount = z
+  .union([
+    z.number().int().positive().refine(Number.isSafeInteger, 'amount must be a safe integer; use a decimal string for larger values'),
+    z.string().regex(/^[1-9][0-9]{0,38}$/, 'amount string must be a positive decimal integer without leading zeros'),
+  ])
+  .meta({
+    description:
+      'Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values.',
+  });
 
 export const MilestoneItem = z.union([
   Amount,
@@ -45,35 +58,53 @@ export const MilestoneItem = z.union([
     .strict(),
 ]);
 
+/** 1–20 milestones, each a bare amount or `{ title?, amount }`. */
+export const Milestones = z.array(MilestoneItem).min(1).max(20);
+
+/** Messages of the CreateContractBody refinements (also listed in the OpenAPI operation description). */
+export const CREATE_CONTRACT_RULES = {
+  distinctParties: 'client and freelancer must differ',
+  notBoth: 'Cannot provide both templateId and milestones',
+  oneOf: 'Either templateId or milestones must be provided',
+  budgetOnlyWithTemplate: 'budget must not be provided when using milestones directly',
+} as const;
+
 export const CreateContractBody = z
   .object({
     title: z.string().max(120).trim().optional(),
     client: z.string().min(1),
     freelancer: z.string().min(1),
-    token: z.string().max(64).optional(),
-    milestones: z.array(MilestoneItem).min(1).max(20).optional(),
+    token: z.string().max(64).optional().meta({ description: 'Token code; defaults to XLM' }),
+    milestones: Milestones.optional(),
     // Validated (range-checked against the store clock) by EscrowStore.create.
-    fundingDeadline: z.string().optional(),
+    fundingDeadline: z.string().optional().meta({
+      format: 'date-time',
+      description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days); checked by the store',
+    }),
     /** Create from a saved milestone template instead of explicit milestones. */
-    templateId: z.number().int().positive().optional(),
+    templateId: z.number().int().positive().optional().meta({
+      description: 'Create from a milestone template instead of `milestones` (exactly one of the two is required)',
+    }),
     /** Total budget (base units) for percent-mode templates. */
-    budget: Amount.optional(),
+    budget: Amount.optional().meta({
+      description: 'Total budget in base units; required for percent templates, forbidden otherwise',
+    }),
   })
   .strict()
   .refine((data) => data.client !== data.freelancer, {
-    message: 'client and freelancer must differ',
+    message: CREATE_CONTRACT_RULES.distinctParties,
     path: ['freelancer'],
   })
   .refine((data) => !(data.templateId !== undefined && data.milestones !== undefined), {
-    message: 'Cannot provide both templateId and milestones',
+    message: CREATE_CONTRACT_RULES.notBoth,
     path: ['milestones'],
   })
   .refine((data) => data.templateId !== undefined || data.milestones !== undefined, {
-    message: 'Either templateId or milestones must be provided',
+    message: CREATE_CONTRACT_RULES.oneOf,
     path: ['milestones'],
   })
   .refine((data) => !(data.milestones !== undefined && data.budget !== undefined), {
-    message: 'budget must not be provided when using milestones directly',
+    message: CREATE_CONTRACT_RULES.budgetOnlyWithTemplate,
     path: ['budget'],
   });
 
@@ -95,6 +126,13 @@ const sumBps = (ms: TemplateMilestoneInput[]) => ms.reduce((sum, m) => sum + ('p
 const matchesMode = (mode: 'fixed' | 'percent', ms: TemplateMilestoneInput[]) =>
   ms.every((m) => (mode === 'fixed' ? 'amount' in m : 'percentBps' in m));
 
+/** Messages of the template refinements (also listed in the OpenAPI operation descriptions). */
+export const TEMPLATE_RULES = {
+  matchMode: 'milestones must match mode (amount for fixed, percentBps for percent)',
+  percentSum: 'percentBps must sum to exactly 10000',
+  updateNoMix: 'milestones must not mix amount and percentBps, and must match mode',
+} as const;
+
 export const CreateTemplateBody = z
   .object({
     owner: z.string().min(1),
@@ -105,11 +143,11 @@ export const CreateTemplateBody = z
   })
   .strict()
   .refine((d) => matchesMode(d.mode, d.milestones), {
-    message: 'milestones must match mode (amount for fixed, percentBps for percent)',
+    message: TEMPLATE_RULES.matchMode,
     path: ['milestones'],
   })
   .refine((d) => d.mode !== 'percent' || sumBps(d.milestones) === 10000, {
-    message: 'percentBps must sum to exactly 10000',
+    message: TEMPLATE_RULES.percentSum,
     path: ['milestones'],
   });
 
@@ -126,7 +164,7 @@ export const UpdateTemplateBody = z
     (d) =>
       !d.milestones ||
       (d.mode ? matchesMode(d.mode, d.milestones) : matchesMode('fixed', d.milestones) || matchesMode('percent', d.milestones)),
-    { message: 'milestones must not mix amount and percentBps, and must match mode', path: ['milestones'] },
+    { message: TEMPLATE_RULES.updateNoMix, path: ['milestones'] },
   );
 
 export const TemplateOwnerQuery = z.object({ owner: z.string().min(1) }).strict();
@@ -149,7 +187,12 @@ export const DisputeBody = z
 
 export const ResolveBody = z
   .object({
-    freelancerBps: z.number().int().min(0).max(10_000),
+    freelancerBps: z
+      .number()
+      .int()
+      .min(0)
+      .max(10_000)
+      .meta({ description: "Freelancer's share of the escrowed funds in basis points; the rest is refunded to the client" }),
   })
   .strict();
 
