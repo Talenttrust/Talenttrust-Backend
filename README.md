@@ -232,12 +232,20 @@ Operator-only routes use hashed, scoped API keys from `API_KEYS`, a JSON array o
 startup. Send the key as `X-API-Key: <key>` or `Authorization: ApiKey <key>`; it is SHA-256 hashed and compared
 against every configured digest in constant time, and never echoed back.
 
+An entry may add an optional `"expiresAt"`, an ISO 8601 date-time with a timezone (`"2027-01-31T00:00:00Z"`)
+or a bare date (`"2027-01-31"`, read as UTC midnight). From that instant on the key is rejected with
+`401` "API key expired", so rotating a contractor's key is a config change rather than a manual removal. An
+invalid `expiresAt` stops the app at startup with the key id in the message. Entries without `expiresAt` never
+expire and behave exactly as before.
+
 - `POST /api/v1/contracts/:id/resolve` needs `disputes:resolve` (401 without/with an invalid key, 403
   `insufficient_scope` with `required`); the key id is stored as `dispute.resolvedBy`. With `NODE_ENV=production`
   and no `API_KEYS`, resolution fails closed (401); outside production with no keys configured it stays open for
   local development.
-- `GET /api/v1/auth/whoami` returns `{ keyId, scopes }` for the presented key.
-- `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add.
+- `GET /api/v1/auth/whoami` returns `{ keyId, scopes, expiresAt }` for the presented key (`expiresAt` is an ISO
+  8601 UTC string, or `null` for a key that never expires).
+- `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add. Add
+  `--expires-in-days <n>` (a positive whole number) to include an `expiresAt` n days from now.
 
 ## Health probes
 
