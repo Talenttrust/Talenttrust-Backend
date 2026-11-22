@@ -98,6 +98,15 @@ ajv.addSchema({
   definitions: toJsonSchema(spec.components.schemas) as Record<string, SchemaObject>,
 });
 
+/**
+ * Compiles an OpenAPI 3.0 schema from the spec (component `$ref`s allowed)
+ * into an Ajv validator, with the same conversion the response checks use.
+ * The request-schema drift tests validate examples with it.
+ */
+export function compileSpecSchema(schema: SchemaObject): ValidateFunction {
+  return ajv.compile(toJsonSchema(schema) as AnySchema);
+}
+
 // ── Path / response lookup ────────────────────────────────────────────────────────────────────────
 
 // Query strings are not part of the path template.

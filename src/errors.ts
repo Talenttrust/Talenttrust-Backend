@@ -105,6 +105,15 @@ export const ERRORS = {
   rpc_error: { status: 502, title: 'RPC error', detail: 'Unexpected response from Soroban RPC' },
   invalid_hash: { status: 400, title: 'Invalid hash', detail: 'Transaction hash must be a 64-character hex string' },
   too_many_waits: { status: 503, title: 'Too many waits', detail: 'Too many concurrent long-poll requests' },
+  // Transaction build
+  admin_action_not_buildable: { status: 403, title: 'Admin action not buildable', detail: 'Admin-only actions cannot be built by this API' },
+  invalid_action: { status: 400, title: 'Invalid action', detail: 'The requested transaction action is missing or not buildable' },
+  invalid_source: { status: 400, title: 'Invalid source', detail: 'source must be a valid Stellar account address' },
+  invalid_args: { status: 400, title: 'Invalid args', detail: 'Transaction action arguments failed validation' },
+  source_mismatch: { status: 400, title: 'Source mismatch', detail: 'source does not match the party required by the contract' },
+  contract_error: { status: 422, title: 'Contract error', detail: 'Soroban contract simulation returned a contract error' },
+  simulation_failed: { status: 422, title: 'Simulation failed', detail: 'Soroban transaction simulation failed' },
+  source_account_not_found: { status: 404, title: 'Source account not found', detail: 'Source account was not found on the Stellar network' },
   // On-chain read-through
   invalid_chain_id: { status: 400, title: 'Invalid chain id', detail: 'chainId must be a positive u64' },
   chain_error: { status: 502, title: 'Chain error', detail: 'On-chain read failed' },

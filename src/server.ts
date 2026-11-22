@@ -14,6 +14,7 @@ export interface StartServerOptions {
   timeouts?: Partial<ServerTimeouts>;
   shutdownGraceMs?: number;
   logger?: (message: string) => void;
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface StartServerResult {
@@ -77,6 +78,7 @@ export function startServer({
   timeouts,
   shutdownGraceMs,
   logger,
+  onShutdown,
 }: StartServerOptions): StartServerResult {
   const log = logger ?? ((msg: string) => console.log(msg));
   const resolved = { ...DEFAULT_TIMEOUTS, ...(timeouts ?? {}) };
@@ -115,7 +117,7 @@ export function startServer({
     draining = true;
     app.set('draining', true);
 
-    return new Promise((resolve) => {
+    const result = await new Promise<{ forced: boolean }>((resolve) => {
       server.close(() => {
         // Stopped accepting new connections.
       });
@@ -136,6 +138,11 @@ export function startServer({
       };
       poll();
     });
+
+    if (onShutdown) {
+      await onShutdown();
+    }
+    return result;
   }
 
   function handleSigTerm() {

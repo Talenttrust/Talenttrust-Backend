@@ -12,7 +12,7 @@
 
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
-import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
+import { AuditStore, type AuditAction, type AuditContext, type AuditSnapshot, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
 
@@ -75,7 +75,7 @@ export interface Template {
   updatedAt: string;
 }
 
-interface InternalTemplate extends Omit<Template, 'milestones'> {
+export interface InternalTemplate extends Omit<Template, 'milestones'> {
   milestones: Array<{ title: string; amount?: bigint; percentBps?: number }>;
 }
 
@@ -215,7 +215,7 @@ export interface ReputationPage {
   page: { limit: number; nextCursor: string | null; hasMore: boolean };
 }
 
-interface ReputationRecord {
+export interface ReputationRecord {
   completed: number;
   total: number;
   histogram: RatingHistogram;
@@ -355,7 +355,7 @@ const decodeDisputeCursor = (raw: string): DisputeCursor => {
 };
 
 /** Internal store record — keeps bigints for arithmetic. */
-interface InternalContract {
+export interface InternalContract {
   id: number;
   title: string;
   client: string;
@@ -831,7 +831,7 @@ export class EscrowStore {
       }
     }
 
-    const at = new Date().toISOString();
+    const at = this.nowIso();
     if (title !== undefined) c.title = title;
     if (milestones && totalAmount !== undefined) {
       c.milestones = milestones;
@@ -1023,7 +1023,7 @@ export class EscrowStore {
       reviewee,
       role,
       rating,
-      createdAt: new Date().toISOString(),
+      createdAt: this.nowIso(),
     };
     if (comment !== undefined) review.comment = comment;
     if (c.status === 'Resolved') review.context = 'disputed';
@@ -1153,7 +1153,7 @@ export class EscrowStore {
       throw new HttpError(409, 'chain_mismatch', 'API contract does not match on-chain escrow parameters', { mismatches });
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     c.chain = { escrowId, linkedAt: now, lastVerifiedAt: now, status: 'in_sync', drift: [] };
     return this.touch(c);
   }
@@ -1221,7 +1221,7 @@ export class EscrowStore {
       }
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const parityStatus = drift.length > 0 ? 'drift' : 'in_sync';
     c.chain.lastVerifiedAt = now;
     c.chain.status = parityStatus;
@@ -1674,6 +1674,35 @@ export class EscrowStore {
     return { reviews: slice, nextCursor };
   }
 
+  /** Export raw internal state for snapshot persistence. */
+  exportState(): StoreInternalState {
+    return {
+      contracts: Array.from(this.contracts.values()),
+      templates: Array.from(this.templates.values()),
+      reputation: Object.fromEntries(this.reputation.entries()),
+      clientReputation: Object.fromEntries(this.clientReputation.entries()),
+      reviews: structuredClone(this.reviews),
+      nextId: this.nextId,
+      nextReviewId: this.nextReviewId,
+      nextTemplateId: this.nextTemplateId,
+      audit: this.audit.toSnapshot(),
+    };
+  }
+
+  /** Replace all internal state from a validated snapshot. */
+  importState(state: StoreInternalState): void {
+    this.contracts = new Map(state.contracts.map((c) => [c.id, c]));
+    this.templates = new Map(state.templates.map((t) => [t.id, t]));
+    this.reputation = new Map(Object.entries(state.reputation).map(([k, v]) => [k, structuredClone(v)]));
+    this.clientReputation = new Map(Object.entries(state.clientReputation).map(([k, v]) => [k, structuredClone(v)]));
+    this.reviews = structuredClone(state.reviews);
+    this.nextId = state.nextId;
+    this.nextReviewId = state.nextReviewId;
+    this.nextTemplateId = state.nextTemplateId;
+    this.leaderboardCache = null;
+    this.audit.loadSnapshot(state.audit);
+  }
+
   /** Seed a few demo engagements so the API is explorable out of the box. */
   seed(): this {
     const a = this.create({
@@ -1701,6 +1730,18 @@ export class EscrowStore {
     this.rate(b.id, 5);
     return this;
   }
+}
+
+export interface StoreInternalState {
+  contracts: InternalContract[];
+  templates: InternalTemplate[];
+  reputation: Record<string, ReputationRecord>;
+  clientReputation: Record<string, ReputationRecord>;
+  reviews: Review[];
+  nextId: number;
+  nextReviewId: number;
+  nextTemplateId: number;
+  audit: AuditSnapshot;
 }
 
 export const LIST_STATUSES: ContractStatus[] = ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'];

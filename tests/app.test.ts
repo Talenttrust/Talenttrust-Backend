@@ -501,6 +501,34 @@ describe('unfunded contract edits and withdrawal', () => {
       .expect((r) => expect(r.body).toMatchObject({ error: 'contract_locked', message: 'Contract can only be withdrawn before funding' }));
   });
 
+  it('uses the injected clock for edits and reviews', async () => {
+    const fixed = '2025-03-04T05:06:07.000Z';
+    const store = new EscrowStore(() => new Date(fixed));
+    const clockedApp = createApp(store);
+    const created = await request(clockedApp)
+      .post('/api/v1/contracts')
+      .send({ client: 'GCLOCKCLIENT', freelancer: 'GCLOCKFREELANCER', title: 'Before', milestones: [{ amount: 100 }] })
+      .expect(201);
+    const contractPath = `/api/v1/contracts/${created.body.id}`;
+
+    const edited = await request(clockedApp)
+      .patch(contractPath)
+      .send({ client: 'GCLOCKCLIENT', title: 'After' })
+      .expect(200);
+    expect(edited.body.updatedAt).toBe(fixed);
+    const revisions = await request(clockedApp).get(`${contractPath}/revisions`).expect(200);
+    expect(revisions.body).toHaveLength(1);
+    expect(revisions.body[0].at).toBe(fixed);
+
+    await request(clockedApp).post(`${contractPath}/deposit`).send({ amount: 100 }).expect(200);
+    await request(clockedApp).post(`${contractPath}/milestones/0/release`).expect(200);
+    const review = await request(clockedApp)
+      .post(`${contractPath}/reviews`)
+      .send({ reviewer: 'GCLOCKCLIENT', rating: 5 })
+      .expect(201);
+    expect(review.body.createdAt).toBe(fixed);
+  });
+
   it('keeps only the most recent 50 revisions', async () => {
     const created = await createContract().expect(201);
     const contractPath = `/api/v1/contracts/${created.body.id}`;

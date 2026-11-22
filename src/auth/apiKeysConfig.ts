@@ -7,6 +7,11 @@
  * [{ "id": "ops-1", "hash": "sha256:<hex-digest>", "scopes": ["disputes:resolve", "admin:read"] }]
  * ```
  *
+ * An entry may also carry an optional ISO 8601 `expiresAt`
+ * (`"2027-01-31T00:00:00Z"`, or a date such as `"2027-01-31"`, read as UTC
+ * midnight). From that instant on the key is rejected with 401. A malformed
+ * value fails startup with the key id in the message.
+ *
  * Keys themselves are never stored — only `sha256(key)`. Invalid JSON,
  * unknown scopes, or duplicate ids fail fast at startup with a clear error.
  */
@@ -24,6 +29,11 @@ export interface ApiKeyConfigEntry {
   hash: string;
   /** Scopes granted to this key. */
   scopes: string[];
+  /**
+   * Optional expiry, normalised to an ISO 8601 UTC string. The key is
+   * rejected from this instant on. Absent means the key never expires.
+   */
+  expiresAt?: string;
 }
 
 /**
@@ -60,13 +70,40 @@ export function extractDigest(hashField: string): string | null {
   return digest.toLowerCase();
 }
 
+/** ISO 8601 date (`YYYY-MM-DD`) or date-time with an explicit `Z` or `±HH:MM` offset. */
+const ISO_8601 =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+
+/**
+ * Parse an `expiresAt` value. Returns the instant in ms since the epoch, or
+ * `null` when the value is not a real ISO 8601 date or date-time. A date-time
+ * must carry a timezone (`Z` or an offset) so it means the same instant on
+ * every server; a bare date is read as UTC midnight.
+ */
+export function parseExpiresAt(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const m = ISO_8601.exec(value.trim());
+  if (!m) return null;
+  const ms = Date.parse(value.trim());
+  if (!Number.isFinite(ms)) return null;
+  // Reject calendar overflow such as 2027-02-30, which Date would roll over.
+  const [, y, mo, d, h, mi, s] = m;
+  const month = Number(mo);
+  const day = Number(d);
+  const daysInMonth = new Date(Date.UTC(Number(y), month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth) return null;
+  if (h !== undefined && (Number(h) > 23 || Number(mi) > 59 || (s !== undefined && Number(s) > 59))) return null;
+  return ms;
+}
+
 /**
  * Parse and validate the `API_KEYS` environment variable value.
  *
  * @param rawValue - The raw string value of `API_KEYS` (may be undefined/empty).
  * @returns A {@link ParsedApiKeys} object. Empty input yields an empty store.
  * @throws {Error} when the JSON is malformed, contains unknown scopes,
- *                 has duplicate ids, or individual entries are malformed.
+ *                 has duplicate ids, individual entries are malformed, or an
+ *                 `expiresAt` is not a valid ISO 8601 date or date-time.
  */
 export function parseApiKeysConfig(rawValue: string | undefined): ParsedApiKeys {
   // Empty or undefined → no keys configured (open access denied for scoped routes).
@@ -141,7 +178,20 @@ export function parseApiKeysConfig(rawValue: string | undefined): ParsedApiKeys 
       scopes.push(s);
     }
 
+    // expiresAt (optional; null is the same as absent)
+    let expiresAt: string | undefined;
+    if (obj['expiresAt'] !== undefined && obj['expiresAt'] !== null) {
+      const ms = parseExpiresAt(obj['expiresAt']);
+      if (ms === null) {
+        throw new Error(
+          `API_KEYS: entry "${id}" has an invalid "expiresAt" — expected an ISO 8601 date or date-time with a timezone, e.g. "2027-01-31T00:00:00Z"`,
+        );
+      }
+      expiresAt = new Date(ms).toISOString();
+    }
+
     const entry_: ApiKeyConfigEntry = { id, hash: obj['hash'], scopes };
+    if (expiresAt !== undefined) entry_.expiresAt = expiresAt;
     keys.push(entry_);
     byDigest.set(digest, entry_);
   }
