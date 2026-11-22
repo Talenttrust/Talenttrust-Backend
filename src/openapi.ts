@@ -556,15 +556,24 @@ const spec = {
     '/api/v1/auth/whoami': {
       get: {
         tags: ['Auth'],
-        summary: 'Show the scoped API key in use (id and scopes)',
+        summary: 'Show the scoped API key in use (id, scopes and expiry)',
         security: [{ apiKey: [] }],
         responses: {
-          ...ok('Key id and scopes', {
+          ...ok('Key id, scopes and expiry', {
             type: 'object',
-            required: ['keyId', 'scopes'],
-            properties: { keyId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+            required: ['keyId', 'scopes', 'expiresAt'],
+            properties: {
+              keyId: { type: 'string' },
+              scopes: { type: 'array', items: { type: 'string' } },
+              expiresAt: {
+                type: 'string',
+                format: 'date-time',
+                nullable: true,
+                description: 'When the key stops working (ISO 8601 UTC); null for a key that never expires.',
+              },
+            },
           }),
-          401: errorResponse('Missing or invalid API key'),
+          401: errorResponse('Missing, invalid or expired API key'),
         },
       },
     },
@@ -745,6 +754,7 @@ const spec = {
               type: 'object',
               properties: {
                 processed: { type: 'integer' },
+                pages: { type: 'integer' },
                 cursor: { type: 'string' },
                 latestLedger: { type: 'integer' },
               },

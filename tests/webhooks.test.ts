@@ -1,9 +1,17 @@
 import http from 'http';
+import { lookup } from 'dns/promises';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { StoreEventEmitter } from '../src/events';
 import { EscrowStore } from '../src/store';
 import { validateWebhookUrl, verifyWebhookSignature, WebhookManager } from '../src/webhooks';
+
+jest.mock('dns/promises', () => {
+  const actual = jest.requireActual('dns/promises');
+  return { ...actual, lookup: jest.fn(actual.lookup) };
+});
+
+const lookupMock = lookup as unknown as jest.Mock;
 
 const event = (eventType: 'milestone.released' = 'milestone.released') => ({
   id: 'event-id', eventId: 'event-id', eventType, timestamp: new Date().toISOString(), data: { contractId: 1 },
@@ -130,6 +138,97 @@ describe('webhook delivery', () => {
     expect(Date.now() - started).toBeLessThan(100);
     await waitFor(() => client.mock.calls.length === 1);
     resolveDelivery();
+  });
+});
+
+describe('webhook reserved address ranges', () => {
+  const rejectedIpv4 = [
+    // Newly prohibited ranges, including their boundaries.
+    '192.0.0.1', '192.0.0.255',
+    '192.0.2.1', '192.0.2.255',
+    '198.18.0.1', '198.19.255.255',
+    '198.51.100.1', '198.51.100.255',
+    '203.0.113.1', '203.0.113.255',
+    '224.0.0.1', '239.255.255.255',
+    '240.0.0.1', '255.255.255.254', '255.255.255.255',
+    // Existing private/reserved protections.
+    '0.0.0.0', '10.0.0.1', '100.64.0.1', '127.0.0.1',
+    '169.254.169.254', '172.16.0.1', '172.31.255.255', '192.168.1.1',
+  ];
+
+  it.each(rejectedIpv4)('rejects IPv4 %s', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  const acceptedIpv4 = [
+    '8.8.8.8', '1.1.1.1', '93.184.216.34',
+    // Just outside each newly prohibited range.
+    '192.0.1.1', '192.0.3.1', '198.17.255.255', '198.20.0.1', '198.51.101.1', '203.0.114.1', '223.255.255.255',
+  ];
+
+  it.each(acceptedIpv4)('keeps public IPv4 %s accepted', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).resolves.toBeInstanceOf(URL);
+  });
+
+  const rejectedIpv6 = [
+    // Newly prohibited ranges: multicast, site-local, NAT64, plus compressed/expanded equivalents.
+    '[ff00::]', '[ff02::1]', '[ffff::1]',
+    '[fec0::1]', '[feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]',
+    '[64:ff9b::1]', '[64:ff9b::192.0.2.1]', '[0064:ff9b:0000:0000:0000:0000:0000:0001]',
+    // Boundary neighbours of the link-local and site-local blocks.
+    '[fe80::1]', '[febf:ffff::1]',
+    // IPv4-mapped and IPv4-compatible bypass attempts.
+    '[::ffff:127.0.0.1]', '[::ffff:10.0.0.1]', '[::ffff:192.168.0.1]', '[::ffff:169.254.169.254]',
+    '[0:0:0:0:0:ffff:7f00:1]', '[::ffff:7f00:1]', '[::7f00:1]',
+    // Existing protections.
+    '[::]', '[::1]', '[fc00::1]', '[fd12:3456::1]', '[2001:db8::1]',
+  ];
+
+  it.each(rejectedIpv6)('rejects IPv6 %s', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  const acceptedIpv6 = [
+    '[2606:4700:4700::1111]', '[2001:4860:4860::8888]', '[2a00:1450:4001:80f::200e]', '[::ffff:8.8.8.8]',
+  ];
+
+  it.each(acceptedIpv6)('keeps public IPv6 %s accepted', async (address) => {
+    await expect(validateWebhookUrl(`https://${address}/hook`, false)).resolves.toBeInstanceOf(URL);
+  });
+
+  it('rejects hostnames whose DNS results are prohibited addresses', async () => {
+    const resolved: Array<{ address: string; family: number }> = [
+      { address: '224.0.0.1', family: 4 },
+      { address: '198.51.100.7', family: 4 },
+      { address: 'ff02::1', family: 6 },
+      { address: 'fec0::1', family: 6 },
+      { address: '64:ff9b::1', family: 6 },
+      { address: '::ffff:10.0.0.1', family: 6 },
+    ];
+    for (const record of resolved) {
+      lookupMock.mockResolvedValueOnce([record]);
+      await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    }
+  });
+
+  it('accepts a hostname when every DNS result is public', async () => {
+    lookupMock.mockResolvedValueOnce([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toBeInstanceOf(URL);
+  });
+
+  it('fails safely for malformed IP literals', async () => {
+    await expect(validateWebhookUrl('https://[not-an-ip]/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    await expect(validateWebhookUrl('https://[::gggg]/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+    lookupMock.mockRejectedValueOnce(new Error('ENOTFOUND'));
+    await expect(validateWebhookUrl('https://999.999.999.999/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  it('rejects a hostname whose DNS lookup fails', async () => {
+    lookupMock.mockRejectedValueOnce(new Error('ENOTFOUND'));
+    await expect(validateWebhookUrl('https://does-not-exist.example/hook', false)).rejects.toMatchObject({ code: 'invalid_url' });
   });
 });
 
