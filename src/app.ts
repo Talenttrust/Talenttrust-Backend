@@ -29,7 +29,14 @@ import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './h
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
-import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
+import {
+  DEFAULT_WEBHOOK_HISTORY_LIMIT,
+  isWebhookAdminTokenValid,
+  MAX_WEBHOOK_HISTORY_LIMIT,
+  WEBHOOK_DELIVERY_STATUSES,
+  WebhookDeliveryStatus,
+  WebhookManager,
+} from './webhooks';
 import { type ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
 import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
@@ -1401,6 +1408,26 @@ export function createApp(
       throw new HttpError(401, 'unauthorized', 'Webhook administration authentication is required');
     }
   };
+  /** `?limit=` on delivery history: an integer from 1 to 100, defaulting to 50. */
+  const webhookHistoryLimit = (raw: unknown): number => {
+    if (raw === undefined) return DEFAULT_WEBHOOK_HISTORY_LIMIT;
+    if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    const limit = Number(raw);
+    if (limit < 1 || limit > MAX_WEBHOOK_HISTORY_LIMIT) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    return limit;
+  };
+  /** `?status=` on delivery history: pending, success or failed. */
+  const webhookHistoryStatus = (raw: unknown): WebhookDeliveryStatus | undefined => {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string' || !WEBHOOK_DELIVERY_STATUSES.includes(raw as WebhookDeliveryStatus)) {
+      throw new HttpError(400, 'invalid_status', `status must be one of ${WEBHOOK_DELIVERY_STATUSES.join(', ')}`);
+    }
+    return raw as WebhookDeliveryStatus;
+  };
   const webhookRouter = express.Router();
   webhookRouter.post(
     '/',
@@ -1450,7 +1477,12 @@ export function createApp(
     '/:id/deliveries',
     wrap((req) => {
       webhookAuth(req);
-      return { data: webhooks.history(req.params.id) };
+      return {
+        data: webhooks.history(req.params.id, {
+          limit: webhookHistoryLimit(req.query.limit),
+          status: webhookHistoryStatus(req.query.status),
+        }),
+      };
     }),
   );
   v1.use('/webhook-subscriptions', webhookRouter);
