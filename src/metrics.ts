@@ -68,27 +68,35 @@ export class Gauge {
 
 export class Histogram {
   private entries = new Map<string, { labels: LabelSet; buckets: Map<string, number>; count: number; sum: number }>();
+  private sortedBuckets: number[];
   constructor(
     public name: string,
     public help: string,
     public labelNames: string[],
     public buckets: number[],
-  ) {}
+  ) {
+    this.sortedBuckets = [...buckets].sort((a, b) => a - b);
+  }
   observe(labels: LabelSet, value: number): void {
     const key = canonicalKey(this.labelNames, labels);
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { labels: { ...labels }, buckets: new Map(), count: 0, sum: 0 };
+      const initialBuckets = new Map<string, number>();
+      for (const le of this.sortedBuckets) {
+        initialBuckets.set(String(le), 0);
+      }
+      initialBuckets.set('+Inf', 0);
+      entry = { labels: { ...labels }, buckets: initialBuckets, count: 0, sum: 0 };
       this.entries.set(key, entry);
     }
     entry.count += 1;
     entry.sum += value;
-    for (const le of this.buckets) {
+    for (const le of this.sortedBuckets) {
       if (value <= le) {
         entry.buckets.set(String(le), (entry.buckets.get(String(le)) ?? 0) + 1);
       }
     }
-    entry.buckets.set('+Inf', (entry.buckets.get('+Inf') ?? 0) + 1);
+    entry.buckets.set('+Inf', entry.count);
   }
   exposition(): MetricSample[] {
     const samples: MetricSample[] = [];
