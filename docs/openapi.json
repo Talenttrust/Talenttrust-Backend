@@ -2203,7 +2203,7 @@
         "tags": [
           "Auth"
         ],
-        "summary": "Show the scoped API key in use (id and scopes)",
+        "summary": "Show the scoped API key in use (id, scopes and expiry)",
         "security": [
           {
             "apiKey": []
@@ -2211,14 +2211,15 @@
         ],
         "responses": {
           "200": {
-            "description": "Key id and scopes",
+            "description": "Key id, scopes and expiry",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "required": [
                     "keyId",
-                    "scopes"
+                    "scopes",
+                    "expiresAt"
                   ],
                   "properties": {
                     "keyId": {
@@ -2229,6 +2230,12 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "When the key stops working (ISO 8601 UTC); null for a key that never expires."
                     }
                   }
                 }
@@ -2236,7 +2243,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid API key",
+            "description": "Missing, invalid or expired API key",
             "content": {
               "application/json": {
                 "schema": {
@@ -6769,7 +6776,7 @@
           "Reputation"
         ],
         "summary": "Ranked freelancer leaderboard (Bayesian score)",
-        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.",
+        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.",
         "parameters": [
           {
             "name": "sort",
@@ -6809,7 +6816,25 @@
             "schema": {
               "type": "string"
             },
-            "description": "page.nextCursor from the previous page (same sort)"
+            "description": "page.nextCursor from the previous page (same sort and time window)"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays"
+          },
+          {
+            "name": "windowDays",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Rolling lookback window in days (positive integer); mutually exclusive with since"
           }
         ],
         "responses": {
@@ -6847,7 +6872,7 @@
             }
           },
           "400": {
-            "description": "invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor",
+            "description": "invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since",
             "content": {
               "application/json": {
                 "schema": {

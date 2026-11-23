@@ -1290,6 +1290,8 @@ export function createApp(
         minCompleted: req.query.minCompleted,
         limit: req.query.limit,
         cursor: req.query.cursor,
+        since: req.query.since,
+        windowDays: req.query.windowDays,
       }),
     ),
   );

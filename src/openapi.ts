@@ -1291,12 +1291,25 @@ const spec = {
         summary: 'Ranked freelancer leaderboard (Bayesian score)',
         description:
           'score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there ' +
-          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.',
+          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. ' +
+          'Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.',
         parameters: [
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['score', 'completed', 'average'], default: 'score' } },
           { name: 'minCompleted', in: 'query', schema: { type: 'integer', minimum: 0, default: 1 } },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort)' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort and time window)' },
+          {
+            name: 'since',
+            in: 'query',
+            schema: { type: 'string', format: 'date-time' },
+            description: 'ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays',
+          },
+          {
+            name: 'windowDays',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1 },
+            description: 'Rolling lookback window in days (positive integer); mutually exclusive with since',
+          },
         ],
         responses: {
           ...ok('Leaderboard page', {
@@ -1309,7 +1322,7 @@ const spec = {
               },
             },
           }),
-          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor'),
+          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since'),
         },
       },
     },
