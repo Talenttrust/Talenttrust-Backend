@@ -7,7 +7,7 @@ import * as sdk from '@stellar/stellar-sdk';
 import { xdr } from '@stellar/stellar-sdk';
 import { EventStore, IndexerState, IndexedEvent, RunOnceOptions, RunOnceResult } from './types';
 import { decodeEvent } from './decode';
-import { config } from '../config';
+import { config, nonNegativeIntEnv } from '../config';
 
 const RPC_RETENTION_LEDGERS = 17280;
 const DEFAULT_LIMIT = 100;
@@ -53,6 +53,7 @@ export class EventIndexer {
     this.store = store;
     // Soroban RPC client (constructing it does no I/O; tests replace it with a fake).
     this.rpc = new sdk.rpc.Server(rpcUrl || config.rpcUrl, { allowHttp: (rpcUrl || config.rpcUrl).startsWith('http://') });
+    this.getStartLedger();
   }
 
   async runOnce(options: RunOnceOptions = {}): Promise<RunOnceResult> {
@@ -186,10 +187,10 @@ export class EventIndexer {
     };
   }
 
-  private getStartLedger(): number {
-    const envStart = process.env.INDEXER_START_LEDGER;
-    if (envStart) {
-      return Number(envStart);
+  getStartLedger(): number {
+    const envStart = nonNegativeIntEnv('INDEXER_START_LEDGER');
+    if (envStart !== undefined) {
+      return envStart;
     }
 
     if (this.latestLedger > 0) {

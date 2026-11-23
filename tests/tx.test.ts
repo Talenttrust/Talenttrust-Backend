@@ -17,7 +17,15 @@ import {
 import { createApp } from '../src/app';
 import { config } from '../src/config';
 import { EscrowStore } from '../src/store';
-import { BoundedLru, ESCROW_MUTATING_FUNCTIONS, RpcClient, TxRelay } from '../src/tx';
+import {
+  BoundedLru,
+  ESCROW_ERRORS,
+  ESCROW_MUTATING_FUNCTIONS,
+  RpcClient,
+  TxRelay,
+  decodeContractError,
+} from '../src/tx';
+import { contractErrorFromMessage } from '../src/stellar/escrowErrors';
 
 const ESCROW_ID = config.contractId;
 const WRONG_CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
@@ -468,6 +476,36 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
           code: 9,
         },
       });
+    });
+
+    it('maps escrow error code 13 to InsufficientFunds in both decoders', () => {
+      const failed = {
+        status: rpc.Api.GetTransactionStatus.FAILED,
+        returnValue: xdr.ScVal.scvError(xdr.ScError.sceContract(13)),
+      } as rpc.Api.GetTransactionResponse;
+
+      expect(decodeContractError(failed)).toEqual({
+        name: 'InsufficientFunds',
+        code: 13,
+      });
+      expect(contractErrorFromMessage('Error(Contract, #13)')).toEqual({
+        name: 'InsufficientFunds',
+        code: 13,
+      });
+
+      for (let code = 1; code <= 16; code++) {
+        const name = ESCROW_ERRORS[code];
+        expect(
+          decodeContractError({
+            status: rpc.Api.GetTransactionStatus.FAILED,
+            returnValue: xdr.ScVal.scvError(xdr.ScError.sceContract(code)),
+          } as rpc.Api.GetTransactionResponse),
+        ).toEqual({ name, code });
+        expect(contractErrorFromMessage(`Error(Contract, #${code})`)).toEqual({
+          name,
+          code,
+        });
+      }
     });
 
     it('GET /api/v1/tx/:hash handles NOT_FOUND (for unknown hash) and PENDING (for relayed hash)', async () => {

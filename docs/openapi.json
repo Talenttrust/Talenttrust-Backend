@@ -621,6 +621,9 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -637,19 +640,7 @@
             "description": "Updated subscription"
           },
           "400": {
-            "description": "Invalid update",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Unauthorized",
@@ -683,6 +674,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -719,11 +716,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "200": {
             "description": "Deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Unauthorized",
@@ -757,6 +760,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1212,6 +1221,9 @@
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1236,19 +1248,7 @@
             }
           },
           "400": {
-            "description": "Invalid template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "403": {
             "description": "Not the owner",
@@ -1282,6 +1282,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1315,6 +1321,9 @@
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1342,6 +1351,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "403": {
             "description": "Not the owner",
@@ -1375,6 +1387,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -4394,6 +4412,9 @@
             }
           },
           {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
             "name": "If-Match",
             "in": "header",
             "required": false,
@@ -4497,19 +4518,7 @@
             }
           },
           "400": {
-            "description": "Empty patch, invalid contract id, or invalid milestones",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -4560,19 +4569,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "description": "Contract is funded or no longer editable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IdempotencyConflict"
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -4603,6 +4600,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
@@ -4659,6 +4659,9 @@
             }
           },
           {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
             "name": "If-Match",
             "in": "header",
             "required": false,
@@ -4691,19 +4694,7 @@
             "description": "Contract withdrawn"
           },
           "400": {
-            "description": "Invalid contract id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -4754,19 +4745,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "description": "Contract is funded or no longer withdrawable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IdempotencyConflict"
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -4797,6 +4776,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
@@ -6756,7 +6738,7 @@
           "Reputation"
         ],
         "summary": "Ranked freelancer leaderboard (Bayesian score)",
-        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.",
+        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.",
         "parameters": [
           {
             "name": "sort",
@@ -6796,7 +6778,25 @@
             "schema": {
               "type": "string"
             },
-            "description": "page.nextCursor from the previous page (same sort)"
+            "description": "page.nextCursor from the previous page (same sort and time window)"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays"
+          },
+          {
+            "name": "windowDays",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Rolling lookback window in days (positive integer); mutually exclusive with since"
           }
         ],
         "responses": {
@@ -6834,7 +6834,7 @@
             }
           },
           "400": {
-            "description": "invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor",
+            "description": "invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since",
             "content": {
               "application/json": {
                 "schema": {
@@ -7121,7 +7121,7 @@
         "name": "Idempotency-Key",
         "in": "header",
         "required": false,
-        "description": "1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.",
+        "description": "1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.",
         "schema": {
           "type": "string",
           "minLength": 1,

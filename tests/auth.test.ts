@@ -46,6 +46,8 @@ describe('wallet-signature auth', () => {
       expect(res.body.address).toBe(kp.publicKey());
       expect(res.body.challenge).toMatch(/^talenttrust-auth:/);
       expect(res.body.expiresAt).toBeDefined();
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['pragma']).toBe('no-cache');
     });
 
     it('returns 400 for an invalid address', async () => {
@@ -53,6 +55,7 @@ describe('wallet-signature auth', () => {
       const res = await request(app).get('/api/v1/auth/challenge?address=not-a-stellar-address');
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('invalid_address');
+      expect(res.headers['cache-control']).toBe('no-store');
     });
 
     it('returns 400 when address is missing', async () => {
@@ -77,6 +80,26 @@ describe('wallet-signature auth', () => {
       // Verify the token works on a protected route
       const contractsRes = await request(app).get('/api/v1/contracts');
       expect(contractsRes.status).toBe(200);
+    });
+
+    it('marks the token response no-store on success and error', async () => {
+      const { app } = makeApp();
+      const kp = Keypair.random();
+      const challengeRes = await request(app).get(`/api/v1/auth/challenge?address=${kp.publicKey()}`);
+      const { challenge } = challengeRes.body;
+      const sig = Buffer.from(kp.sign(Buffer.from(challenge, 'utf-8'))).toString('base64');
+
+      const ok = await request(app)
+        .post('/api/v1/auth/token')
+        .send({ address: kp.publicKey(), challenge, signature: sig });
+      expect(ok.status).toBe(200);
+      expect(ok.headers['cache-control']).toBe('no-store');
+      expect(ok.headers['pragma']).toBe('no-cache');
+
+      const bad = await request(app).post('/api/v1/auth/token').send({ address: kp.publicKey() });
+      expect(bad.status).toBe(400);
+      expect(bad.headers['cache-control']).toBe('no-store');
+      expect(bad.headers['pragma']).toBe('no-cache');
     });
 
     it('returns 401 invalid_challenge for a tampered challenge', async () => {

@@ -1,11 +1,15 @@
 import { createHash } from 'crypto';
 import { NextFunction, Request, Response } from 'express';
 import { HttpError } from './store';
+import { verifyWalletToken } from './auth/jwt';
+import type { ParsedApiKeys } from './auth/apiKeysConfig';
+import { extractApiKeyFromHeaders, matchApiKey } from './auth/scopedApiKeyMiddleware';
 
 export interface StoredResponse {
   fingerprint: string;
   status: number;
   body: unknown;
+  noBody?: boolean;
   headers: Record<string, string>;
   createdAt: number;
 }
@@ -81,17 +85,48 @@ export function canonicalize(v: unknown): unknown {
 
 export const fingerprint = (body: unknown) =>
   createHash('sha256')
-    .update(JSON.stringify(canonicalize(body ?? {})))
+    .update(JSON.stringify(canonicalize(body === undefined || body === null || body === '' ? {} : body)))
     .digest('hex');
 
+const IDEMPOTENT_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 const KEY_RE = /^[\x20-\x7e]{1,255}$/;
 /** Response headers stored with the response and restored verbatim on replay (matched case-insensitively). */
 const REPLAY_HEADERS = ['location', 'etag', 'receipt'];
 
-const principalOf = (req: Request): string | null => {
+const principalOf = (req: Request, opts: IdempotencyOptions): string | null => {
   const id = (req as Request & { user?: { id?: unknown } }).user?.id;
-  return id === undefined || id === null ? null : String(id);
+  if (id !== undefined && id !== null) return String(id);
+
+  const authorization = req.headers.authorization;
+  if (opts.authSecret && typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+    try {
+      const result = verifyWalletToken(authorization.slice(7).trim(), opts.authSecret, opts.now);
+      if (result.ok) return `wallet:${result.address}`;
+    } catch {
+      // Invalid credentials are left for requireAuth to reject after this middleware.
+    }
+  }
+
+  if (opts.apiKeys) {
+    const rawKey = extractApiKeyFromHeaders(req.headers as Record<string, string | string[] | undefined>);
+    if (rawKey) {
+      try {
+        const matched = matchApiKey(opts.apiKeys, rawKey);
+        if (matched) return `api-key:${matched.id}`;
+      } catch {
+        // An unrecognized key remains anonymous; route middleware handles auth.
+      }
+    }
+  }
+  return null;
 };
+
+export interface IdempotencyOptions {
+  required?: boolean;
+  authSecret?: string;
+  now?: () => number;
+  apiKeys?: ParsedApiKeys;
+}
 
 const pickHeaders = (res: Response) => {
   const out: Record<string, string> = {};
@@ -102,13 +137,13 @@ const pickHeaders = (res: Response) => {
   return out;
 };
 
-export function idempotency(store: IdempotencyStore, opts: { required?: boolean } = {}) {
+export function idempotency(store: IdempotencyStore, opts: IdempotencyOptions = {}) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (req.method !== 'POST') return next();
+    if (!IDEMPOTENT_METHODS.has(req.method)) return next();
     try {
       const key = req.header('Idempotency-Key');
       if (key === undefined) {
-        if (opts.required) {
+        if (opts.required && req.method === 'POST') {
           throw new HttpError(400, 'idempotency_key_required', 'Idempotency-Key header is required on POST');
         }
         return next();
@@ -117,7 +152,7 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         throw new HttpError(400, 'invalid_idempotency_key', 'Idempotency-Key must be 1-255 printable ASCII characters');
       }
 
-      const scope = JSON.stringify([req.method, req.baseUrl + req.path, principalOf(req), key]);
+      const scope = JSON.stringify([req.method, req.baseUrl + req.path, principalOf(req, opts), key]);
       const fp = fingerprint(req.body);
 
       const replay = (hit: StoredResponse) => {
@@ -126,7 +161,11 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         }
         for (const [h, v] of Object.entries(hit.headers)) res.setHeader(h, v);
         res.setHeader('Idempotent-Replayed', 'true');
-        res.status(hit.status).json(hit.body);
+        if (hit.noBody) {
+          res.status(hit.status).end();
+        } else {
+          res.status(hit.status).json(hit.body);
+        }
       };
 
       const hit = await store.get(scope);
@@ -152,8 +191,10 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
       };
       res.on('close', () => void release()); // client abort or error path
 
+      let handled = false;
       const send = res.json.bind(res);
       res.json = ((payload: unknown) => {
+        handled = true;
         const status = res.statusCode;
         const stored: StoredResponse | undefined =
           status < 500
@@ -177,6 +218,36 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         })();
         return res;
       }) as Response['json'];
+
+      const end = res.end.bind(res);
+      res.end = ((...args: Parameters<Response['end']>) => {
+        if (handled) return end(...args);
+        const hasChunk = args.length > 0 && args[0] !== undefined && args[0] !== null && typeof args[0] !== 'function';
+        if (hasChunk) return end(...args);
+        handled = true;
+        const status = res.statusCode;
+        const stored: StoredResponse | undefined =
+          status < 500
+            ? {
+                fingerprint: fp,
+                status,
+                body: null,
+                noBody: true,
+                headers: pickHeaders(res),
+                createdAt: Date.now(),
+              }
+            : undefined;
+        void (async () => {
+          try {
+            if (stored) await store.set(scope, stored);
+          } catch {
+            /* fail open: the response is still sent */
+          }
+          await release();
+          end(...args);
+        })();
+        return res;
+      }) as Response['end'];
 
       next();
     } catch (err) {

@@ -3,6 +3,8 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { MemoryIdempotencyStore, StoredResponse, fingerprint, idempotency } from '../src/idempotency';
+import { Keypair } from '@stellar/stellar-sdk';
+import { authHeader } from './helpers/auth';
 
 type App = ReturnType<typeof createApp>;
 const parties = { client: 'GA', freelancer: 'GB' };
@@ -204,8 +206,141 @@ describe('Idempotency-Key', () => {
     const r = await create(strict);
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('idempotency_key_required');
-    await create(strict).set('Idempotency-Key', 'k').expect(201);
+    const created = await create(strict).set('Idempotency-Key', 'k').expect(201);
     await request(strict).get('/api/v1/contracts').expect(200);
+    // PATCH, PUT and DELETE do not require Idempotency-Key even when IDEMPOTENCY_REQUIRED=true.
+    await request(strict)
+      .patch(`/api/v1/contracts/${created.body.id}`)
+      .send({ client: 'GA', title: 'Updated' })
+      .expect(200);
+    await request(strict)
+      .delete(`/api/v1/contracts/${created.body.id}`)
+      .send({ client: 'GA' })
+      .expect(204);
+    const tpl = await request(strict)
+      .post('/api/v1/templates')
+      .set('Idempotency-Key', 'tpl-create')
+      .send({ owner: 'GA', name: 'Plan', mode: 'fixed', milestones: [{ amount: 100 }] })
+      .expect(201);
+    await request(strict)
+      .put(`/api/v1/templates/${tpl.body.id}`)
+      .send({ owner: 'GA', name: 'Renamed' })
+      .expect(200);
+    await request(strict)
+      .delete(`/api/v1/templates/${tpl.body.id}`)
+      .send({ owner: 'GA' })
+      .expect(200);
+  });
+
+  it('replays a retried PATCH contract edit without re-applying', async () => {
+    const { body: c } = await create(app, [100]).expect(201);
+    const url = `/api/v1/contracts/${c.id}`;
+    const body = { client: 'GA', title: 'Revised title' };
+    const first = await request(app).patch(url).set('Idempotency-Key', 'patch-1').send(body).expect(200);
+    const second = await request(app).patch(url).set('Idempotency-Key', 'patch-1').send(body).expect(200);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+    expect(second.headers.etag).toBe(first.headers.etag);
+    expect(store.get(c.id).revision).toBe(2);
+    // Reusing the same key with a different PATCH body returns 422.
+    const mismatch = await request(app)
+      .patch(url)
+      .set('Idempotency-Key', 'patch-1')
+      .send({ client: 'GA', title: 'Different title' })
+      .expect(422);
+    expect(mismatch.body.error).toBe('idempotency_key_reused');
+  });
+
+  it('replays a retried PUT template update without bumping version twice', async () => {
+    const { body: tpl } = await request(app)
+      .post('/api/v1/templates')
+      .send({ owner: 'GA', name: 'V1', mode: 'fixed', milestones: [{ amount: 100 }] })
+      .expect(201);
+    const url = `/api/v1/templates/${tpl.id}`;
+    const first = await request(app).put(url).set('Idempotency-Key', 'put-1').send({ owner: 'GA', name: 'V2' }).expect(200);
+    const second = await request(app).put(url).set('Idempotency-Key', 'put-1').send({ owner: 'GA', name: 'V2' }).expect(200);
+    expect(first.body.version).toBe(2);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+    expect(store.getTemplate(tpl.id).version).toBe(2);
+  });
+
+  it('replays 200 on a retried DELETE instead of returning 404', async () => {
+    const { body: tpl } = await request(app)
+      .post('/api/v1/templates')
+      .send({ owner: 'GA', name: 'ToDelete', mode: 'fixed', milestones: [{ amount: 100 }] })
+      .expect(201);
+    const url = `/api/v1/templates/${tpl.id}`;
+    const first = await request(app).delete(url).set('Idempotency-Key', 'del-tpl-1').send({ owner: 'GA' }).expect(200);
+    const second = await request(app).delete(url).set('Idempotency-Key', 'del-tpl-1').send({ owner: 'GA' }).expect(200);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+    // Without the idempotency key, the deleted template returns 404.
+    await request(app).delete(url).send({ owner: 'GA' }).expect(404);
+  });
+
+  it('replays 204 on a retried DELETE contract withdrawal instead of returning 404', async () => {
+    const { body: c } = await create(app, [100]).expect(201);
+    const url = `/api/v1/contracts/${c.id}`;
+    const first = await request(app).delete(url).set('Idempotency-Key', 'del-c-1').send({ client: 'GA' }).expect(204);
+    const second = await request(app).delete(url).set('Idempotency-Key', 'del-c-1').send({ client: 'GA' }).expect(204);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBe('true');
+  });
+
+  it('fingerprints empty DELETE body as {} and replays 200 instead of 404', async () => {
+    expect(fingerprint(undefined)).toBe(fingerprint({}));
+    expect(fingerprint(null)).toBe(fingerprint({}));
+    expect(fingerprint('')).toBe(fingerprint({}));
+
+    let exists = true;
+    const a = express();
+    a.use(express.json());
+    a.use(idempotency(new MemoryIdempotencyStore()));
+    a.delete('/api/v1/items/1', (_req, res) => {
+      if (!exists) {
+        res.status(404).json({ error: 'not_found' });
+        return;
+      }
+      exists = false;
+      res.status(200).json({ deleted: true });
+    });
+    const first = await request(a).delete('/api/v1/items/1').set('Idempotency-Key', 'del-empty').expect(200);
+    const second = await request(a).delete('/api/v1/items/1').set('Idempotency-Key', 'del-empty').expect(200);
+    expect(first.body).toEqual({ deleted: true });
+    expect(second.body).toEqual({ deleted: true });
+    expect(second.headers['idempotent-replayed']).toBe('true');
+  });
+
+  it('scopes keys by method+path so PATCH and DELETE on the same path do not collide', async () => {
+    const { body: c } = await create(app, [100]).expect(201);
+    const url = `/api/v1/contracts/${c.id}`;
+    const patched = await request(app)
+      .patch(url)
+      .set('Idempotency-Key', 'same-key')
+      .send({ client: 'GA', title: 'Edited' })
+      .expect(200);
+    const deleted = await request(app)
+      .delete(url)
+      .set('Idempotency-Key', 'same-key')
+      .send({ client: 'GA' })
+      .expect(204);
+    expect(patched.headers['idempotent-replayed']).toBeUndefined();
+    expect(deleted.headers['idempotent-replayed']).toBeUndefined();
+  });
+
+  it('leaves GET requests untouched even when Idempotency-Key is sent', async () => {
+    const { body: c } = await create(app, [100]).expect(201);
+    const url = `/api/v1/contracts/${c.id}`;
+    const first = await request(app).get(url).set('Idempotency-Key', 'get-key').expect(200);
+    await request(app).patch(url).send({ client: 'GA', title: 'Changed' }).expect(200);
+    const second = await request(app).get(url).set('Idempotency-Key', 'get-key').expect(200);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.headers['idempotent-replayed']).toBeUndefined();
+    expect(second.body.title).toBe('Changed');
   });
 
   it('treats reordered JSON keys as the same request', async () => {
@@ -244,6 +379,40 @@ describe('Idempotency-Key', () => {
     expect(bob.headers['idempotent-replayed']).toBeUndefined();
     expect(alice2.body).toEqual(alice.body);
     expect(alice2.headers['idempotent-replayed']).toBe('true');
+  });
+
+  it('scopes replay entries by wallet from the real challenge and token flow', async () => {
+    const authSecret = 'idempotency-test-secret-that-is-long-enough';
+    const walletApp = createApp({ store: new EscrowStore(), authSecret });
+    const alice = await authHeader(Keypair.random(), walletApp);
+    const bob = await authHeader(Keypair.random(), walletApp);
+    const body = { client: 'GA', freelancer: 'GB', milestones: [100] };
+    const post = (authorization: string) => request(walletApp)
+      .post('/api/v1/contracts')
+      .set('Authorization', authorization)
+      .set('Idempotency-Key', 'same-wallet-key')
+      .send(body);
+
+    const first = await post(alice.Authorization).expect(201);
+    const secondWallet = await post(bob.Authorization).expect(201);
+    const replay = await post(alice.Authorization).expect(201);
+
+    expect(secondWallet.headers['idempotent-replayed']).toBeUndefined();
+    expect(secondWallet.body.id).not.toBe(first.body.id);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect(replay.body.id).toBe(first.body.id);
+  });
+
+  it('does not fail idempotency processing for an invalid bearer token', async () => {
+    const authSecret = 'idempotency-test-secret-that-is-long-enough';
+    const walletApp = createApp({ store: new EscrowStore(), authSecret });
+    const response = await request(walletApp)
+      .post('/api/v1/contracts')
+      .set('Authorization', 'Bearer invalid-token')
+      .set('Idempotency-Key', 'invalid-bearer')
+      .send({ client: 'GA', freelancer: 'GB', milestones: [100] });
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe('unauthorized');
   });
 });
 
@@ -288,14 +457,23 @@ describe('MemoryIdempotencyStore', () => {
 });
 
 describe('OpenAPI', () => {
-  it('documents Idempotency-Key, 409 and 422 on every POST', async () => {
+  it('documents Idempotency-Key, 409 and 422 on every POST, PATCH, PUT and DELETE', async () => {
     const spec = (await request(createApp(new EscrowStore())).get('/openapi.json').expect(200)).body;
     expect(spec.openapi).toBe('3.0.3');
     expect(spec.components.parameters.IdempotencyKey.name).toBe('Idempotency-Key');
-    const posts = Object.entries<Record<string, any>>(spec.paths).filter(([, item]) => item.post); // eslint-disable-line @typescript-eslint/no-explicit-any
-    expect(posts).toHaveLength(17);
-    for (const [path, item] of posts) {
-      const op = item.post;
+    const methods = ['post', 'patch', 'put', 'delete'] as const;
+    const ops: Array<[string, string, Record<string, any>]> = []; // eslint-disable-line @typescript-eslint/no-explicit-any
+    for (const [path, item] of Object.entries<Record<string, any>>(spec.paths)) { // eslint-disable-line @typescript-eslint/no-explicit-any
+      for (const method of methods) {
+        if (item[method]) ops.push([path, method, item[method]]);
+      }
+      if (item.get) {
+        expect(item.get.parameters ?? []).not.toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
+      }
+    }
+    const counts = Object.fromEntries(methods.map((m) => [m, ops.filter(([, method]) => method === m).length]));
+    expect(counts).toEqual({ post: 17, patch: 2, put: 1, delete: 3 });
+    for (const [path, , op] of ops) {
       expect(op.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
       expect(Object.keys(op.responses)).toEqual(expect.arrayContaining(['400', '409', '422']));
       for (const r of Object.values<{ $ref?: string }>(op.responses)) {
