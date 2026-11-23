@@ -12,7 +12,7 @@
 
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
-import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
+import { AuditStore, type AuditAction, type AuditContext, type AuditSnapshot, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
 
@@ -75,7 +75,7 @@ export interface Template {
   updatedAt: string;
 }
 
-interface InternalTemplate extends Omit<Template, 'milestones'> {
+export interface InternalTemplate extends Omit<Template, 'milestones'> {
   milestones: Array<{ title: string; amount?: bigint; percentBps?: number }>;
 }
 
@@ -215,7 +215,7 @@ export interface ReputationPage {
   page: { limit: number; nextCursor: string | null; hasMore: boolean };
 }
 
-interface ReputationRecord {
+export interface ReputationRecord {
   completed: number;
   total: number;
   histogram: RatingHistogram;
@@ -242,10 +242,10 @@ const parsePriorWeight = (override?: number): number => {
   return Number.isFinite(n) && n >= 0 ? n : 5;
 };
 
-const encodeReputationCursor = (sort: ReputationSort, address: string): string =>
-  Buffer.from(JSON.stringify({ sort, address }), 'utf8').toString('base64url');
+const encodeReputationCursor = (sort: ReputationSort, address: string, windowKey = 'all'): string =>
+  Buffer.from(JSON.stringify({ sort, address, window: windowKey }), 'utf8').toString('base64url');
 
-const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort): string => {
+const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort, expectedWindow = 'all'): string => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
@@ -253,12 +253,15 @@ const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort): s
     throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
   }
   if (!parsed || typeof parsed !== 'object') throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
-  const { sort, address } = parsed as { sort?: unknown; address?: unknown };
-  if (sort !== expectedSort || typeof address !== 'string' || !address) {
+  const { sort, address, window: cursorWindow } = parsed as { sort?: unknown; address?: unknown; window?: unknown };
+  if (sort !== expectedSort || cursorWindow !== expectedWindow || typeof address !== 'string' || !address) {
     throw new HttpError(400, 'invalid_cursor', 'cursor does not match query');
   }
   return address;
 };
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+const MS_PER_DAY = 86_400_000;
 
 export type ReviewRole = 'client_to_freelancer' | 'freelancer_to_client';
 
@@ -355,7 +358,7 @@ const decodeDisputeCursor = (raw: string): DisputeCursor => {
 };
 
 /** Internal store record — keeps bigints for arithmetic. */
-interface InternalContract {
+export interface InternalContract {
   id: number;
   title: string;
   client: string;
@@ -498,6 +501,7 @@ export class EscrowStore {
   private reputation = new Map<string, ReputationRecord>();
   private clientReputation = new Map<string, ReputationRecord>();
   private leaderboardCache: LeaderboardCache | null = null;
+  private windowedLeaderboardCache = new Map<string, LeaderboardCache>();
   private priorWeightOverride?: number;
   private readonly clock: Clock;
   /** Domain events (webhooks), emitted only after a mutation succeeds. */
@@ -831,7 +835,7 @@ export class EscrowStore {
       }
     }
 
-    const at = new Date().toISOString();
+    const at = this.nowIso();
     if (title !== undefined) c.title = title;
     if (milestones && totalAmount !== undefined) {
       c.milestones = milestones;
@@ -993,7 +997,12 @@ export class EscrowStore {
     r.histogram[rating - 1] += 1;
     r.lastRatedAt = this.nowIso();
     map.set(address, r);
+    this.invalidateLeaderboardCache();
+  }
+
+  private invalidateLeaderboardCache() {
     this.leaderboardCache = null;
+    this.windowedLeaderboardCache.clear();
   }
 
   createReview(
@@ -1023,7 +1032,7 @@ export class EscrowStore {
       reviewee,
       role,
       rating,
-      createdAt: new Date().toISOString(),
+      createdAt: this.nowIso(),
     };
     if (comment !== undefined) review.comment = comment;
     if (c.status === 'Resolved') review.context = 'disputed';
@@ -1153,7 +1162,7 @@ export class EscrowStore {
       throw new HttpError(409, 'chain_mismatch', 'API contract does not match on-chain escrow parameters', { mismatches });
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     c.chain = { escrowId, linkedAt: now, lastVerifiedAt: now, status: 'in_sync', drift: [] };
     return this.touch(c);
   }
@@ -1221,7 +1230,7 @@ export class EscrowStore {
       }
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const parityStatus = drift.length > 0 ? 'drift' : 'in_sync';
     c.chain.lastVerifiedAt = now;
     c.chain.status = parityStatus;
@@ -1231,21 +1240,17 @@ export class EscrowStore {
     return { status: parityStatus, drift, checkedAt: now, latestLedger: result.latestLedger };
   }
 
-  /** Ranked leaderboard (freelancer ratings), cached until the next rating. */
-  private getLeaderboardCache(): LeaderboardCache {
-    const C = parsePriorWeight(this.priorWeightOverride);
-    if (this.leaderboardCache && this.leaderboardCache.priorWeight === C) return this.leaderboardCache;
-
+  private buildLeaderboardCache(reputationMap: Map<string, ReputationRecord>, C: number): LeaderboardCache {
     let globalTotal = 0;
     let globalCompleted = 0;
-    for (const r of this.reputation.values()) {
+    for (const r of reputationMap.values()) {
       globalTotal += r.total;
       globalCompleted += r.completed;
     }
     const m = globalCompleted > 0 ? globalTotal / globalCompleted : 3;
 
     const entries: Reputation[] = [];
-    for (const [address, r] of this.reputation.entries()) {
+    for (const [address, r] of reputationMap.entries()) {
       if (r.completed < 1) continue;
       entries.push({
         address,
@@ -1272,7 +1277,7 @@ export class EscrowStore {
       entry.rank = idx + 1;
       byAddress.set(entry.address, entry);
     });
-    this.leaderboardCache = {
+    return {
       priorWeight: C,
       globalMean: m,
       bySort: {
@@ -1282,7 +1287,76 @@ export class EscrowStore {
       },
       byAddress,
     };
-    return this.leaderboardCache;
+  }
+
+  /** Ranked leaderboard (freelancer ratings), cached per window until the next rating. */
+  private getLeaderboardCache(window?: { key: string; sinceMs: number }): LeaderboardCache {
+    const C = parsePriorWeight(this.priorWeightOverride);
+    if (!window) {
+      if (this.leaderboardCache && this.leaderboardCache.priorWeight === C) return this.leaderboardCache;
+      this.leaderboardCache = this.buildLeaderboardCache(this.reputation, C);
+      return this.leaderboardCache;
+    }
+
+    const cached = this.windowedLeaderboardCache.get(window.key);
+    if (cached && cached.priorWeight === C) return cached;
+
+    const windowedMap = new Map<string, ReputationRecord>();
+    for (const review of this.reviews) {
+      if (review.role !== 'client_to_freelancer') continue;
+      if (Date.parse(review.createdAt) < window.sinceMs) continue;
+      const rec = windowedMap.get(review.reviewee) ?? {
+        completed: 0,
+        total: 0,
+        histogram: [0, 0, 0, 0, 0] as RatingHistogram,
+        lastRatedAt: null,
+      };
+      rec.completed += 1;
+      rec.total += review.rating;
+      rec.histogram[review.rating - 1] += 1;
+      if (rec.lastRatedAt === null || review.createdAt > rec.lastRatedAt) {
+        rec.lastRatedAt = review.createdAt;
+      }
+      windowedMap.set(review.reviewee, rec);
+    }
+
+    const built = this.buildLeaderboardCache(windowedMap, C);
+    this.windowedLeaderboardCache.set(window.key, built);
+    return built;
+  }
+
+  private parseReputationWindow(sinceRaw: unknown, windowDaysRaw: unknown): { key: string; sinceMs: number } | undefined {
+    const hasSince = sinceRaw !== undefined && sinceRaw !== '';
+    const hasWindowDays = windowDaysRaw !== undefined && windowDaysRaw !== '';
+    if (hasSince && hasWindowDays) {
+      throw new HttpError(400, 'invalid_since', 'since and windowDays are mutually exclusive');
+    }
+    const nowMs = this.clock().getTime();
+    if (hasSince) {
+      if (typeof sinceRaw !== 'string' || !ISO_DATE_RE.test(sinceRaw)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid ISO 8601 date');
+      }
+      const ms = Date.parse(sinceRaw);
+      if (Number.isNaN(ms)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid ISO 8601 date');
+      }
+      if (sinceRaw.length === 10 && !new Date(ms).toISOString().startsWith(sinceRaw)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid calendar date');
+      }
+      if (ms > nowMs) {
+        throw new HttpError(400, 'invalid_since', 'since must not be in the future');
+      }
+      const canonical = new Date(ms).toISOString();
+      return { key: `since:${canonical}`, sinceMs: ms };
+    }
+    if (hasWindowDays) {
+      const n = Number(windowDaysRaw);
+      if (typeof windowDaysRaw !== 'string' || !Number.isInteger(n) || n < 1) {
+        throw new HttpError(400, 'invalid_since', 'windowDays must be a positive integer');
+      }
+      return { key: `windowDays:${n}`, sinceMs: nowMs - n * MS_PER_DAY };
+    }
+    return undefined;
   }
 
   private cloneReputation(r: Reputation): Reputation {
@@ -1305,8 +1379,10 @@ export class EscrowStore {
     };
   }
 
-  /** Paginated leaderboard: sort=score|completed|average, minCompleted (default 1), limit 1..100. */
-  listReputation(query: { sort?: unknown; minCompleted?: unknown; limit?: unknown; cursor?: unknown } = {}): ReputationPage {
+  /** Paginated leaderboard: sort=score|completed|average, minCompleted (default 1), limit 1..100, optional since/windowDays. */
+  listReputation(
+    query: { sort?: unknown; minCompleted?: unknown; limit?: unknown; cursor?: unknown; since?: unknown; windowDays?: unknown } = {},
+  ): ReputationPage {
     const sortRaw = query.sort === undefined || query.sort === '' ? 'score' : query.sort;
     if (typeof sortRaw !== 'string' || !REPUTATION_SORTS.includes(sortRaw as ReputationSort)) {
       throw new HttpError(400, 'invalid_sort', 'sort must be one of score, completed, average');
@@ -1331,13 +1407,16 @@ export class EscrowStore {
       limit = n;
     }
 
+    const window = this.parseReputationWindow(query.since, query.windowDays);
+    const windowKey = window ? window.key : 'all';
+
     let cursorAddress: string | undefined;
     if (query.cursor !== undefined && query.cursor !== '') {
       if (typeof query.cursor !== 'string') throw new HttpError(400, 'invalid_cursor', 'cursor must be a string');
-      cursorAddress = decodeReputationCursor(query.cursor, sort);
+      cursorAddress = decodeReputationCursor(query.cursor, sort, windowKey);
     }
 
-    const filtered = this.getLeaderboardCache().bySort[sort].filter((r) => r.completedContracts >= minCompleted);
+    const filtered = this.getLeaderboardCache(window).bySort[sort].filter((r) => r.completedContracts >= minCompleted);
     let startIndex = 0;
     if (cursorAddress !== undefined) {
       const idx = filtered.findIndex((r) => r.address === cursorAddress);
@@ -1348,7 +1427,11 @@ export class EscrowStore {
     const hasMore = startIndex + limit < filtered.length;
     return {
       data: slice.map((r) => this.cloneReputation(r)),
-      page: { limit, nextCursor: hasMore && slice.length ? encodeReputationCursor(sort, slice[slice.length - 1].address) : null, hasMore },
+      page: {
+        limit,
+        nextCursor: hasMore && slice.length ? encodeReputationCursor(sort, slice[slice.length - 1].address, windowKey) : null,
+        hasMore,
+      },
     };
   }
 
@@ -1674,6 +1757,35 @@ export class EscrowStore {
     return { reviews: slice, nextCursor };
   }
 
+  /** Export raw internal state for snapshot persistence. */
+  exportState(): StoreInternalState {
+    return {
+      contracts: Array.from(this.contracts.values()),
+      templates: Array.from(this.templates.values()),
+      reputation: Object.fromEntries(this.reputation.entries()),
+      clientReputation: Object.fromEntries(this.clientReputation.entries()),
+      reviews: structuredClone(this.reviews),
+      nextId: this.nextId,
+      nextReviewId: this.nextReviewId,
+      nextTemplateId: this.nextTemplateId,
+      audit: this.audit.toSnapshot(),
+    };
+  }
+
+  /** Replace all internal state from a validated snapshot. */
+  importState(state: StoreInternalState): void {
+    this.contracts = new Map(state.contracts.map((c) => [c.id, c]));
+    this.templates = new Map(state.templates.map((t) => [t.id, t]));
+    this.reputation = new Map(Object.entries(state.reputation).map(([k, v]) => [k, structuredClone(v)]));
+    this.clientReputation = new Map(Object.entries(state.clientReputation).map(([k, v]) => [k, structuredClone(v)]));
+    this.reviews = structuredClone(state.reviews);
+    this.nextId = state.nextId;
+    this.nextReviewId = state.nextReviewId;
+    this.nextTemplateId = state.nextTemplateId;
+    this.invalidateLeaderboardCache();
+    this.audit.loadSnapshot(state.audit);
+  }
+
   /** Seed a few demo engagements so the API is explorable out of the box. */
   seed(): this {
     const a = this.create({
@@ -1701,6 +1813,18 @@ export class EscrowStore {
     this.rate(b.id, 5);
     return this;
   }
+}
+
+export interface StoreInternalState {
+  contracts: InternalContract[];
+  templates: InternalTemplate[];
+  reputation: Record<string, ReputationRecord>;
+  clientReputation: Record<string, ReputationRecord>;
+  reviews: Review[];
+  nextId: number;
+  nextReviewId: number;
+  nextTemplateId: number;
+  audit: AuditSnapshot;
 }
 
 export const LIST_STATUSES: ContractStatus[] = ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'];

@@ -142,9 +142,9 @@ describe('TalentTrust API', () => {
     });
 
     it('eviction keeps verification valid', () => {
-      const audit = new AuditStore();
+      const audit = new AuditStore(3);
       // Fill beyond max entries
-      for (let i = 0; i < 100_010; i++) {
+      for (let i = 0; i < 10; i++) {
         audit.append({
           contractId: 1,
           action: 'create',
@@ -156,15 +156,115 @@ describe('TalentTrust API', () => {
 
       const verify = audit.verify();
       expect(verify.valid).toBe(true);
-      expect(verify.entries).toBe(100_000);
+      expect(verify.entries).toBe(3);
+      expect(verify.maxEntries).toBe(3);
+      expect(verify.truncatedBeforeSeq).toBe(1);
       expect(audit.getTruncatedBeforeSeq()).toBeGreaterThan(0);
+    });
+
+    it('reports no truncation for a fresh audit store', () => {
+      const verify = new AuditStore(3).verify();
+      expect(verify.truncatedBeforeSeq).toBeNull();
+      expect(verify.maxEntries).toBe(3);
     });
 
     it('verify endpoint returns valid for clean chain', async () => {
       const verify = await request(app).get('/api/v1/audit/verify').expect(200);
       expect(verify.body.valid).toBe(true);
       expect(verify.body.entries).toBeGreaterThan(0);
+      expect(verify.body.truncatedBeforeSeq).toBeNull();
+      expect(verify.body.maxEntries).toBe(100_000);
       expect(verify.body.brokenAt).toBeUndefined();
+    });
+
+    it('evicts per-contract index entries accurately and preserves pagination & tampering detection', () => {
+      const audit = new AuditStore(5);
+      const state = { status: 'Created', fundedAmount: 0, releasedAmount: 0 };
+
+      // seq 1: contract 10
+      // seq 2: contract 20
+      // seq 3: contract 10
+      // seq 4: contract 30
+      // seq 5: contract 20
+      // seq 6: contract 10 (evicts seq 1 / contract 10)
+      // seq 7: contract 10 (evicts seq 2 / contract 20)
+      const contractIds = [10, 20, 10, 30, 20, 10, 10];
+      for (const contractId of contractIds) {
+        audit.append({
+          contractId,
+          action: 'deposit',
+          before: { ...state },
+          after: { ...state },
+          details: {},
+        });
+      }
+
+      expect(audit.getTruncatedBeforeSeq()).toBe(1);
+      expect(audit.verify()).toEqual({ valid: true, entries: 5 });
+
+      // Contract 10 should have seqs 3, 6, 7 (seq 1 was evicted)
+      const c10All = audit.getContractHistory(10);
+      expect(c10All.data.map((e) => e.seq)).toEqual([3, 6, 7]);
+      expect(c10All.nextCursor).toBeUndefined();
+
+      // Pagination with cursor before oldest retained seq
+      const c10Page1 = audit.getContractHistory(10, 2, 1);
+      expect(c10Page1.data.map((e) => e.seq)).toEqual([3, 6]);
+      expect(c10Page1.nextCursor).toBe(6);
+
+      const c10Page2 = audit.getContractHistory(10, 2, c10Page1.nextCursor);
+      expect(c10Page2.data.map((e) => e.seq)).toEqual([7]);
+      expect(c10Page2.nextCursor).toBeUndefined();
+
+      // Cursor at or past last seq returns empty
+      expect(audit.getContractHistory(10, 2, 7)).toEqual({ data: [], nextCursor: undefined });
+
+      // Contract 20 should have only seq 5 (seq 2 was evicted)
+      expect(audit.getContractHistory(20).data.map((e) => e.seq)).toEqual([5]);
+
+      // Contract 30 should have seq 4
+      expect(audit.getContractHistory(30).data.map((e) => e.seq)).toEqual([4]);
+
+      // Unknown contract returns empty
+      expect(audit.getContractHistory(999)).toEqual({ data: [], nextCursor: undefined });
+
+      // Evict remaining entries of contract 20 and 30 by adding 3 more for contract 10
+      for (let i = 0; i < 3; i++) {
+        audit.append({ contractId: 10, action: 'deposit', before: { ...state }, after: { ...state }, details: {} });
+      }
+      expect(audit.getContractHistory(20)).toEqual({ data: [], nextCursor: undefined });
+      expect(audit.getContractHistory(30)).toEqual({ data: [], nextCursor: undefined });
+      expect(audit.getContractHistory(10).data.map((e) => e.seq)).toEqual([6, 7, 8, 9, 10]);
+
+      // Tampering after ring wrap-around is still detected
+      audit._tamperWithEntry(8, (entry) => {
+        entry.after.fundedAmount = 12345;
+      });
+      expect(audit.verify()).toEqual({ valid: false, entries: 5, brokenAt: 8 });
+    });
+
+    it('performs 20k appends with eviction and history query within a generous time bound', () => {
+      const audit = new AuditStore(10_000);
+      const state = { status: 'Created', fundedAmount: 0, releasedAmount: 0 };
+
+      const start = Date.now();
+      for (let i = 0; i < 20_000; i++) {
+        audit.append({
+          contractId: i % 100,
+          action: 'deposit',
+          before: state,
+          after: state,
+          details: { i },
+        });
+      }
+
+      const history = audit.getContractHistory(42, 20);
+      const elapsedMs = Date.now() - start;
+
+      expect(history.data).toHaveLength(20);
+      expect(history.nextCursor).toBeDefined();
+      expect(history.data.every((e) => e.contractId === 42)).toBe(true);
+      expect(elapsedMs).toBeLessThan(5000);
     });
   });
 });

@@ -2,17 +2,22 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import { config, explorerUrl } from './config';
-import {
-  DEFAULT_DISPUTE_LIMIT,
-  EscrowStore,
-  HttpError,
-  LIST_STATUSES,
-  MAX_DISPUTE_LIMIT,
-  publicContract,
+  PORT,
+  CORS_ORIGINS,
+  PROXY_SECRET,
+  METRICS_IP_ALLOWLIST,
+  API_KEYS,
+  REQUEST_BODY_LIMIT,
+  RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW_MS,
+  MAX_CURSOR_LENGTH,
+  DEFAULT_PAGE_LIMIT,
+  MAX_PAGE_LIMIT,
+  MAX_ID_LENGTH,
+  MAX_FIELD_LENGTH,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+} from './config';
   type Cursor,
-  type DisputeSort,
-  type DisputeStatusFilter,
   type EscrowContract,
   type QueryFilters,
 } from './store';
@@ -29,7 +34,14 @@ import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './h
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
-import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
+import {
+  DEFAULT_WEBHOOK_HISTORY_LIMIT,
+  isWebhookAdminTokenValid,
+  MAX_WEBHOOK_HISTORY_LIMIT,
+  WEBHOOK_DELIVERY_STATUSES,
+  WebhookDeliveryStatus,
+  WebhookManager,
+} from './webhooks';
 import { type ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
 import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
@@ -52,11 +64,9 @@ import {
   DeleteTemplateBody,
   TemplateOwnerQuery,
 } from './validation/schemas';
-import { parseFieldSpec, project } from './utils/project';
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
-import { bigIntReplacer } from './amount';
 import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
@@ -66,6 +76,34 @@ import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
 
+import { createContractsRouter } from './routes/contracts';
+import {
+  callerOf,
+  ChainRateLimiter,
+  ChainReadCache,
+  chainIdParam,
+  createMaybeAttachReceipt,
+  createRequireNotPaused,
+  disputeLimit,
+  disputeOverdue,
+  disputeSort,
+  disputeStatus,
+  getContractEtag,
+  getContractsListEtag,
+  id,
+  isChainReadClient,
+  isValidStellarAddress,
+  jsonObjectBody,
+  oneParam,
+  optionalString,
+  PreconditionFailedError,
+  PreconditionRequiredError,
+  requireAdminRead,
+  requireCronSecret,
+  rootApiInfo,
+  wrap,
+} from './routes/helpers';
+export { getContractEtag, getContractsListEtag, PreconditionFailedError, PreconditionRequiredError };
 declare global {
   namespace Express {
     interface Request {
@@ -79,322 +117,9 @@ const startedAt = Date.now();
 
 type LoggerLevel = 'debug' | 'info' | 'warn' | 'error';
 
-type Handler = (req: Request, res: Response) => unknown | Promise<unknown>;
-const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const out = await fn(req, res);
-    if (out !== undefined && !res.headersSent) {
-      // Use bigIntReplacer so bigint amounts serialise as decimal strings
-      // and JSON.stringify never throws on a response. Go through res.json so
-      // middleware that wraps it (idempotency replay) still sees the body.
-      res.json(JSON.parse(JSON.stringify(out, bigIntReplacer)));
-    }
-  } catch (err) {
-    next(err);
-  }
-};
 
-const hasBody = (req: Request) => {
-  const length = Number(req.headers['content-length']);
-  return req.headers['transfer-encoding'] !== undefined || (Number.isFinite(length) && length > 0);
-};
-
-// Routes that take a body must receive application/json. Body-less POSTs (release, cancel) are left alone.
-const requireJson = (req: Request, _res: Response, next: NextFunction) => {
-  if (hasBody(req) && !req.is('application/json')) {
-    return next(new HttpError(415, 'unsupported_media_type', 'Content-Type must be application/json'));
-  }
-  next();
-};
-
-const requireObjectBody = (req: Request, _res: Response, next: NextFunction) => {
-  const body: unknown = req.body;
-  if (hasBody(req) && (typeof body !== 'object' || body === null || Array.isArray(body))) {
-    return next(new HttpError(400, 'invalid_body', 'Request body must be a JSON object'));
-  }
-  next();
-};
-
-/** Content-Type + JSON-object checks for the body-taking routes (run before auth/validation). */
-const jsonObjectBody = [requireJson, requireObjectBody];
-
-/** Bounded TTL cache with single-flight: concurrent identical chain reads share one simulation. */
-class ChainReadCache {
-  private readonly values = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
-
-  constructor(
-    private readonly ttlMs: number,
-    private readonly maxEntries = 256,
-  ) {}
-
-  get<T>(key: string, load: () => Promise<T>): Promise<T> {
-    const now = Date.now();
-    const cached = this.values.get(key);
-    if (cached && cached.expiresAt > now) return cached.promise as Promise<T>;
-    if (cached) this.values.delete(key);
-    while (this.values.size >= this.maxEntries) this.values.delete(this.values.keys().next().value as string);
-    const promise = load();
-    this.values.set(key, { expiresAt: now + this.ttlMs, promise });
-    promise.catch(() => {
-      if (this.values.get(key)?.promise === promise) this.values.delete(key);
-    });
-    return promise;
-  }
-}
-
-/** Fixed-window per-client limit for chain read endpoints. */
-class ChainRateLimiter {
-  private readonly clients = new Map<string, { windowStarted: number; count: number }>();
-
-  constructor(
-    private readonly maxRequests = 60,
-    private readonly windowMs = 60_000,
-    private readonly maxClients = 1024,
-  ) {}
-
-  allow(key: string): boolean {
-    const now = Date.now();
-    const current = this.clients.get(key);
-    if (!current || now - current.windowStarted >= this.windowMs) {
-      while (this.clients.size >= this.maxClients) this.clients.delete(this.clients.keys().next().value as string);
-      this.clients.set(key, { windowStarted: now, count: 1 });
-      return true;
-    }
-    if (current.count >= this.maxRequests) return false;
-    current.count += 1;
-    return true;
-  }
-}
-
-const chainIdParam = (raw: string): bigint => {
-  if (!/^[1-9]\d*$/.test(raw)) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
-  const value = BigInt(raw);
-  if (value > 18_446_744_073_709_551_615n) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
-  return value;
-};
-
-const isChainReadClient = (value: unknown): value is ChainReadClient =>
-  !!value && typeof value === 'object' && typeof (value as ChainReadClient).getReputation === 'function';
-
-const id = (req: Request) => {
-  const n = Number(req.params.id);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError('invalid_id');
-  return n;
-};
-
-const optionalString = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : undefined);
-
-/**
- * Parse the `?fields=` query param.  Returns `null` when the param is absent
- * (meaning "return all fields").  Throws {@link HttpError} 400 on invalid input.
- */
-function parseFields(req: Request) {
-  const raw = req.query.fields;
-  if (typeof raw !== 'string') return null;
-  return parseFieldSpec(raw);
-}
-
-/** Admin read auth for the dispute queue: 404 when ADMIN_READ_TOKEN is unset, 401 on a bad token. */
-function requireAdminRead(req: Request, _res: Response, next: NextFunction) {
-  const expected = process.env.ADMIN_READ_TOKEN;
-  if (!expected) return next(new HttpError(404, 'admin_not_configured', 'Admin endpoints are not configured'));
-  const auth = req.headers.authorization;
-  const token = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined;
-  const a = Buffer.from(expected);
-  const b = Buffer.from(token ?? '');
-  if (!token || a.length !== b.length || !timingSafeEqual(a, b)) {
-    return next(new HttpError(401, 'unauthorized', 'Missing or invalid admin bearer token'));
-  }
-  next();
-}
-
-/** Single-valued string query parameter, or undefined; arrays (repeated params) are rejected. */
-const oneParam = (value: unknown, code: string, name: string): string | undefined => {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw new HttpError(400, code, `${name} must be a single string value`);
-  return value;
-};
-
-function disputeStatus(value: unknown): DisputeStatusFilter {
-  const v = oneParam(value, 'invalid_status', 'status') ?? 'all';
-  if (v !== 'open' && v !== 'resolved' && v !== 'all') {
-    throw new HttpError(400, 'invalid_status', "status must be one of 'open', 'resolved', 'all'");
-  }
-  return v;
-}
-
-function disputeSort(value: unknown): DisputeSort {
-  const v = oneParam(value, 'invalid_sort', 'sort') ?? 'oldest';
-  if (v !== 'oldest' && v !== 'newest' && v !== 'value') {
-    throw new HttpError(400, 'invalid_sort', "sort must be one of 'oldest', 'newest', 'value'");
-  }
-  return v;
-}
-
-function disputeOverdue(value: unknown): boolean {
-  const v = oneParam(value, 'invalid_overdue', 'overdue');
-  if (v === undefined || v === 'false') return false;
-  if (v === 'true') return true;
-  throw new HttpError(400, 'invalid_overdue', "overdue must be 'true' or 'false'");
-}
-
-function disputeLimit(value: unknown): number {
-  const v = oneParam(value, 'invalid_limit', 'limit');
-  if (v === undefined) return DEFAULT_DISPUTE_LIMIT;
-  const n = Number(v);
-  if (!/^[0-9]+$/.test(v) || !Number.isInteger(n) || n < 1 || n > MAX_DISPUTE_LIMIT) {
-    throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_DISPUTE_LIMIT}`);
-  }
-  return n;
-}
-
-/** Bearer check for the cron sweep; fails closed (404) when CRON_SECRET is unset. */
-const requireCronSecret = (req: Request) => {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) throw new HttpError(404, 'not_found', 'Cron endpoint is not configured');
-  const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!supplied) throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
-  // Compare fixed-length digests so the comparison is constant-time and length-independent.
-  const expectedBytes = createHash('sha256').update(expected).digest();
-  const suppliedBytes = createHash('sha256').update(supplied).digest();
-  if (!timingSafeEqual(expectedBytes, suppliedBytes)) {
-    throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
-  }
-};
-
-const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
 
 // --- ETag caching and If-Match optimistic concurrency ---
-
-/** Strong entity tag for a contract: `"<id>-<version>"`. */
-export function getContractEtag(contract: { id: number; version: number }): string {
-  return `"${contract.id}-${contract.version}"`;
-}
-
-/** List entity tag: hash of every listed (id, version) pair plus the query string. */
-export function getContractsListEtag(contracts: Array<{ id: number; version: number }>, queryString = ''): string {
-  const pairs = contracts.map((c) => `${c.id}:${c.version}`).join(',');
-  return `"${createHash('sha1').update(`${pairs}?${queryString}`).digest('hex')}"`;
-}
-
-export class PreconditionFailedError extends HttpError {
-  constructor(
-    public currentEtag: string,
-    public currentVersion: number,
-  ) {
-    super(412, 'precondition_failed', 'Precondition failed');
-  }
-}
-
-export class PreconditionRequiredError extends HttpError {
-  constructor() {
-    super(428, 'precondition_required', 'If-Match header is required');
-  }
-}
-
-/** Parse an If-None-Match / If-Match header into opaque tags (weak prefixes stripped). */
-const parseEtagList = (header: string | undefined): string[] =>
-  (header ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => (s.startsWith('W/') ? s.slice(2) : s));
-
-/** Set ETag + Cache-Control and answer 304 when If-None-Match matches. Returns true when handled. */
-function conditionalGet(req: Request, res: Response, etag: string): boolean {
-  res.setHeader('ETag', etag);
-  res.setHeader('Cache-Control', 'no-cache');
-  const tags = parseEtagList(req.headers['if-none-match']);
-  if (tags.includes(etag) || tags.includes('*')) {
-    res.status(304).end();
-    return true;
-  }
-  return false;
-}
-
-// --- Contract list pagination (cursor = base64url JSON + HMAC, so clients cannot forge it) ---
-
-const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
-
-function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
-}
-
-function parseLimit(v: unknown): number {
-  if (v === undefined) return 20;
-  const n = Number(v);
-  if (typeof v !== 'string' || !Number.isInteger(n) || n < 1 || n > 100) {
-    throw new HttpError(400, 'invalid_query', 'limit must be an integer between 1 and 100');
-  }
-  return n;
-}
-
-function parseSortParam(v: unknown): string {
-  if (v === undefined) return '-createdAt';
-  const s = String(v);
-  const field = s.startsWith('-') ? s.slice(1) : s;
-  if (!['createdAt', 'updatedAt', 'totalAmount'].includes(field)) {
-    throw new HttpError(400, 'invalid_query', 'sort must be one of createdAt, updatedAt, totalAmount (prefix - for descending)');
-  }
-  return s;
-}
-
-function serializeCursor(cursor: Cursor): string {
-  const payload = Buffer.from(JSON.stringify(cursor)).toString('base64url');
-  const sig = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
-  return `${payload}.${sig}`;
-}
-
-function parseCursorParam(cursor: unknown, sort: string): Cursor | undefined {
-  if (cursor === undefined || cursor === '') return undefined;
-  const parts = String(cursor).split('.');
-  if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
-  const [payload, sig] = parts;
-  const expected = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
-  if (!safeEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
-  let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
-  try {
-    obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-  } catch {
-    throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
-  }
-  if (obj.sort !== sort) throw new HttpError(400, 'invalid_cursor', 'cursor sort does not match requested sort');
-  return { sort, lastValue: String(obj.lastValue ?? ''), lastId: Number(obj.lastId ?? 0) };
-}
-
-function parseFilters(q: Request['query']): QueryFilters {
-  const f: QueryFilters = {};
-  if (typeof q.status === 'string') {
-    f.status = q.status.split(',').map((s) => s.trim()).filter(Boolean);
-    for (const status of f.status) {
-      if (!(LIST_STATUSES as string[]).includes(status)) throw new HttpError(400, 'invalid_query', `invalid status ${status}`);
-    }
-  }
-  if (typeof q.party === 'string') f.party = q.party;
-  if (typeof q.role === 'string') {
-    if (f.party === undefined) throw new HttpError(400, 'invalid_query', 'role requires party');
-    if (q.role !== 'client' && q.role !== 'freelancer') throw new HttpError(400, 'invalid_query', 'role must be client or freelancer');
-    f.role = q.role;
-  }
-  if (typeof q.token === 'string') f.token = q.token;
-  if (typeof q.createdAfter === 'string') f.createdAfter = q.createdAfter;
-  if (typeof q.createdBefore === 'string') f.createdBefore = q.createdBefore;
-  if (q.linked === 'true') f.linked = true;
-  else if (q.linked === 'false') f.linked = false;
-  return f;
-}
-
-/** Validate that a string is a valid Stellar ed25519 public key (G…). */
-function isValidStellarAddress(addr: unknown): addr is string {
-  return typeof addr === 'string' && StrKey.isValidEd25519PublicKey(addr);
-}
-
-/** Authenticated wallet address, if the request carried a valid bearer token. */
-const callerOf = (req: Request): string | undefined => (req as WalletAuthRequest).auth?.address;
-
-/** Dependencies that can be injected via createApp's first argument. */
 export type AppDeps = {
   logger?: Logger;
   store?: EscrowStore;
@@ -420,6 +145,8 @@ export type AppDeps = {
   chainReadClient?: ChainReadClient;
   /** Scoped API keys (defaults to the API_KEYS env var). */
   apiKeys?: ParsedApiKeys;
+  /** Clock for scoped API key expiry checks (defaults to `Date.now`; tests inject one). */
+  apiKeyClock?: () => number;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
 };
@@ -511,6 +238,7 @@ export function createApp(
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
   // Fail fast on a malformed API_KEYS value.
   const apiKeys: ParsedApiKeys = deps.apiKeys ?? parseApiKeysConfig(process.env.API_KEYS);
+  const apiKeyAuthOptions = { now: deps.apiKeyClock };
   /**
    * Dispute resolution needs a key with `disputes:resolve` once any API key is configured. Production
    * without API_KEYS fails closed (nobody can resolve); dev/test without keys keeps the open behaviour.
@@ -522,7 +250,7 @@ export function createApp(
       }
       return next();
     }
-    authenticateScopedApiKey(apiKeys)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
       err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
     );
   };
@@ -540,16 +268,7 @@ export function createApp(
   };
   const chainStatus = () => (chainStatusReader ??= createStellarChainReader());
   /** 503 for mutations whose Soroban counterparts call require_not_paused. */
-  const requireNotPaused = async (_req: Request, res: Response, next: NextFunction) => {
-    try {
-      const status = await pauseGuard.isPaused();
-      if (!status.paused) return next();
-      res.setHeader('Retry-After', '60');
-      next(new HttpError('contract_paused', undefined, { source: status.source }));
-    } catch (err) {
-      next(err);
-    }
-  };
+  const requireNotPaused = createRequireNotPaused(pauseGuard);
   // Created lazily so apps that never sign receipts don't generate a key (or warn).
   let receiptManagerInstance: ReceiptManager | undefined =
     second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
@@ -570,6 +289,7 @@ export function createApp(
   // Trust the first hop (Vercel / any reverse proxy) so req.protocol reflects X-Forwarded-Proto;
   // originGuard compares same-origin requests against it.
   app.set('trust proxy', 1);
+  const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
   app.use((req, res, next) => {
@@ -640,13 +360,13 @@ export function createApp(
   // OPTIONS on a known path: 204 with `Allow` (cors() above still adds the preflight headers).
   app.use(optionsHandler(app));
 
-  // Compression middleware: gzip/br for JSON responses ≥ 1 KB.
+  // Compression middleware: gzip/br for JSON responses Ã¢â€°Â¥ 1 KB.
   // Excluded for text/event-stream and when Cache-Control: no-transform is set.
   app.use(
     compression({
-      threshold: 1024, // bytes — skip compression for small responses
+      threshold: 1024, // bytes Ã¢â‚¬â€ skip compression for small responses
       filter(req, res) {
-        // Honour Cache-Control: no-transform (RFC 7234 §5.2.1.6)
+        // Honour Cache-Control: no-transform (RFC 7234 Ã‚Â§5.2.1.6)
         const cc = res.getHeader('Cache-Control');
         if (typeof cc === 'string' && cc.includes('no-transform')) return false;
         // Never compress streaming responses
@@ -689,95 +409,12 @@ export function createApp(
   });
 
   const getOrigin = (req: Request) => `${req.protocol}://${req.get('host') || 'localhost'}`;
-
-  /** With `?receipt=true`, attach a `Receipt` header: a JWS over the post-mutation contract state. */
-  const maybeAttachReceipt = (req: Request, res: Response, contract: unknown) => {
-    if (req.query.receipt === 'true' && contract && typeof contract === 'object') {
-      // Receipts are signed over the public view, so dispute reasons never leave the admin routes.
-      const view = publicContract(contract as { dispute?: EscrowContract['dispute'] });
-      res.setHeader('Receipt', receiptManager().issueReceipt(view as Record<string, unknown>, getOrigin(req)));
-    }
-  };
+  const maybeAttachReceipt = createMaybeAttachReceipt({ getOrigin, receiptManager });
 
   app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager().getPublishedKeys()));
 
-  app.get(
-    '/',
-    wrap(() => ({
-      name: 'TalentTrust API',
-      version: config.version,
-      description: 'Milestone-based freelancer escrow API backed by a Soroban contract on Stellar.',
-      docs: '/docs',
-      openapi: '/openapi.json',
-      website: config.frontendUrl,
-      chain: { network: config.network, contractId: config.contractId, explorer: explorerUrl() },
-      endpoints: [
-        'GET  /health',
-        'GET  /health/live',
-        'GET  /health/ready',
-        'GET  /docs',
-        'GET  /openapi.json',
-        'GET  /api/v1/errors',
-        'GET  /errors/:code',
-        'GET  /metrics',
-        'GET  /.well-known/talenttrust-receipts.json',
-        'GET  /api/v1/chain',
-        'GET  /api/v1/chain/contracts/:chainId',
-        'GET  /api/v1/chain/reputation/:address',
-        'GET  /api/v1/parties/:address/statement.csv',
-        'GET  /api/v1/parties/:address/statement.json',
-        'GET  /api/v1/state-machine',
-        'GET  /api/v1/contracts/:id/actions',
-        'GET  /api/v1/stats',
-        'POST /api/v1/tx/build',
-        'GET  /api/v1/contracts',
-        'POST /api/v1/contracts',
-        'GET  /api/v1/contracts/:id',
         'GET  /api/v1/contracts/:id/stream',
-        'GET  /api/v1/contracts/:id/receipt',
-        'PATCH /api/v1/contracts/:id',
-        'DELETE /api/v1/contracts/:id',
-        'GET  /api/v1/contracts/:id/revisions',
-        'POST /api/v1/contracts/:id/deposit',
-        'POST /api/v1/contracts/:id/extend-deadline',
-        'POST /api/v1/contracts/:id/milestones/:index/release',
-        'POST /api/v1/contracts/:id/dispute',
-        'POST /api/v1/contracts/:id/resolve',
-        'POST /api/v1/contracts/:id/cancel',
-        'POST /api/v1/contracts/:id/reputation',
-        'POST /api/v1/contracts/:id/reviews',
-        'POST /api/v1/contracts/:id/link',
-        'GET  /api/v1/contracts/:id/parity',
-        'GET  /api/v1/reputation',
-        'GET  /api/v1/reputation/:address',
-        'GET  /api/v1/reputation/:address/reviews',
-        'POST /api/v1/tx/submit',
-        'GET  /api/v1/tx',
-        'GET  /api/v1/tx/:hash',
-        'POST/GET /api/v1/webhook-subscriptions',
-        'GET/PATCH/DELETE /api/v1/webhook-subscriptions/:id',
-        'POST /api/v1/webhook-subscriptions/:id/rotate-secret',
-        'GET  /api/v1/webhook-subscriptions/:id/deliveries',
-        'POST /api/v1/templates',
-        'GET  /api/v1/templates',
-        'GET  /api/v1/templates/:id',
-        'PUT  /api/v1/templates/:id',
-        'DELETE /api/v1/templates/:id',
-        'GET  /api/v1/contracts/:id/history',
-        'GET  /api/v1/audit/verify',
-        'GET  /api/v1/disputes (admin)',
-        'GET  /api/v1/disputes/:contractId (admin)',
-        'GET  /api/v1/auth/whoami',
-        'GET  /api/v1/auth/challenge',
-        'POST /api/v1/auth/token',
-        'POST /api/v1/receipts/verify',
-        'GET/POST /api/cron/expire-contracts',
-        'GET/POST /api/cron/index-events',
-        'GET  /api/v1/chain/events',
-        'GET  /api/v1/chain/indexer',
-      ],
-    })),
-  );
+  app.get('/', wrap(() => rootApiInfo));
 
   app.get('/health', (req, res) => {
     if (app.get('draining')) {
@@ -852,6 +489,14 @@ export function createApp(
   });
 
   const v1 = express.Router();
+  // Auth tokens, confidential dispute data and webhook secrets must never be
+  // stored by shared caches, so mark their responses (including errors) no-store.
+  const noStore = (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    next();
+  };
+  v1.use(['/auth', '/disputes', '/webhook-subscriptions'], noStore);
   v1.use(
     idempotency(options.idempotencyStore ?? new MemoryIdempotencyStore(), {
       required: options.idempotencyRequired ?? process.env.IDEMPOTENCY_REQUIRED === 'true',
@@ -868,7 +513,7 @@ export function createApp(
     wrap((req) => {
       const address = req.query.address;
       if (!isValidStellarAddress(address)) {
-        throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar G… public key');
+        throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar GÃ¢â‚¬Â¦ public key');
       }
       const { challenge, expiresAt } = buildChallenge(address, auth.secret, auth.now);
       return { address, challenge, expiresAt };
@@ -881,7 +526,7 @@ export function createApp(
     wrap((req) => {
       const { address, challenge, signature } = req.body ?? {};
       if (!isValidStellarAddress(address)) {
-        throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar G… public key');
+        throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar GÃ¢â‚¬Â¦ public key');
       }
       if (typeof challenge !== 'string' || !challenge) {
         throw new HttpError(400, 'invalid_challenge', 'challenge is required');
@@ -980,10 +625,10 @@ export function createApp(
   // Lets integrators check which scoped API key they are using.
   v1.get(
     '/auth/whoami',
-    authenticateScopedApiKey(apiKeys),
+    authenticateScopedApiKey(apiKeys, apiKeyAuthOptions),
     wrap((req) => {
       const key = (req as ScopedApiKeyRequest).scopedApiKey!;
-      return { keyId: key.id, scopes: key.scopes };
+      return { keyId: key.id, scopes: key.scopes, expiresAt: key.expiresAt ?? null };
     }),
   );
   // --- Per-address activity statements ---
@@ -1053,16 +698,6 @@ export function createApp(
   // --- Escrow state machine discovery (read-only, same rules as the mutations) ---
   v1.get('/state-machine', wrap(() => describeStateMachine()));
   v1.get(
-    '/contracts/:id/actions',
-    wrap((req) => {
-      const contractId = id(req);
-      const as = req.query.as;
-      if (as !== undefined && (typeof as !== 'string' || !as.trim())) {
-        throw new HttpError(400, 'invalid_actor', 'as must be a non-empty address string');
-      }
-      return store.allowedActions(contractId, as as string | undefined);
-    }),
-  );
   v1.get('/contracts/:id/stream', (req, res, next) => {
     let contractId: number;
     try {
@@ -1116,218 +751,10 @@ export function createApp(
     sseStreams.add(closeStream);
     res.on('close', closeStream);
   });
+  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
+  v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
-  v1.get(
-    '/contracts',
-    validate({ query: ListQuery }),
-    wrap((req, res) => {
-      const limit = parseLimit(req.query.limit);
-      const sort = parseSortParam(req.query.sort);
-      const after = parseCursorParam(req.query.cursor, sort);
-      const filters = parseFilters(req.query);
-      const spec = parseFields(req);
-      const result = store.query({ filters, sort, limit, after });
-      const qs = req.originalUrl.includes('?') ? req.originalUrl.split('?')[1] : '';
-      if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
-      return {
-        data: result.data.map((c) => project(publicContract(c), spec)),
-        page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
-      };
-    }),
-  );
-  v1.post(
-    '/contracts',
-    ...jsonObjectBody,
-    requireNotPaused,
-    requireAuth,
-    (req, _res, next) => {
-      // With wallet auth the client is the authenticated address: reject a
-      // different body.client and default it when omitted.
-      const caller = callerOf(req);
-      if (caller !== undefined) {
-        const body = req.body && typeof req.body === 'object' ? req.body : {};
-        if (body.client !== undefined && body.client !== caller) {
-          return next(new HttpError(403, 'forbidden', 'Authenticated address must match contract client'));
-        }
-        req.body = { ...body, client: caller };
-      }
-      next();
-    },
-    validate({ body: CreateContractBody }),
-    wrap((req, res) => {
-      const created = audited(req, () => store.create(req.body));
-      res.setHeader('ETag', getContractEtag(created));
-      maybeAttachReceipt(req, res, created);
-      res.status(201).json(publicContract(created));
-    }),
-  );
-  v1.get(
-    '/contracts/:id',
-    validate({ params: IdParam }),
-    wrap((req, res) => {
-      const contract = store.get(Number(req.params.id));
-      if (conditionalGet(req, res, getContractEtag(contract))) return undefined;
-      return project(publicContract(contract), parseFields(req));
-    }),
-  );
-  v1.get(
-    '/contracts/:id/receipt',
-    wrap((req) => {
-      const contract = store.get(id(req));
-      return { receipt: receiptManager().issueReceipt(publicContract(contract) as unknown as Record<string, unknown>, getOrigin(req)) };
-    }),
-  );
-  /** Attribute audit entries created by `fn` to the authenticated caller and request id. */
-  const audited = <T>(req: Request, fn: () => T): T =>
-    store.withAuditContext({ actor: callerOf(req), requestId: req.id }, fn);
-
-  /** If-Match check for contract mutations: 412 on a stale tag, 428 when REQUIRE_IF_MATCH=true and absent. */
-  const checkPreconditions = (req: Request, _res: Response, next: NextFunction) => {
-    try {
-      const contract = store.get(id(req));
-      const ifMatch = req.headers['if-match'];
-      if (!ifMatch) {
-        if (process.env.REQUIRE_IF_MATCH === 'true') throw new PreconditionRequiredError();
-      } else {
-        const current = getContractEtag(contract);
-        const tags = parseEtagList(ifMatch);
-        if (!tags.includes('*') && !tags.includes(current)) {
-          throw new PreconditionFailedError(current, contract.version);
-        }
-      }
-      next();
-    } catch (err) {
-      next(err);
-    }
-  };
-  /** Expose the post-mutation entity tag. */
-  const setEtag = (res: Response, contract: EscrowContract) => res.setHeader('ETag', getContractEtag(contract));
-
-  // With wallet auth the authenticated address stands in for body.client.
-  const clientOf = (req: Request): unknown => {
-    const caller = callerOf(req);
-    if (caller === undefined) return req.body?.client;
-    if (req.body?.client !== undefined && req.body.client !== caller) {
-      throw new HttpError(403, 'forbidden', 'Authenticated address must match contract client');
-    }
-    return caller;
-  };
-  v1.patch(
-    '/contracts/:id',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
-      setEtag(res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.delete(
-    '/contracts/:id',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      store.delete(id(req), clientOf(req));
-      res.status(204).end();
-    }),
-  );
-  v1.get('/contracts/:id/revisions', wrap((req) => store.getRevisions(id(req))));
-  v1.post(
-    '/contracts/:id/extend-deadline',
-    requireAuth,
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
-      setEtag(res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/deposit',
-    ...jsonObjectBody,
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: DepositBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.deposit(Number(req.params.id), req.body.amount, callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/milestones/:index/release',
-    requireNotPaused,
-    requireAuth,
-    validate({ params: MilestoneReleaseParams }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.release(Number(req.params.id), Number(req.params.index), callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/dispute',
-    ...jsonObjectBody,
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: DisputeBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () =>
-        store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req)),
-      );
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/resolve',
-    ...jsonObjectBody,
-    requireResolveKey,
-    validate({ params: IdParam, body: ResolveBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const resolvedBy = (req as ScopedApiKeyRequest).scopedApiKey?.id;
-      const updated = audited(req, () => store.resolveDispute(Number(req.params.id), req.body.freelancerBps, resolvedBy));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/cancel',
-    requireNotPaused,
-    requireAuth,
-    validate({ params: IdParam, body: CancelBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const updated = audited(req, () => store.cancel(Number(req.params.id), callerOf(req)));
-      setEtag(res, updated);
-      maybeAttachReceipt(req, res, updated);
-      return publicContract(updated);
-    }),
-  );
-  v1.post(
-    '/contracts/:id/reputation',
-    ...jsonObjectBody,
-    requireAuth,
-    validate({ params: IdParam, body: RateBody }),
-    checkPreconditions,
-    wrap((req, res) => {
-      const reputation = audited(req, () => store.rate(Number(req.params.id), req.body.rating, callerOf(req)));
-      // The ETag and receipt cover the contract (now reputationIssued), not the reputation summary.
-      const contract = store.get(Number(req.params.id));
-      setEtag(res, contract);
-      maybeAttachReceipt(req, res, contract);
-      return reputation;
-    }),
-  );
-  v1.get(
+  v1.use(createContractsRouter({ segment: 'main1', ...contractRouteDeps }));
     '/reputation',
     wrap((req) =>
       store.listReputation({
@@ -1335,6 +762,8 @@ export function createApp(
         minCompleted: req.query.minCompleted,
         limit: req.query.limit,
         cursor: req.query.cursor,
+        since: req.query.since,
+        windowDays: req.query.windowDays,
       }),
     ),
   );
@@ -1344,26 +773,7 @@ export function createApp(
     wrap((req) => store.getReputationWithClient(req.params.address)),
   );
   v1.post(
-    '/contracts/:id/reviews',
-    requireAuth,
-    wrap((req, res) => {
-      const body = req.body ?? {};
-      const caller = callerOf(req);
-      if (caller !== undefined && body.reviewer !== undefined && body.reviewer !== caller) {
-        throw new HttpError(403, 'forbidden', 'reviewer must match the authenticated address');
-      }
-      res.status(201).json(store.createReview(id(req), caller === undefined ? body : { ...body, reviewer: caller }));
-    }),
-  );
-  v1.post(
-    '/contracts/:id/link',
-    ...jsonObjectBody,
-    wrap(async (req) => publicContract(await store.linkEscrow(id(req), req.body?.escrowId, chainReader))),
-  );
-  v1.get(
-    '/contracts/:id/parity',
-    wrap(async (req) => store.checkParity(id(req), chainReader)),
-  );
+  v1.use(createContractsRouter({ segment: 'main2', ...contractRouteDeps }));
   v1.get(
     '/reputation/:address/reviews',
     wrap((req) => {
@@ -1464,6 +874,26 @@ export function createApp(
       throw new HttpError(401, 'unauthorized', 'Webhook administration authentication is required');
     }
   };
+  /** `?limit=` on delivery history: an integer from 1 to 100, defaulting to 50. */
+  const webhookHistoryLimit = (raw: unknown): number => {
+    if (raw === undefined) return DEFAULT_WEBHOOK_HISTORY_LIMIT;
+    if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    const limit = Number(raw);
+    if (limit < 1 || limit > MAX_WEBHOOK_HISTORY_LIMIT) {
+      throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_WEBHOOK_HISTORY_LIMIT}`);
+    }
+    return limit;
+  };
+  /** `?status=` on delivery history: pending, success or failed. */
+  const webhookHistoryStatus = (raw: unknown): WebhookDeliveryStatus | undefined => {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string' || !WEBHOOK_DELIVERY_STATUSES.includes(raw as WebhookDeliveryStatus)) {
+      throw new HttpError(400, 'invalid_status', `status must be one of ${WEBHOOK_DELIVERY_STATUSES.join(', ')}`);
+    }
+    return raw as WebhookDeliveryStatus;
+  };
   const webhookRouter = express.Router();
   webhookRouter.post(
     '/',
@@ -1513,7 +943,12 @@ export function createApp(
     '/:id/deliveries',
     wrap((req) => {
       webhookAuth(req);
-      return { data: webhooks.history(req.params.id) };
+      return {
+        data: webhooks.history(req.params.id, {
+          limit: webhookHistoryLimit(req.query.limit),
+          status: webhookHistoryStatus(req.query.status),
+        }),
+      };
     }),
   );
   v1.use('/webhook-subscriptions', webhookRouter);
@@ -1560,21 +995,7 @@ export function createApp(
 
   // --- Audit log ---
   v1.get(
-    '/contracts/:id/history',
-    wrap((req) => {
-      const contractId = id(req);
-      store.get(contractId); // 404 for unknown contracts
-      const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
-      const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
-      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
-        throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
-      }
-      if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
-        throw new HttpError(400, 'invalid_cursor', 'cursor must be a non-negative integer');
-      }
-      return store.audit.getContractHistory(contractId, limit, cursor);
-    }),
-  );
+  v1.use(createContractsRouter({ segment: 'history', ...contractRouteDeps }));
   v1.get('/audit/verify', wrap(() => store.audit.verify()));
 
   // --- Admin dispute queue (ADMIN_READ_TOKEN) ---
@@ -1622,11 +1043,16 @@ export function createApp(
     if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
       throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
     }
+    const limitParam = typeof req.query.limit === 'string' && /^[1-9]\d*$/.test(req.query.limit) ? Number(req.query.limit) : undefined;
+    const maxPagesParam = typeof req.query.maxPages === 'string' && /^[1-9]\d*$/.test(req.query.maxPages) ? Number(req.query.maxPages) : undefined;
     // Few, short retries (the batch must fit in a serverless invocation); a busy indexer is not retried.
     let delay = 500;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await eventIndexer.runOnce();
+        return await eventIndexer.runOnce({
+          ...(limitParam !== undefined ? { limit: limitParam } : {}),
+          ...(maxPagesParam !== undefined ? { maxPages: maxPagesParam } : {}),
+        });
       } catch (err) {
         if (err instanceof Error && err.message === 'indexer_busy') {
           throw new HttpError(409, 'indexer_busy', 'Indexer is already running');
@@ -1673,19 +1099,15 @@ export function createApp(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = req.id;
-    if (err instanceof PreconditionFailedError) {
-      res.setHeader('ETag', err.currentEtag);
-      res.status(412).json({ error: err.code, message: err.message, currentVersion: err.currentVersion });
-      return;
-    }
-    if (err instanceof PreconditionRequiredError) {
-      res.status(428).json({ error: err.code, message: err.message });
-      return;
-    }
     // RFC 9457 problem+json; `error`/`message` stay for existing clients.
     const sendProblem = (e: HttpError) => {
       res.status(e.status).type('application/problem+json').json({ ...e.toProblemBody(), requestId });
     };
+    if (err instanceof PreconditionFailedError) {
+      res.setHeader('ETag', err.currentEtag);
+      sendProblem(err);
+      return;
+    }
     if (err instanceof HttpError) {
       sendProblem(err);
       return;
@@ -1703,14 +1125,14 @@ export function createApp(
       return;
     }
     if (err instanceof TxBuildError) {
-      res
-        .status(err.status)
-        .json({
-          error: err.code,
-          message: err.message,
-          ...(err.contractError ? { contractError: err.contractError } : {}),
-          requestId,
-        });
+      sendProblem(
+        new HttpError(
+          err.status,
+          err.code,
+          err.message,
+          err.contractError ? { contractError: err.contractError } : undefined,
+        ),
+      );
       return;
     }
     // body-parser failures: stable 4xx codes instead of a 500 that invites retries.

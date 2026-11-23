@@ -59,7 +59,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | Client rates freelancer: `{ "rating": 5 }` (backward-compatible) |
 | POST | `/api/v1/contracts/:id/reviews` | Two-sided review: `{ "reviewer": "G...", "rating": 5, "comment": "..." }` |
-| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
+| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` (demo fixture for `"3"` is gated by `ENABLE_DEMO_CHAIN_FIXTURE`) |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation` | Ranked freelancer leaderboard (`?sort=score\|completed\|average&minCompleted=&limit=&cursor=`) |
 | GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
@@ -80,7 +80,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
 | GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
-| GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, brokenAt? }`) |
+| GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, truncatedBeforeSeq, maxEntries, brokenAt? }`) |
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
@@ -89,7 +89,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 
 Webhook management is disabled (404) when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
 requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
-"https://example.com/events", "events": ["milestone.released"] }`; the generated `whsec_`
+"https://example.com/events", "events": ["milestone.released"], "filter": { "parties": ["G..."], "contractIds": [42] } }`; `filter` is optional, and either array may contain up to 50 entries. When both are present, both criteria must match; parties match a contract's `client` or `freelancer`, and IDs match its `id`. A filtered subscription skips events without `data.contract`. Filters are returned by GET and can be changed with PATCH; send `"filter": null` to clear one. Invalid filters return `400 invalid_filter`. The generated `whsec_`
 secret is returned only in that creation response and again when explicitly rotated. Events:
 `contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
 `dispute.resolved`, `contract.cancelled`, `reputation.issued` (dispute reasons are never included). Delivery
@@ -114,8 +114,9 @@ Every successful state transition (`create`, `deposit`, `release`, `dispute`, `r
 entry with the before/after state (`status`, funded and released amounts), the authenticated actor, the request id and
 action details (e.g. the resolution split). Failed or rejected requests never create entries. Entries are hash-chained
 (`hash = sha256(prevHash + canonicalJSON(entry))`), so modification, deletion or reordering is detected by
-`GET /api/v1/audit/verify`. The log is in-memory and bounded (100,000 entries, oldest evicted first; verification then
-starts from the oldest retained entry). Dispute reasons are not recorded.
+`GET /api/v1/audit/verify`. The log is in-memory and bounded by `AUDIT_MAX_ENTRIES` (default 100,000), with the oldest entries
+evicted first. Verification reports `truncatedBeforeSeq` when eviction has occurred and starts from the oldest retained entry.
+Dispute reasons are not recorded.
 
 ## Admin dispute queue
 
@@ -166,9 +167,10 @@ are not compressed when `Cache-Control: no-transform` is present or the content 
 `text/event-stream`.
 ### Idempotency
 
-Every `POST` under `/api/v1` accepts an optional `Idempotency-Key` header (1-255 printable ASCII
-characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a request with the same key
-and body replays the stored response with `Idempotent-Replayed: true` instead of applying it again.
+Every `POST`, `PATCH`, `PUT` and `DELETE` under `/api/v1` accepts an optional `Idempotency-Key` header
+(1-255 printable ASCII characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a
+request with the same key and body replays the stored response with `Idempotent-Replayed: true` instead
+of applying it again. `DELETE` request bodies are optional and empty bodies fingerprint as `{}`.
 
 | Situation | Result |
 | --- | --- |
@@ -176,7 +178,7 @@ and body replays the stored response with `Idempotent-Replayed: true` instead of
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_request_in_progress`, `Retry-After: 1` |
 | Malformed key | `400 invalid_idempotency_key` |
-| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` (`400 idempotency_key_required`) |
+| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` on `POST` (`400 idempotency_key_required`; `PATCH`/`PUT`/`DELETE` remain optional) |
 
 Keys are scoped by method, path and authenticated principal (if `req.user.id` is set). Responses with
 status below 500 are kept for 24h (max 10,000 entries, LRU eviction); 5xx responses are not stored, so the
@@ -233,12 +235,20 @@ Operator-only routes use hashed, scoped API keys from `API_KEYS`, a JSON array o
 startup. Send the key as `X-API-Key: <key>` or `Authorization: ApiKey <key>`; it is SHA-256 hashed and compared
 against every configured digest in constant time, and never echoed back.
 
+An entry may add an optional `"expiresAt"`, an ISO 8601 date-time with a timezone (`"2027-01-31T00:00:00Z"`)
+or a bare date (`"2027-01-31"`, read as UTC midnight). From that instant on the key is rejected with
+`401` "API key expired", so rotating a contractor's key is a config change rather than a manual removal. An
+invalid `expiresAt` stops the app at startup with the key id in the message. Entries without `expiresAt` never
+expire and behave exactly as before.
+
 - `POST /api/v1/contracts/:id/resolve` needs `disputes:resolve` (401 without/with an invalid key, 403
   `insufficient_scope` with `required`); the key id is stored as `dispute.resolvedBy`. With `NODE_ENV=production`
   and no `API_KEYS`, resolution fails closed (401); outside production with no keys configured it stays open for
   local development.
-- `GET /api/v1/auth/whoami` returns `{ keyId, scopes }` for the presented key.
-- `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add.
+- `GET /api/v1/auth/whoami` returns `{ keyId, scopes, expiresAt }` for the presented key (`expiresAt` is an ISO
+  8601 UTC string, or `null` for a key that never expires).
+- `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add. Add
+  `--expires-in-days <n>` (a positive whole number) to include an `expiresAt` n days from now.
 
 ## Health probes
 
@@ -263,6 +273,23 @@ unavailable); empty, repeated or structured values return `400 invalid_actor`. I
 wallet-authenticated callers and dispute resolution by scoped API keys, so their roles are listed with
 `actorEnforced: false`.
 
+## OpenAPI specification
+
+The single source of truth for the OpenAPI document is `src/openapi.ts`, served
+at `GET /openapi.json`. The committed `docs/openapi.json` is generated from
+that exact export, using the app's default Stellar network and contract settings
+so local environment variables cannot change the snapshot.
+
+Regenerate the document after changing the API specification:
+
+```bash
+npm run openapi:export
+npx jest tests/openapi-conformance.test.ts --runInBand
+```
+
+The conformance suite fails if `docs/openapi.json` is out of date. Do not edit
+the generated JSON manually.
+
 ## Development
 
 ```bash
@@ -276,9 +303,10 @@ npm run build && npm start
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
-`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
-`BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off) and
 `INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `SSE_MAX_CONNECTIONS` (maximum concurrent contract event streams per app process; default 100), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`, `ENABLE_DEMO_CHAIN_FIXTURE` (enables the local `DEMO_ESCROW_3` fixture for `escrowId: "3"` in `SorobanRpcChainReader`; defaults to `true` when `NODE_ENV` is `development` or `test`, and `false` in `production`),
+`BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off),
+`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `INDEXER_MAX_RUN_MS` (maximum execution time budget per indexer run in milliseconds, default 8000), `INDEXER_MAX_PAGES` (maximum event pages fetched per run, default 5), `API_KEYS` (scoped API keys, see below), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
 result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
@@ -323,6 +351,27 @@ Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/
 | JSON body whose top level is not an object | 400 | `invalid_body` |
 | Malformed JSON | 400 | `invalid_json` |
 | Request aborted before the body was received | 400 | `request_aborted` |
+
+## Snapshot persistence (self-hosted)
+
+For self-hosted deployments running `src/index.ts`, set `STORE_SNAPSHOT_PATH` to persist `EscrowStore` state (contracts, revisions, templates, reputation, reviews, ID counters, and the hash-chained audit log) to a JSON file without introducing a database dependency.
+
+- `STORE_SNAPSHOT_PATH`: path to the snapshot file (unset = disabled, pure in-memory mode).
+- `STORE_SNAPSHOT_INTERVAL_MS`: periodic flush interval in milliseconds (default `30000`).
+
+Snapshots are written atomically (temp file in the same directory + rename) on each interval and on graceful shutdown (`SIGTERM`/`SIGINT`). On startup, an existing snapshot is loaded and validated (including `schemaVersion` and the audit hash chain); a corrupt or newer-version file aborts startup immediately with a clear error.
+
+**Limitations:**
+- **Not enabled on Vercel** (`api/index.ts` remains pure in-memory; serverless filesystems are ephemeral).
+- **Single-process only**: concurrent writers sharing one snapshot file are not supported.
+- **Crash window**: an ungraceful crash (`SIGKILL`, power loss) can lose mutations made since the last interval flush.
+
+The request body and parameter schemas published at `/openapi.json` (contracts: create, deposit, dispute,
+resolve, reputation, cancel, the list query; templates: create, update, delete, owner query) are generated from
+the zod validators in `src/validation/schemas.ts` with `z.toJSONSchema`, so changing a validator changes the spec.
+Rules a JSON Schema cannot express (`.refine`, such as "client and freelancer must differ") are listed in the
+operation's description. `tests/openapi-conformance.test.ts` fails if a documented request schema drifts from its
+validator.
 
 ## Deployment
 

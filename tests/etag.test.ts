@@ -61,11 +61,17 @@ describe('TalentTrust API', () => {
         .set('If-Match', staleEtag);
 
       expect(res412.status).toBe(412);
+      expect(res412.headers['content-type']).toContain('application/problem+json');
       expect(res412.header.etag).toBe(`"${contractId}-2"`);
-      expect(res412.body).toEqual({
+      expect(res412.body).toMatchObject({
+        type: 'https://talenttrust-backend.vercel.app/errors/precondition_failed',
+        title: 'Precondition failed',
+        status: 412,
+        detail: 'Precondition failed',
         error: 'precondition_failed',
         message: 'Precondition failed',
         currentVersion: 2,
+        requestId: expect.any(String),
       });
 
       // Verify contract was not released and version did not bump
@@ -157,9 +163,15 @@ describe('TalentTrust API', () => {
           .post(`/api/v1/contracts/${contractId}/deposit`)
           .send({ amount: 50 });
         expect(res428.status).toBe(428);
-        expect(res428.body).toEqual({
+        expect(res428.headers['content-type']).toContain('application/problem+json');
+        expect(res428.body).toMatchObject({
+          type: 'https://talenttrust-backend.vercel.app/errors/precondition_required',
+          title: 'Precondition required',
+          status: 428,
+          detail: 'If-Match header is required',
           error: 'precondition_required',
           message: 'If-Match header is required',
+          requestId: expect.any(String),
         });
 
         // Mutation with valid If-Match succeeds
