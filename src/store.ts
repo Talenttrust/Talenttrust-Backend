@@ -13,6 +13,7 @@
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditSnapshot, type AuditState } from './audit';
+import { config } from './config';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
 
@@ -234,13 +235,8 @@ const REPUTATION_SORTS: ReputationSort[] = ['score', 'completed', 'average'];
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 /** C in the Bayesian score; REPUTATION_PRIOR_WEIGHT (default 5) unless overridden per store. */
-const parsePriorWeight = (override?: number): number => {
-  if (override !== undefined) return override;
-  const raw = process.env.REPUTATION_PRIOR_WEIGHT;
-  if (raw === undefined || raw === '') return 5;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 5;
-};
+const parsePriorWeight = (override?: number): number =>
+  override !== undefined ? override : config.reputationPriorWeight;
 
 const encodeReputationCursor = (sort: ReputationSort, address: string, windowKey = 'all'): string =>
   Buffer.from(JSON.stringify({ sort, address, window: windowKey }), 'utf8').toString('base64url');
