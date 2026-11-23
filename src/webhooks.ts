@@ -41,6 +41,7 @@ export interface WebhookDelivery {
 
 export interface HttpClientResponse {
   statusCode: number;
+  retryAfterMs?: number;
 }
 
 export type WebhookHttpClient = (url: URL, body: string, headers: Record<string, string>, timeoutMs: number) => Promise<HttpClientResponse>;
@@ -169,7 +170,12 @@ const defaultHttpClient: WebhookHttpClient = (url, body, headers, timeoutMs) => 
     { method: 'POST', headers, timeout: timeoutMs },
     (response) => {
       response.resume();
-      response.once('end', () => resolve({ statusCode: response.statusCode ?? 0 }));
+      response.once('end', () => {
+        const raw = response.headers['retry-after'];
+        const seconds = Number(Array.isArray(raw) ? raw[0] : raw);
+        const retryAfterMs = raw !== undefined && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
+        resolve({ statusCode: response.statusCode ?? 0, retryAfterMs });
+      });
     },
   );
   request.once('timeout', () => request.destroy(new Error('delivery timeout')));
@@ -309,6 +315,7 @@ export class WebhookManager {
     while (delivery.attempts < this.maxAttempts) {
       delivery.attempts += 1;
       delivery.updatedAt = new Date(this.now()).toISOString();
+      let retryAfterMs: number | undefined;
       try {
         const url = await validateWebhookUrl(subscription.url);
         const body = JSON.stringify(event);
@@ -322,13 +329,16 @@ export class WebhookManager {
           return;
         }
         delivery.lastError = `HTTP ${response.statusCode}`;
-        if (response.statusCode >= 400 && response.statusCode < 500) break;
+        const retryable = response.statusCode === 408 || response.statusCode === 425 || response.statusCode === 429;
+        if (response.statusCode >= 400 && response.statusCode < 500 && !retryable) break;
+        retryAfterMs = response.retryAfterMs;
       } catch (error) {
         delivery.lastError = error instanceof Error ? error.message : 'delivery failed';
       }
       if (delivery.attempts < this.maxAttempts) {
         const base = Math.min(30_000, 1_000 * 2 ** (delivery.attempts - 1));
-        await this.sleep(Math.round(base * (1 + (this.random() * 2 - 1) * 0.1)));
+        const backoff = Math.round(base * (1 + (this.random() * 2 - 1) * 0.1));
+        await this.sleep(retryAfterMs !== undefined ? Math.min(30_000, retryAfterMs) : backoff);
       }
     }
     delivery.status = 'failed';
