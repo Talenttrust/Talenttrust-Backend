@@ -1,6 +1,71 @@
 import { createHash } from 'crypto';
 import { config, explorerUrl } from './config';
 import { ALLOWED_FIELDS } from './utils/project';
+import { z } from 'zod';
+import {
+  Amount,
+  CancelBody,
+  CREATE_CONTRACT_RULES,
+  CreateContractBody,
+  CreateTemplateBody,
+  DeleteTemplateBody,
+  DepositBody,
+  DisputeBody,
+  IdParam,
+  ListQuery,
+  MilestoneIndexParam,
+  Milestones,
+  RateBody,
+  ResolveBody,
+  TEMPLATE_RULES,
+  TemplateOwnerQuery,
+  UpdateTemplateBody,
+} from './validation/schemas';
+
+/**
+ * OpenAPI 3.0 schema for a zod validator, as the request side sees it. The
+ * request body and parameter schemas below come from src/validation/schemas.ts
+ * through this function, so a validator change (a limit, a new field) changes
+ * the published spec without editing this file. `.refine` rules have no JSON
+ * Schema form; they are listed in the operation description (see `rules`).
+ */
+export function requestSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _dialect, ...rest } = z.toJSONSchema(schema, {
+    target: 'openapi-3.0',
+    io: 'input',
+    unrepresentable: 'any',
+  }) as Record<string, unknown>;
+  return rest;
+}
+
+type ParamDoc = { description?: string; schema?: Record<string, unknown> };
+
+/**
+ * One OpenAPI parameter per key of a zod object schema, in shape order.
+ * `docs` adds a description, and for query strings (which zod sees as plain
+ * strings) the constraints the route checks itself, such as `limit` 1–100.
+ */
+export function zodParameters(
+  schema: z.ZodObject,
+  location: 'path' | 'query',
+  docs: Record<string, ParamDoc> = {},
+): Array<Record<string, unknown>> {
+  const object = requestSchema(schema) as { properties: Record<string, object>; required?: string[] };
+  return Object.entries(object.properties).map(([name, propertySchema]) => ({
+    name,
+    in: location,
+    required: location === 'path' || (object.required ?? []).includes(name),
+    ...(docs[name]?.description ? { description: docs[name].description } : {}),
+    schema: { ...propertySchema, ...docs[name]?.schema },
+  }));
+}
+
+/** "Also checked by the validator" note for `.refine` rules a JSON Schema cannot express. */
+const rules = (messages: Record<string, string>) =>
+  'Also checked by the validator (400 `validation_failed`), beyond the schema:\n' +
+  Object.values(messages)
+    .map((m) => `- ${m}`)
+    .join('\n');
 
 const json = (schema: object) => ({ 'application/json': { schema } });
 const ok = (description: string, schema: object = { type: 'object' }, headers?: object) => ({
@@ -57,20 +122,8 @@ const errorResponses = {
   },
 };
 
-const idParam = {
-  name: 'id',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
-  description: 'Contract ID (positive integer)',
-};
-const indexParam = {
-  name: 'index',
-  in: 'path',
-  required: true,
-  schema: { type: 'string', pattern: '^(?:[0-9]|1[0-9])$' },
-  description: 'Milestone index (0-19)',
-};
+const [idParam] = zodParameters(IdParam, 'path', { id: { description: 'Contract ID (positive integer)' } });
+const [indexParam] = zodParameters(MilestoneIndexParam, 'path', { index: { description: 'Milestone index (0-19)' } });
 const addressParam = {
   name: 'address',
   in: 'path',
@@ -104,6 +157,24 @@ const fieldsParam = {
   },
 };
 
+/** Descriptions, plus the constraints GET /contracts checks itself, for the ListQuery parameters. */
+export const listQueryDocs: Record<string, ParamDoc> = {
+  status: { description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
+  party: { description: 'Client or freelancer address' },
+  role: { description: 'Restricts `party` to the given role; requires `party`', schema: { enum: ['client', 'freelancer'] } },
+  token: { description: 'Exact token match' },
+  createdAfter: { description: 'ISO-8601 lower bound on createdAt', schema: { format: 'date-time' } },
+  createdBefore: { description: 'ISO-8601 upper bound on createdAt', schema: { format: 'date-time' } },
+  limit: { description: 'Page size', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+  cursor: { description: 'Opaque cursor returned in `page.nextCursor`' },
+  sort: {
+    description: 'Sort field and direction',
+    schema: { enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' },
+  },
+  linked: { description: 'Filter by whether contract is linked to on-chain escrow' },
+  fields: { description: fieldsParam.description, schema: fieldsParam.schema },
+};
+
 const fieldsError = {
   400: {
     description: 'Invalid `?fields=` value. The response body lists valid field names.',
@@ -111,28 +182,8 @@ const fieldsError = {
   },
 };
 
-const amountSchema = {
-  oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$' }],
-  description: 'Amount in token base units. Must be a positive integer.',
-};
-const milestonesSchema = {
-  type: 'array',
-  minItems: 1,
-  maxItems: 20,
-  items: {
-    oneOf: [
-      amountSchema,
-      {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          amount: amountSchema,
-        },
-        required: ['amount'],
-      },
-    ],
-  },
-};
+const amountSchema = requestSchema(Amount);
+const milestonesSchema = requestSchema(Milestones);
 
 const spec = {
   openapi: '3.0.3',
@@ -305,33 +356,65 @@ const spec = {
       post: {
         tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
         security: [{ webhookAdmin: [] }],
-        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
-        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL, event selection, or filter (invalid_filter)' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
       },
       get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
     },
     '/api/v1/webhook-subscriptions/{id}': {
       get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
-      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      patch: {
+        tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: { content: json({ type: 'object', properties: { filter: { allOf: [{ $ref: '#/components/schemas/WebhookSubscriptionFilter' }], nullable: true, description: 'Set the filter, or null to clear it' } } }) },
+        responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update, including invalid_filter' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
       delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
       post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/deliveries': {
-      get: { tags: ['Webhooks'], summary: 'List bounded webhook delivery history', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Delivery history' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      get: {
+        tags: ['Webhooks'],
+        summary: 'List webhook delivery history, newest first',
+        security: [{ webhookAdmin: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          {
+            name: 'limit', in: 'query', required: false,
+            description: 'Maximum number of newest deliveries to return (default 50)',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+          },
+          {
+            name: 'status', in: 'query', required: false,
+            description: 'Only return deliveries with this status',
+            schema: { type: 'string', enum: ['pending', 'success', 'failed'] },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Delivery history, newest first, limited to `limit` records',
+            content: json({ type: 'object', required: ['data'], properties: { data: { type: 'array', items: { type: 'object' } } } }),
+          },
+          400: { description: 'Invalid query: limit must be an integer from 1 to 100; status must be pending, success or failed' },
+          401: { description: 'Unauthorized' },
+          404: { description: 'Not found or disabled' },
+        },
+      },
     },
     '/api/v1/templates': {
       post: {
         tags: ['Templates'],
         summary: 'Create a milestone template (fixed amounts or percent of a budget)',
+        description: rules({ matchMode: TEMPLATE_RULES.matchMode, percentSum: TEMPLATE_RULES.percentSum }),
         requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
         responses: { 201: { description: 'Created', content: json({ $ref: '#/components/schemas/Template' }) }, 400: errorResponse('Invalid template') },
       },
       get: {
         tags: ['Templates'],
         summary: 'List templates of an owner',
-        parameters: [{ name: 'owner', in: 'query', required: true, schema: { type: 'string' } }],
+        parameters: zodParameters(TemplateOwnerQuery, 'query'),
         responses: { ...ok('Templates', { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } }), 400: errorResponse('owner is required') },
       },
     },
@@ -345,8 +428,9 @@ const spec = {
       put: {
         tags: ['Templates'],
         summary: 'Update a template (owner only; bumps version)',
+        description: rules({ updateNoMix: TEMPLATE_RULES.updateNoMix }),
         parameters: [idParam],
-        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateUpdateInput' }) },
         responses: {
           ...ok('Updated template', { $ref: '#/components/schemas/Template' }),
           400: errorResponse('Invalid template'),
@@ -358,7 +442,7 @@ const spec = {
         tags: ['Templates'],
         summary: 'Delete a template (owner only; existing contracts are unaffected)',
         parameters: [idParam],
-        requestBody: { required: true, content: json({ type: 'object', required: ['owner'], properties: { owner: { type: 'string' } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateDeleteRequest' }) },
         responses: {
           ...ok('Deleted', { type: 'object', properties: { success: { type: 'boolean' } } }),
           403: errorResponse('Not the owner'),
@@ -532,15 +616,24 @@ const spec = {
     '/api/v1/auth/whoami': {
       get: {
         tags: ['Auth'],
-        summary: 'Show the scoped API key in use (id and scopes)',
+        summary: 'Show the scoped API key in use (id, scopes and expiry)',
         security: [{ apiKey: [] }],
         responses: {
-          ...ok('Key id and scopes', {
+          ...ok('Key id, scopes and expiry', {
             type: 'object',
-            required: ['keyId', 'scopes'],
-            properties: { keyId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+            required: ['keyId', 'scopes', 'expiresAt'],
+            properties: {
+              keyId: { type: 'string' },
+              scopes: { type: 'array', items: { type: 'string' } },
+              expiresAt: {
+                type: 'string',
+                format: 'date-time',
+                nullable: true,
+                description: 'When the key stops working (ISO 8601 UTC); null for a key that never expires.',
+              },
+            },
           }),
-          401: errorResponse('Missing or invalid API key'),
+          401: errorResponse('Missing, invalid or expired API key'),
         },
       },
     },
@@ -721,6 +814,7 @@ const spec = {
               type: 'object',
               properties: {
                 processed: { type: 'integer' },
+                pages: { type: 'integer' },
                 cursor: { type: 'string' },
                 latestLedger: { type: 'integer' },
               },
@@ -929,19 +1023,9 @@ const spec = {
           '`page.nextCursor` back as `cursor` (with the same `sort`) for the next page; ties are broken by id. ' +
           'Use `?fields=` to request a sparse response — only the listed fields are included, ' +
           'reducing payload size for list views.',
-        parameters: [
-          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Page size' },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
-          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
-          { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
-          { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
-          { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
-          { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
-          { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
-          { name: 'createdBefore', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 upper bound on createdAt' },
-          fieldsParam,
-          { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
-        ],
+        // Names, presence and zod constraints come from ListQuery. The extra
+        // schema keywords below are checked by the route itself (400 invalid_query).
+        parameters: zodParameters(ListQuery, 'query', listQueryDocs),
         responses: {
           ...ok('Paginated contracts', {
             type: 'object',
@@ -965,34 +1049,9 @@ const spec = {
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        description: rules(CREATE_CONTRACT_RULES),
         parameters: [receiptQueryParam],
-        requestBody: {
-          required: true,
-          content: json({
-            type: 'object',
-            required: ['client', 'freelancer'],
-            properties: {
-              title: { type: 'string' },
-              client: { type: 'string' },
-              freelancer: { type: 'string' },
-              token: { type: 'string', default: 'XLM' },
-              fundingDeadline: {
-                type: 'string',
-                format: 'date-time',
-                description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)',
-              },
-              templateId: {
-                type: 'integer',
-                description: 'Create from a milestone template instead of `milestones` (exactly one of the two is required)',
-              },
-              budget: {
-                ...amountSchema,
-                description: 'Total budget in base units; required for percent templates, forbidden otherwise',
-              },
-              milestones: milestonesSchema,
-            },
-          }),
-        },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/CreateContractRequest' }) },
         responses: {
           201: { description: 'Created', content: json(contractRef) },
           400: errorResponse('Invalid contract input'),
@@ -1092,7 +1151,7 @@ const spec = {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { amount: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^[1-9][0-9]{0,37}$', description: 'Positive decimal integer string' }], description: 'Deposit amount in token base units (e.g. stroops). Must be a positive integer.' } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/DepositRequest' }) },
         responses: ok('Updated contract', contractRef),
       },
     },
@@ -1132,7 +1191,7 @@ const spec = {
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
+      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], requestBody: { required: false, content: json({ $ref: '#/components/schemas/CancelRequest' }) }, responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses } },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
@@ -1142,7 +1201,7 @@ const spec = {
           'Backward-compatible endpoint. Creates a client-to-freelancer review without a comment ' +
           'and sets the contract reputationIssued flag.',
         parameters: [idParam],
-        requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/RateRequest' }) },
         responses: {
           ...ok('Reputation', { $ref: '#/components/schemas/Reputation' }),
           400: { description: 'invalid_rating', content: json(errorRef) },
@@ -1239,12 +1298,25 @@ const spec = {
         summary: 'Ranked freelancer leaderboard (Bayesian score)',
         description:
           'score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there ' +
-          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.',
+          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. ' +
+          'Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.',
         parameters: [
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['score', 'completed', 'average'], default: 'score' } },
           { name: 'minCompleted', in: 'query', schema: { type: 'integer', minimum: 0, default: 1 } },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort)' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort and time window)' },
+          {
+            name: 'since',
+            in: 'query',
+            schema: { type: 'string', format: 'date-time' },
+            description: 'ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays',
+          },
+          {
+            name: 'windowDays',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1 },
+            description: 'Rolling lookback window in days (positive integer); mutually exclusive with since',
+          },
         ],
         responses: {
           ...ok('Leaderboard page', {
@@ -1257,7 +1329,7 @@ const spec = {
               },
             },
           }),
-          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor'),
+          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since'),
         },
       },
     },
@@ -1613,7 +1685,8 @@ const spec = {
           allowed: { type: 'array', items: { type: 'string' } },
         },
       },
-      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } } } },
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
@@ -1721,27 +1794,9 @@ const spec = {
           updatedAt: { type: 'string', format: 'date-time' },
         },
       },
-      TemplateInput: {
-        type: 'object',
-        required: ['owner'],
-        properties: {
-          owner: { type: 'string' },
-          name: { type: 'string', maxLength: 80 },
-          description: { type: 'string', maxLength: 500 },
-          mode: { type: 'string', enum: ['fixed', 'percent'] },
-          milestones: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 20,
-            items: {
-              oneOf: [
-                { type: 'object', required: ['amount'], properties: { title: { type: 'string' }, amount: amountSchema } },
-                { type: 'object', required: ['percentBps'], properties: { title: { type: 'string' }, percentBps: { type: 'integer', minimum: 1, maximum: 10000 } } },
-              ],
-            },
-          },
-        },
-      },
+      TemplateInput: requestSchema(CreateTemplateBody),
+      TemplateUpdateInput: requestSchema(UpdateTemplateBody),
+      TemplateDeleteRequest: requestSchema(DeleteTemplateBody),
       AuditEntry: {
         type: 'object',
         description:
@@ -2337,70 +2392,13 @@ const spec = {
         },
         required: ['error', 'message', 'details'],
       },
-      CreateContractRequest: {
-        type: 'object',
-        required: ['client', 'freelancer', 'milestones'],
-        properties: {
-          title: { type: 'string', maxLength: 120 },
-          client: { type: 'string', minLength: 1 },
-          freelancer: { type: 'string', minLength: 1 },
-          token: { type: 'string', maxLength: 64 },
-          fundingDeadline: { type: 'string', format: 'date-time' },
-          milestones: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 20,
-            items: {
-              oneOf: [
-                amountSchema,
-                {
-                  type: 'object',
-                  properties: {
-                    title: { type: 'string', maxLength: 120 },
-                    amount: amountSchema,
-                  },
-                  required: ['amount'],
-                  additionalProperties: false,
-                },
-              ],
-            },
-          },
-        },
-        additionalProperties: false,
-      },
-      DepositRequest: {
-        type: 'object',
-        required: ['amount'],
-        properties: {
-          amount: amountSchema,
-        },
-        additionalProperties: false,
-      },
-      DisputeRequest: {
-        type: 'object',
-        required: ['raisedBy'],
-        properties: {
-          raisedBy: { type: 'string', minLength: 1 },
-          reason: { type: 'string', minLength: 1, maxLength: 1000 },
-        },
-        additionalProperties: false,
-      },
-      ResolveRequest: {
-        type: 'object',
-        required: ['freelancerBps'],
-        properties: {
-          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
-        },
-        additionalProperties: false,
-      },
-      RateRequest: {
-        type: 'object',
-        required: ['rating'],
-        properties: {
-          rating: { type: 'integer', minimum: 1, maximum: 5 },
-        },
-        additionalProperties: false,
-      },
+      // Request bodies, derived from the zod validators in src/validation/schemas.ts.
+      CreateContractRequest: requestSchema(CreateContractBody),
+      DepositRequest: requestSchema(DepositBody),
+      DisputeRequest: requestSchema(DisputeBody),
+      ResolveRequest: requestSchema(ResolveBody),
+      RateRequest: requestSchema(RateBody),
+      CancelRequest: requestSchema(CancelBody),
     },
   },
 };

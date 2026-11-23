@@ -85,7 +85,8 @@ export const fingerprint = (body: unknown) =>
     .digest('hex');
 
 const KEY_RE = /^[\x20-\x7e]{1,255}$/;
-const REPLAY_HEADERS = ['location'];
+/** Response headers stored with the response and restored verbatim on replay (matched case-insensitively). */
+const REPLAY_HEADERS = ['location', 'etag', 'receipt'];
 
 const principalOf = (req: Request): string | null => {
   const id = (req as Request & { user?: { id?: unknown } }).user?.id;

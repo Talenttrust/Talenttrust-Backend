@@ -47,6 +47,13 @@ export interface VerifyResult {
   brokenAt?: number;
 }
 
+export interface AuditSnapshot {
+  entries: AuditEntry[];
+  nextSeq: number;
+  prevHash: string;
+  truncatedBeforeSeq: number | null;
+}
+
 /**
  * Canonical JSON serialization with sorted keys for stable hashing.
  */
@@ -82,8 +89,16 @@ function computeEntryHash(entry: Omit<AuditEntry, 'hash'>): string {
   return sha256(prevHash + canonical);
 }
 
+interface ContractBucket {
+  entries: (AuditEntry | undefined)[];
+  head: number;
+}
+
 export class AuditStore {
-  private entries: AuditEntry[] = [];
+  private ring: (AuditEntry | undefined)[];
+  private head = 0;
+  private count = 0;
+  private byContract = new Map<number, ContractBucket>();
   private nextSeq = 1;
   private prevHash = '0'.repeat(64); // Genesis hash
   private truncatedBeforeSeq: number | null = null;
@@ -91,6 +106,12 @@ export class AuditStore {
     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
       throw new Error(`Invalid audit maxEntries: "${maxEntries}". Must be a positive integer.`);
     }
+  }
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = 100_000) {
+    this.maxEntries = maxEntries;
+    this.ring = new Array<AuditEntry | undefined>(maxEntries);
   }
 
   /**
@@ -122,18 +143,52 @@ export class AuditStore {
     const hash = computeEntryHash(entry);
     const fullEntry: AuditEntry = { ...entry, hash };
 
-    this.entries.push(fullEntry);
     this.prevHash = hash;
 
-    // Evict oldest entries if we exceed the limit
-    if (this.entries.length > this.maxEntries) {
-      const evicted = this.entries.shift();
-      if (evicted && !this.truncatedBeforeSeq) {
-        this.truncatedBeforeSeq = evicted.seq;
+    // Insert into ring buffer, evicting oldest entry in O(1) when at capacity
+    if (this.count === this.maxEntries) {
+      const evicted = this.ring[this.head];
+      this.ring[this.head] = fullEntry;
+      this.head = (this.head + 1) % this.maxEntries;
+
+      if (evicted) {
+        if (!this.truncatedBeforeSeq) {
+          this.truncatedBeforeSeq = evicted.seq;
+        }
+        this.evictFromContractIndex(evicted);
       }
+    } else {
+      const tail = (this.head + this.count) % this.maxEntries;
+      this.ring[tail] = fullEntry;
+      this.count++;
     }
 
+    // Index entry per contract
+    let bucket = this.byContract.get(fullEntry.contractId);
+    if (!bucket) {
+      bucket = { entries: [], head: 0 };
+      this.byContract.set(fullEntry.contractId, bucket);
+    }
+    bucket.entries.push(fullEntry);
+
     return fullEntry;
+  }
+
+  private evictFromContractIndex(evicted: AuditEntry): void {
+    const bucket = this.byContract.get(evicted.contractId);
+    if (!bucket) return;
+
+    if (bucket.head < bucket.entries.length && bucket.entries[bucket.head]?.seq === evicted.seq) {
+      bucket.entries[bucket.head] = undefined;
+      bucket.head++;
+
+      if (bucket.head === bucket.entries.length) {
+        this.byContract.delete(evicted.contractId);
+      } else if (bucket.head >= 1024 && bucket.head * 2 >= bucket.entries.length) {
+        bucket.entries = bucket.entries.slice(bucket.head);
+        bucket.head = 0;
+      }
+    }
   }
 
   /**
@@ -143,33 +198,51 @@ export class AuditStore {
     data: AuditEntry[];
     nextCursor?: number;
   } {
-    const contractEntries = this.entries.filter((e) => e.contractId === contractId);
-    let startIndex = 0;
-    if (cursor) {
-      startIndex = contractEntries.findIndex((e) => e.seq > cursor);
-      if (startIndex === -1) startIndex = contractEntries.length;
+    const bucket = this.byContract.get(contractId);
+    if (!bucket) {
+      return { data: [], nextCursor: undefined };
     }
-    const slice = contractEntries.slice(startIndex);
-    const limited = limit ? slice.slice(0, limit) : slice;
 
-    const nextCursor = limited.length > 0 && limited.length < slice.length ? limited[limited.length - 1].seq : undefined;
+    const { entries, head } = bucket;
+    const len = entries.length;
+    let startIndex = head;
 
-    return { data: limited, nextCursor };
+    if (cursor) {
+      let lo = head;
+      let hi = len;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if ((entries[mid] as AuditEntry).seq <= cursor) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      startIndex = lo;
+    }
+
+    const remaining = len - startIndex;
+    const endIndex = limit ? Math.min(startIndex + limit, len) : len;
+    const data = entries.slice(startIndex, endIndex) as AuditEntry[];
+    const nextCursor = data.length > 0 && data.length < remaining ? data[data.length - 1].seq : undefined;
+
+    return { data, nextCursor };
   }
 
   /**
    * Verify the integrity of the entire audit chain.
    */
   verify(): VerifyResult {
-    if (this.entries.length === 0) {
+    if (this.count === 0) {
       return { valid: true, entries: 0, truncatedBeforeSeq: this.truncatedBeforeSeq, maxEntries: this.maxEntries };
     }
 
     // If entries were evicted, start verification from the first retained entry's prevHash
-    let currentHash = this.truncatedBeforeSeq ? this.entries[0].prevHash : '0'.repeat(64);
+    const firstEntry = this.ring[this.head] as AuditEntry;
+    let currentHash = this.truncatedBeforeSeq ? firstEntry.prevHash : '0'.repeat(64);
 
-    for (let i = 0; i < this.entries.length; i++) {
-      const entry = this.entries[i];
+    for (let i = 0; i < this.count; i++) {
+      const entry = this.ring[(this.head + i) % this.maxEntries] as AuditEntry;
       const { hash, ...withoutHash } = entry;
       const expectedHash = computeEntryHash({ ...withoutHash, prevHash: currentHash });
 
@@ -181,6 +254,7 @@ export class AuditStore {
           maxEntries: this.maxEntries,
           brokenAt: entry.seq,
         };
+        return { valid: false, entries: this.count, brokenAt: entry.seq };
       }
 
       currentHash = hash;
@@ -192,6 +266,7 @@ export class AuditStore {
       truncatedBeforeSeq: this.truncatedBeforeSeq,
       maxEntries: this.maxEntries,
     };
+    return { valid: true, entries: this.count };
   }
 
   /**
@@ -202,11 +277,37 @@ export class AuditStore {
   }
 
   /**
+   * Export a deep-cloned snapshot of the audit store state.
+   */
+  toSnapshot(): AuditSnapshot {
+    return {
+      entries: structuredClone(this.entries),
+      nextSeq: this.nextSeq,
+      prevHash: this.prevHash,
+      truncatedBeforeSeq: this.truncatedBeforeSeq,
+    };
+  }
+
+  /**
+   * Restore audit store state from a snapshot.
+   */
+  loadSnapshot(snapshot: AuditSnapshot): void {
+    this.entries = structuredClone(snapshot.entries);
+    this.nextSeq = snapshot.nextSeq;
+    this.prevHash = snapshot.prevHash;
+    this.truncatedBeforeSeq = snapshot.truncatedBeforeSeq;
+  }
+
+  /**
    * Internal method for testing: allow tampering with an entry.
    */
   _tamperWithEntry(seq: number, mutation: (entry: AuditEntry) => void): void {
-    const entry = this.entries.find((e) => e.seq === seq);
-    if (entry) {
+    if (this.count === 0) return;
+    const firstEntry = this.ring[this.head] as AuditEntry;
+    const offset = seq - firstEntry.seq;
+    if (offset < 0 || offset >= this.count) return;
+    const entry = this.ring[(this.head + offset) % this.maxEntries];
+    if (entry && entry.seq === seq) {
       mutation(entry);
     }
   }

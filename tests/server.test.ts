@@ -1,5 +1,5 @@
 import express from 'express';
-import { startServer, parsePort, resolveTimeouts } from '../src/server';
+import { startServer, parsePort, resolveTimeouts, resolveShutdownGraceMs } from '../src/server';
 import http from 'http';
 import net from 'net';
 
@@ -26,6 +26,18 @@ describe('Server lifecycle', () => {
 
     expect(() => resolveTimeouts({ KEEP_ALIVE_TIMEOUT_MS: 'abc' })).toThrow(/Invalid KEEP_ALIVE_TIMEOUT_MS/);
     expect(() => resolveTimeouts({ HEADERS_TIMEOUT_MS: 'abc' })).toThrow(/Invalid HEADERS_TIMEOUT_MS/);
+    expect(resolveTimeouts({ REQUEST_TIMEOUT_MS: '1234' }).requestTimeoutMs).toBe(1234);
+    expect(() => resolveTimeouts({ REQUEST_TIMEOUT_MS: 'abc' })).toThrow(/Invalid REQUEST_TIMEOUT_MS/);
+  });
+
+  it('resolveShutdownGraceMs uses default and rejects invalid values', () => {
+    expect(resolveShutdownGraceMs({})).toBe(10_000);
+    expect(resolveShutdownGraceMs({ SHUTDOWN_GRACE_MS: '2500' })).toBe(2_500);
+
+    expect(() => resolveShutdownGraceMs({ SHUTDOWN_GRACE_MS: 'abc' })).toThrow(/Invalid SHUTDOWN_GRACE_MS/);
+    expect(() => resolveShutdownGraceMs({ SHUTDOWN_GRACE_MS: '0' })).toThrow(/SHUTDOWN_GRACE_MS.*positive number/);
+    expect(() => resolveShutdownGraceMs({ SHUTDOWN_GRACE_MS: '-1' })).toThrow(/Invalid SHUTDOWN_GRACE_MS/);
+    expect(() => resolveShutdownGraceMs({ SHUTDOWN_GRACE_MS: 'Infinity' })).toThrow(/Invalid SHUTDOWN_GRACE_MS/);
   });
 
   it('startServer applies configured timeouts', async () => {
@@ -37,6 +49,7 @@ describe('Server lifecycle', () => {
     });
     expect(server.keepAliveTimeout).toBe(30_000);
     expect(server.headersTimeout).toBe(31_000);
+    expect(server.requestTimeout).toBe(5_000);
     await close();
   });
 

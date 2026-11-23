@@ -58,6 +58,50 @@ describe('Idempotency-Key', () => {
     expect(store.get(c.id).fundedAmount).toBe(50);
   });
 
+  it('replays the exact ETag of an idempotent deposit', async () => {
+    const { body: c } = await create(app, [200]).expect(201);
+    const url = `/api/v1/contracts/${c.id}/deposit`;
+    const first = await request(app).post(url).set('Idempotency-Key', 'etag-1').send({ amount: 50 }).expect(200);
+    expect(first.headers.etag).toBeDefined();
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    const second = await request(app).post(url).set('Idempotency-Key', 'etag-1').send({ amount: 50 }).expect(200);
+    expect(second.headers.etag).toBe(first.headers.etag);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.status).toBe(first.status);
+    expect(second.body).toEqual(first.body);
+    // No receipt was requested, so replay must not fabricate one.
+    expect(second.headers.receipt).toBeUndefined();
+  });
+
+  it('replays the exact Receipt header of an idempotent ?receipt=true deposit', async () => {
+    const { body: c } = await create(app, [200]).expect(201);
+    const url = `/api/v1/contracts/${c.id}/deposit?receipt=true`;
+    const first = await request(app).post(url).set('Idempotency-Key', 'receipt-1').send({ amount: 50 }).expect(200);
+    expect(typeof first.headers.receipt).toBe('string');
+    const second = await request(app).post(url).set('Idempotency-Key', 'receipt-1').send({ amount: 50 }).expect(200);
+    expect(second.headers.receipt).toBe(first.headers.receipt);
+    expect(second.headers.etag).toBe(first.headers.etag);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.status).toBe(first.status);
+    expect(second.body).toEqual(first.body);
+  });
+
+  it('replays a Location header captured from the original response', async () => {
+    let calls = 0;
+    const a = express();
+    a.use(express.json());
+    a.post('/api/v1/things', idempotency(new MemoryIdempotencyStore()), (_req, res) => {
+      calls += 1;
+      res.status(201).setHeader('Location', '/api/v1/things/1').json({ id: 1 });
+    });
+    const first = await request(a).post('/api/v1/things').set('Idempotency-Key', 'loc-1').expect(201);
+    const second = await request(a).post('/api/v1/things').set('Idempotency-Key', 'loc-1').expect(201);
+    expect(first.headers.location).toBe('/api/v1/things/1');
+    expect(second.headers.location).toBe('/api/v1/things/1');
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(calls).toBe(1);
+  });
+
   it('replays a snapshot, not the live contract state', async () => {
     const { body: c } = await create(app).expect(201);
     const url = `/api/v1/contracts/${c.id}/deposit`;

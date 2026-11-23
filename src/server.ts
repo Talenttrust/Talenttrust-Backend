@@ -14,6 +14,7 @@ export interface StartServerOptions {
   timeouts?: Partial<ServerTimeouts>;
   shutdownGraceMs?: number;
   logger?: (message: string) => void;
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface StartServerResult {
@@ -62,12 +63,22 @@ export function resolveTimeouts(env: NodeJS.ProcessEnv): ServerTimeouts {
   return { keepAliveTimeoutMs: keepAlive, headersTimeoutMs: headers, requestTimeoutMs: request };
 }
 
+export function resolveShutdownGraceMs(env: NodeJS.ProcessEnv): number {
+  const grace = env.SHUTDOWN_GRACE_MS ? Number(env.SHUTDOWN_GRACE_MS) : DEFAULT_SHUTDOWN_GRACE_MS;
+
+  if (!Number.isFinite(grace) || grace <= 0) {
+    throw new Error(`Invalid SHUTDOWN_GRACE_MS: "${env.SHUTDOWN_GRACE_MS}". Must be a positive number.`);
+  }
+  return grace;
+}
+
 export function startServer({
   app,
   port,
   timeouts,
   shutdownGraceMs,
   logger,
+  onShutdown,
 }: StartServerOptions): StartServerResult {
   const log = logger ?? ((msg: string) => console.log(msg));
   const resolved = { ...DEFAULT_TIMEOUTS, ...(timeouts ?? {}) };
@@ -84,6 +95,7 @@ export function startServer({
 
   server.keepAliveTimeout = resolved.keepAliveTimeoutMs;
   server.headersTimeout = resolved.headersTimeoutMs;
+  server.requestTimeout = resolved.requestTimeoutMs;
 
   server.on('request', (_req, res) => {
     activeRequests++;
@@ -105,7 +117,7 @@ export function startServer({
     draining = true;
     app.set('draining', true);
 
-    return new Promise((resolve) => {
+    const result = await new Promise<{ forced: boolean }>((resolve) => {
       server.close(() => {
         // Stopped accepting new connections.
       });
@@ -126,6 +138,11 @@ export function startServer({
       };
       poll();
     });
+
+    if (onShutdown) {
+      await onShutdown();
+    }
+    return result;
   }
 
   function handleSigTerm() {
