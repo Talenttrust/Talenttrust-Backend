@@ -818,6 +818,44 @@ const spec = {
         },
       },
     },
+    '/api/cron/reconcile-parity': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Reconcile API/chain parity for all linked contracts (Vercel cron; also accepts POST)',
+        description:
+          'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset. Checks linked contracts with bounded concurrency and a time budget, reporting in-sync/drifted/unreachable counts and drifted contract IDs. Unreachable chain reads for individual contracts do not abort the run.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Parity reconciliation completed',
+            content: json({
+              type: 'object',
+              properties: {
+                checked: { type: 'integer' },
+                inSync: { type: 'integer' },
+                drifted: { type: 'integer' },
+                unreachable: { type: 'integer' },
+                driftedContractIds: { type: 'array', items: { type: 'integer' } },
+                timedOut: { type: 'boolean' },
+              },
+            }),
+          },
+          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          404: { description: 'Not found - CRON_SECRET is unset' },
+        },
+      },
+      post: {
+        tags: ['Cron'],
+        summary: 'Reconcile API/chain parity for all linked contracts',
+        description: 'Same as GET. Requires `Authorization: Bearer <CRON_SECRET>`.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Parity reconciliation completed' },
+          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          404: { description: 'Not found - CRON_SECRET is unset' },
+        },
+      },
+    },
     '/api/v1/chain/events': {
       get: {
         tags: ['Events'],
