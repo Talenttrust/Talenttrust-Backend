@@ -3,6 +3,8 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { MemoryIdempotencyStore, StoredResponse, fingerprint, idempotency } from '../src/idempotency';
+import { Keypair } from '@stellar/stellar-sdk';
+import { authHeader } from './helpers/auth';
 
 type App = ReturnType<typeof createApp>;
 const parties = { client: 'GA', freelancer: 'GB' };
@@ -377,6 +379,40 @@ describe('Idempotency-Key', () => {
     expect(bob.headers['idempotent-replayed']).toBeUndefined();
     expect(alice2.body).toEqual(alice.body);
     expect(alice2.headers['idempotent-replayed']).toBe('true');
+  });
+
+  it('scopes replay entries by wallet from the real challenge and token flow', async () => {
+    const authSecret = 'idempotency-test-secret-that-is-long-enough';
+    const walletApp = createApp({ store: new EscrowStore(), authSecret });
+    const alice = await authHeader(Keypair.random(), walletApp);
+    const bob = await authHeader(Keypair.random(), walletApp);
+    const body = { client: 'GA', freelancer: 'GB', milestones: [100] };
+    const post = (authorization: string) => request(walletApp)
+      .post('/api/v1/contracts')
+      .set('Authorization', authorization)
+      .set('Idempotency-Key', 'same-wallet-key')
+      .send(body);
+
+    const first = await post(alice.Authorization).expect(201);
+    const secondWallet = await post(bob.Authorization).expect(201);
+    const replay = await post(alice.Authorization).expect(201);
+
+    expect(secondWallet.headers['idempotent-replayed']).toBeUndefined();
+    expect(secondWallet.body.id).not.toBe(first.body.id);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect(replay.body.id).toBe(first.body.id);
+  });
+
+  it('does not fail idempotency processing for an invalid bearer token', async () => {
+    const authSecret = 'idempotency-test-secret-that-is-long-enough';
+    const walletApp = createApp({ store: new EscrowStore(), authSecret });
+    const response = await request(walletApp)
+      .post('/api/v1/contracts')
+      .set('Authorization', 'Bearer invalid-token')
+      .set('Idempotency-Key', 'invalid-bearer')
+      .send({ client: 'GA', freelancer: 'GB', milestones: [100] });
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe('unauthorized');
   });
 });
 

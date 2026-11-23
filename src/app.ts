@@ -277,6 +277,12 @@ export function createApp(
   const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required);
 
   const app = express();
+  const sseStreams = new Set<() => void>();
+  const configuredSseLimit = Number(process.env.SSE_MAX_CONNECTIONS ?? 100);
+  const sseMaxConnections = Number.isInteger(configuredSseLimit) && configuredSseLimit > 0 ? configuredSseLimit : 100;
+  app.locals.closeSseStreams = () => {
+    for (const closeStream of [...sseStreams]) closeStream();
+  };
   // Strong, version-based ETags are set explicitly on contract routes.
   app.set('etag', false);
   app.disable('x-powered-by');
@@ -407,6 +413,7 @@ export function createApp(
 
   app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager().getPublishedKeys()));
 
+        'GET  /api/v1/contracts/:id/stream',
   app.get('/', wrap(() => rootApiInfo));
 
   app.get('/health', (req, res) => {
@@ -493,6 +500,9 @@ export function createApp(
   v1.use(
     idempotency(options.idempotencyStore ?? new MemoryIdempotencyStore(), {
       required: options.idempotencyRequired ?? process.env.IDEMPOTENCY_REQUIRED === 'true',
+      authSecret: auth.secret,
+      now: auth.now,
+      apiKeys,
     }),
   );
   // --- Wallet-signature auth (public) ---
@@ -688,6 +698,59 @@ export function createApp(
   // --- Escrow state machine discovery (read-only, same rules as the mutations) ---
   v1.get('/state-machine', wrap(() => describeStateMachine()));
   v1.get(
+  v1.get('/contracts/:id/stream', (req, res, next) => {
+    let contractId: number;
+    try {
+      contractId = id(req);
+      store.get(contractId); // Preserve the normal 404 response before opening the stream.
+    } catch (err) {
+      return next(err);
+    }
+    if (app.get('draining')) {
+      res.setHeader('Connection', 'close');
+      return res.status(503).json({ status: 'draining' });
+    }
+    if (sseStreams.size >= sseMaxConnections) {
+      return res.status(503).json({ error: 'sse_connection_limit', message: 'SSE connection limit reached' });
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const writeEvent = (event: import('./events').EscrowEvent) => {
+      const eventContract = event.data.contract as EscrowContract | undefined;
+      if (!eventContract || Number(eventContract.id) !== contractId || res.writableEnded) return;
+      const payload: Record<string, unknown> = { ...event.data, contract: publicContract(eventContract) };
+      if (payload.dispute && typeof payload.dispute === 'object') {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { reason: _reason, ...publicDispute } = payload.dispute as Record<string, unknown>;
+        payload.dispute = publicDispute;
+      }
+      res.write(`event: ${event.eventType}\nid: ${event.eventId}\ndata: ${JSON.stringify(payload)}\n\n`);
+    };
+    const lastEventId = req.header('Last-Event-ID');
+    if (lastEventId) {
+      for (const event of store.events.replayAfter(lastEventId)) writeEvent(event);
+    }
+    const unsubscribe = store.events.on(writeEvent);
+    let heartbeat: NodeJS.Timeout;
+    const closeStream = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      sseStreams.delete(closeStream);
+      if (!res.writableEnded) res.end();
+    };
+    heartbeat = setInterval(() => {
+      if (app.get('draining')) closeStream();
+      else if (!res.writableEnded) res.write(': heartbeat\n\n');
+    }, 15_000);
+    sseStreams.add(closeStream);
+    res.on('close', closeStream);
+  });
   const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
   v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
