@@ -6,6 +6,7 @@ import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import { EventIndexer } from '../src/indexer/indexer';
 import { InMemoryEventStore } from '../src/indexer/store';
 import { IndexedEvent, escrowIdOf } from '../src/indexer/types';
+import { parseNonNegativeInt } from '../src/config';
 
 class FakeServer {
   private events: Array<{
@@ -436,6 +437,207 @@ describe('EventIndexer', () => {
       // Specifically, it must NOT be 200 (the full latestLedger value).
       expect(lagLedgers).not.toBe(200);
     });
+  });
+
+  describe('INDEXER_START_LEDGER and getStartLedger', () => {
+    afterEach(() => {
+      delete process.env.INDEXER_START_LEDGER;
+    });
+
+    it('returns default 0 when unset', () => {
+      delete process.env.INDEXER_START_LEDGER;
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+      expect(indexer.getStartLedger()).toBe(0);
+      expect(Number.isNaN(indexer.getStartLedger())).toBe(false);
+    });
+
+    it('returns default 0 when empty string', () => {
+      process.env.INDEXER_START_LEDGER = '';
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+      expect(indexer.getStartLedger()).toBe(0);
+      expect(Number.isNaN(indexer.getStartLedger())).toBe(false);
+    });
+
+    it('returns retention-based start ledger when unset and latestLedger is available', () => {
+      delete process.env.INDEXER_START_LEDGER;
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+      (indexer as any).latestLedger = 20000;
+      // 20000 - 17280 = 2720
+      expect(indexer.getStartLedger()).toBe(2720);
+    });
+
+    it('returns parsed non-negative integer when set to a valid integer', () => {
+      process.env.INDEXER_START_LEDGER = '12345';
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+      expect(indexer.getStartLedger()).toBe(12345);
+    });
+
+    it('allows 0 as a valid start ledger', () => {
+      process.env.INDEXER_START_LEDGER = '0';
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+      expect(indexer.getStartLedger()).toBe(0);
+    });
+
+    it('fails fast at startup in constructor with non-numeric value', () => {
+      process.env.INDEXER_START_LEDGER = 'abc';
+      const store = new InMemoryEventStore();
+      expect(() => new EventIndexer(store, undefined)).toThrow(
+        'Invalid INDEXER_START_LEDGER: "abc". Must be a non-negative integer.',
+      );
+    });
+
+    it('throws with variable name for negative value', () => {
+      process.env.INDEXER_START_LEDGER = '-1';
+      const store = new InMemoryEventStore();
+      expect(() => new EventIndexer(store, undefined)).toThrow(
+        'Invalid INDEXER_START_LEDGER: "-1". Must be a non-negative integer.',
+      );
+    });
+
+    it('throws with variable name for fractional value', () => {
+      process.env.INDEXER_START_LEDGER = '12.5';
+      const store = new InMemoryEventStore();
+      expect(() => new EventIndexer(store, undefined)).toThrow(
+        'Invalid INDEXER_START_LEDGER: "12.5". Must be a non-negative integer.',
+      );
+    });
+
+    it('throws with variable name for whitespace string', () => {
+      process.env.INDEXER_START_LEDGER = '   ';
+      const store = new InMemoryEventStore();
+      expect(() => new EventIndexer(store, undefined)).toThrow(
+        'Invalid INDEXER_START_LEDGER: "   ". Must be a non-negative integer.',
+      );
+    });
+
+    it('never returns NaN for getStartLedger', () => {
+      const store = new InMemoryEventStore();
+      const indexer = new EventIndexer(store, undefined);
+
+      const testValues = ['', '0', '1', '100000'];
+      for (const val of testValues) {
+        process.env.INDEXER_START_LEDGER = val;
+        const result = indexer.getStartLedger();
+        expect(Number.isNaN(result)).toBe(false);
+        expect(result).toBeGreaterThanOrEqual(0);
+      }
+
+      delete process.env.INDEXER_START_LEDGER;
+      expect(Number.isNaN(indexer.getStartLedger())).toBe(false);
+
+      const invalidValues = ['abc', '-5', '3.14', '   ', 'NaN', 'Infinity'];
+      for (const val of invalidValues) {
+        process.env.INDEXER_START_LEDGER = val;
+        expect(() => indexer.getStartLedger()).toThrow(
+          `Invalid INDEXER_START_LEDGER: "${val}". Must be a non-negative integer.`,
+        );
+      }
+    });
+  });
+});
+
+describe('INDEXER_INTERVAL_MS and config validation', () => {
+  const originalEnv = process.env.INDEXER_INTERVAL_MS;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.INDEXER_INTERVAL_MS;
+    } else {
+      process.env.INDEXER_INTERVAL_MS = originalEnv;
+    }
+  });
+
+  it('defaults indexerIntervalMs to 0 when unset or empty', () => {
+    delete process.env.INDEXER_INTERVAL_MS;
+    let cfg!: typeof import('../src/config').config;
+    jest.isolateModules(() => {
+      cfg = require('../src/config').config;
+    });
+    expect(cfg.indexerIntervalMs).toBe(0);
+
+    process.env.INDEXER_INTERVAL_MS = '';
+    jest.isolateModules(() => {
+      cfg = require('../src/config').config;
+    });
+    expect(cfg.indexerIntervalMs).toBe(0);
+  });
+
+  it('accepts 0 and positive integers for INDEXER_INTERVAL_MS', () => {
+    process.env.INDEXER_INTERVAL_MS = '0';
+    let cfg!: typeof import('../src/config').config;
+    jest.isolateModules(() => {
+      cfg = require('../src/config').config;
+    });
+    expect(cfg.indexerIntervalMs).toBe(0);
+
+    process.env.INDEXER_INTERVAL_MS = '5000';
+    jest.isolateModules(() => {
+      cfg = require('../src/config').config;
+    });
+    expect(cfg.indexerIntervalMs).toBe(5000);
+  });
+
+  it('throws for non-numeric value with variable name in message', () => {
+    process.env.INDEXER_INTERVAL_MS = 'abc';
+    expect(() => {
+      jest.isolateModules(() => {
+        require('../src/config');
+      });
+    }).toThrow('Invalid INDEXER_INTERVAL_MS: "abc". Must be a non-negative integer.');
+  });
+
+  it('throws for negative value with variable name in message', () => {
+    process.env.INDEXER_INTERVAL_MS = '-100';
+    expect(() => {
+      jest.isolateModules(() => {
+        require('../src/config');
+      });
+    }).toThrow('Invalid INDEXER_INTERVAL_MS: "-100". Must be a non-negative integer.');
+  });
+
+  it('throws for fractional value with variable name in message', () => {
+    process.env.INDEXER_INTERVAL_MS = '10.5';
+    expect(() => {
+      jest.isolateModules(() => {
+        require('../src/config');
+      });
+    }).toThrow('Invalid INDEXER_INTERVAL_MS: "10.5". Must be a non-negative integer.');
+  });
+
+  it('throws for whitespace-only value with variable name in message', () => {
+    process.env.INDEXER_INTERVAL_MS = '   ';
+    expect(() => {
+      jest.isolateModules(() => {
+        require('../src/config');
+      });
+    }).toThrow('Invalid INDEXER_INTERVAL_MS: "   ". Must be a non-negative integer.');
+  });
+});
+
+describe('parseNonNegativeInt helper', () => {
+  it('returns fallback when raw is undefined or empty string', () => {
+    expect(parseNonNegativeInt('VAR', undefined, 10)).toBe(10);
+    expect(parseNonNegativeInt('VAR', '', 10)).toBe(10);
+    expect(parseNonNegativeInt('VAR', undefined)).toBeUndefined();
+    expect(parseNonNegativeInt('VAR', '')).toBeUndefined();
+  });
+
+  it('parses 0 and positive integers', () => {
+    expect(parseNonNegativeInt('VAR', '0', 10)).toBe(0);
+    expect(parseNonNegativeInt('VAR', '42', 10)).toBe(42);
+    expect(parseNonNegativeInt('VAR', '  100  ', 10)).toBe(100);
+  });
+
+  it('throws for non-numeric, negative, fractional, or whitespace values', () => {
+    expect(() => parseNonNegativeInt('TEST_VAR', 'abc')).toThrow('Invalid TEST_VAR: "abc". Must be a non-negative integer.');
+    expect(() => parseNonNegativeInt('TEST_VAR', '-5')).toThrow('Invalid TEST_VAR: "-5". Must be a non-negative integer.');
+    expect(() => parseNonNegativeInt('TEST_VAR', '3.14')).toThrow('Invalid TEST_VAR: "3.14". Must be a non-negative integer.');
+    expect(() => parseNonNegativeInt('TEST_VAR', '   ')).toThrow('Invalid TEST_VAR: "   ". Must be a non-negative integer.');
   });
 });
 
