@@ -1406,10 +1406,10 @@ const spec = {
         in: 'header',
         required: false,
         description:
-          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
-          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          '1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 ' +
           'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
-          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+          '(if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.',
         schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
       },
     },
@@ -2405,19 +2405,21 @@ const spec = {
 
 type Operation = { parameters?: object[]; responses: Record<string, object> };
 
-/** Documents Idempotency-Key and its error statuses on every POST operation. */
+/** Documents Idempotency-Key and its error statuses on every POST, PATCH, PUT and DELETE operation. */
 function withIdempotency<T extends { paths: object }>(doc: T): T {
-  const paths = doc.paths as Record<string, { post?: Operation }>;
+  const paths = doc.paths as Record<string, Partial<Record<'post' | 'patch' | 'put' | 'delete', Operation>>>;
   for (const item of Object.values(paths)) {
-    const op = item.post;
-    if (!op) continue;
-    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
-    op.responses = {
-      ...op.responses,
-      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
-      409: { $ref: '#/components/responses/IdempotencyConflict' },
-      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
-    };
+    for (const method of ['post', 'patch', 'put', 'delete'] as const) {
+      const op = item[method];
+      if (!op) continue;
+      op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+      op.responses = {
+        ...op.responses,
+        400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+        409: { $ref: '#/components/responses/IdempotencyConflict' },
+        422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+      };
+    }
   }
   return doc;
 }

@@ -166,9 +166,10 @@ are not compressed when `Cache-Control: no-transform` is present or the content 
 `text/event-stream`.
 ### Idempotency
 
-Every `POST` under `/api/v1` accepts an optional `Idempotency-Key` header (1-255 printable ASCII
-characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a request with the same key
-and body replays the stored response with `Idempotent-Replayed: true` instead of applying it again.
+Every `POST`, `PATCH`, `PUT` and `DELETE` under `/api/v1` accepts an optional `Idempotency-Key` header
+(1-255 printable ASCII characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a
+request with the same key and body replays the stored response with `Idempotent-Replayed: true` instead
+of applying it again. `DELETE` request bodies are optional and empty bodies fingerprint as `{}`.
 
 | Situation | Result |
 | --- | --- |
@@ -176,7 +177,7 @@ and body replays the stored response with `Idempotent-Replayed: true` instead of
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_request_in_progress`, `Retry-After: 1` |
 | Malformed key | `400 invalid_idempotency_key` |
-| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` (`400 idempotency_key_required`) |
+| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` on `POST` (`400 idempotency_key_required`; `PATCH`/`PUT`/`DELETE` remain optional) |
 
 Keys are scoped by method, path and authenticated principal (if `req.user.id` is set). Responses with
 status below 500 are kept for 24h (max 10,000 entries, LRU eviction); 5xx responses are not stored, so the
