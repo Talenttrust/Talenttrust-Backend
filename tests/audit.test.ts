@@ -142,9 +142,9 @@ describe('TalentTrust API', () => {
     });
 
     it('eviction keeps verification valid', () => {
-      const audit = new AuditStore();
+      const audit = new AuditStore(3);
       // Fill beyond max entries
-      for (let i = 0; i < 100_010; i++) {
+      for (let i = 0; i < 10; i++) {
         audit.append({
           contractId: 1,
           action: 'create',
@@ -156,14 +156,24 @@ describe('TalentTrust API', () => {
 
       const verify = audit.verify();
       expect(verify.valid).toBe(true);
-      expect(verify.entries).toBe(100_000);
+      expect(verify.entries).toBe(3);
+      expect(verify.maxEntries).toBe(3);
+      expect(verify.truncatedBeforeSeq).toBe(1);
       expect(audit.getTruncatedBeforeSeq()).toBeGreaterThan(0);
+    });
+
+    it('reports no truncation for a fresh audit store', () => {
+      const verify = new AuditStore(3).verify();
+      expect(verify.truncatedBeforeSeq).toBeNull();
+      expect(verify.maxEntries).toBe(3);
     });
 
     it('verify endpoint returns valid for clean chain', async () => {
       const verify = await request(app).get('/api/v1/audit/verify').expect(200);
       expect(verify.body.valid).toBe(true);
       expect(verify.body.entries).toBeGreaterThan(0);
+      expect(verify.body.truncatedBeforeSeq).toBeNull();
+      expect(verify.body.maxEntries).toBe(100_000);
       expect(verify.body.brokenAt).toBeUndefined();
     });
   });

@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { config } from './config';
 
 export type AuditAction =
   | 'create'
@@ -41,6 +42,8 @@ export interface AuditContext {
 export interface VerifyResult {
   valid: boolean;
   entries: number;
+  truncatedBeforeSeq: number | null;
+  maxEntries: number;
   brokenAt?: number;
 }
 
@@ -84,7 +87,11 @@ export class AuditStore {
   private nextSeq = 1;
   private prevHash = '0'.repeat(64); // Genesis hash
   private truncatedBeforeSeq: number | null = null;
-  private readonly maxEntries = 100_000;
+  constructor(private readonly maxEntries: number = config.auditMaxEntries) {
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+      throw new Error(`Invalid audit maxEntries: "${maxEntries}". Must be a positive integer.`);
+    }
+  }
 
   /**
    * Append a new audit entry after a successful mutation.
@@ -155,7 +162,7 @@ export class AuditStore {
    */
   verify(): VerifyResult {
     if (this.entries.length === 0) {
-      return { valid: true, entries: 0 };
+      return { valid: true, entries: 0, truncatedBeforeSeq: this.truncatedBeforeSeq, maxEntries: this.maxEntries };
     }
 
     // If entries were evicted, start verification from the first retained entry's prevHash
@@ -167,13 +174,24 @@ export class AuditStore {
       const expectedHash = computeEntryHash({ ...withoutHash, prevHash: currentHash });
 
       if (hash !== expectedHash) {
-        return { valid: false, entries: this.entries.length, brokenAt: entry.seq };
+        return {
+          valid: false,
+          entries: this.entries.length,
+          truncatedBeforeSeq: this.truncatedBeforeSeq,
+          maxEntries: this.maxEntries,
+          brokenAt: entry.seq,
+        };
       }
 
       currentHash = hash;
     }
 
-    return { valid: true, entries: this.entries.length };
+    return {
+      valid: true,
+      entries: this.entries.length,
+      truncatedBeforeSeq: this.truncatedBeforeSeq,
+      maxEntries: this.maxEntries,
+    };
   }
 
   /**

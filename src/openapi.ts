@@ -397,6 +397,8 @@ const spec = {
           properties: {
             valid: { type: 'boolean' },
             entries: { type: 'integer' },
+            truncatedBeforeSeq: { type: ['integer', 'null'], description: 'seq of the first evicted entry, or null when no entries were evicted' },
+            maxEntries: { type: 'integer', description: 'maximum number of entries retained in memory' },
             brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
           },
         }),
