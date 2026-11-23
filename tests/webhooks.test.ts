@@ -318,14 +318,21 @@ describe('webhook management routes', () => {
 
   it('requires the configured token, returns one-time secrets, and supports CRUD/rotation/history', async () => {
     const app = createApp(new EscrowStore());
-    await request(app).get('/api/v1/webhook-subscriptions').expect(401);
+    const unauth = await request(app).get('/api/v1/webhook-subscriptions');
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers['cache-control']).toBe('no-store');
+    expect(unauth.headers['pragma']).toBe('no-cache');
     const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'] }).expect(201);
     expect(created.body.secret).toMatch(/^whsec_/);
+    expect(created.headers['cache-control']).toBe('no-store');
+    expect(created.headers['pragma']).toBe('no-cache');
     const id = created.body.id;
     const fetched = await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
     expect(fetched.body).not.toHaveProperty('secret');
+    expect(fetched.headers['cache-control']).toBe('no-store');
     await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ active: false }).expect(200);
-    await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    const rotated = await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    expect(rotated.headers['cache-control']).toBe('no-store');
     await request(app).get(`/api/v1/webhook-subscriptions/${id}/deliveries`).set(auth).expect(200);
     await request(app).delete(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
   });

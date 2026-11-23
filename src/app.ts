@@ -855,6 +855,14 @@ export function createApp(
   });
 
   const v1 = express.Router();
+  // Auth tokens, confidential dispute data and webhook secrets must never be
+  // stored by shared caches, so mark their responses (including errors) no-store.
+  const noStore = (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    next();
+  };
+  v1.use(['/auth', '/disputes', '/webhook-subscriptions'], noStore);
   v1.use(
     idempotency(options.idempotencyStore ?? new MemoryIdempotencyStore(), {
       required: options.idempotencyRequired ?? process.env.IDEMPOTENCY_REQUIRED === 'true',
