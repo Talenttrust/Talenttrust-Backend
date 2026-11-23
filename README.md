@@ -98,8 +98,9 @@ payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` a
 `X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
 failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
 history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
-`http://localhost` is allowed only outside production. DNS can still change after validation,
-so production deployments should use egress controls as defense in depth.
+`http://localhost` is allowed only outside production. Every delivery re-validates DNS and pins the
+HTTP connection to the validated addresses, preserving the original hostname for SNI and `Host`.
+Redirects are not followed, and response bodies and delivery timeouts are bounded.
 
 ## Milestone templates
 
