@@ -482,7 +482,7 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
       const failed = {
         status: rpc.Api.GetTransactionStatus.FAILED,
         returnValue: xdr.ScVal.scvError(xdr.ScError.sceContract(13)),
-      } as rpc.Api.GetTransactionResponse;
+      } as unknown as rpc.Api.GetTransactionResponse;
 
       expect(decodeContractError(failed)).toEqual({
         name: 'InsufficientFunds',
@@ -499,7 +499,7 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
           decodeContractError({
             status: rpc.Api.GetTransactionStatus.FAILED,
             returnValue: xdr.ScVal.scvError(xdr.ScError.sceContract(code)),
-          } as rpc.Api.GetTransactionResponse),
+          } as unknown as rpc.Api.GetTransactionResponse),
         ).toEqual({ name, code });
         expect(contractErrorFromMessage(`Error(Contract, #${code})`)).toEqual({
           name,

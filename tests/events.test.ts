@@ -165,6 +165,75 @@ describe('Events API', () => {
     expect(page2.body.data[0].id).not.toBe(page1.body.data[0].id);
   });
 
+  it('returns 400 invalid_cursor for unknown cursor', async () => {
+    const eventStore = new InMemoryEventStore();
+    const indexer = new EventIndexer(eventStore);
+    const app = createApp(undefined, eventStore, indexer);
+
+    const response = await request(app).get('/api/v1/chain/events?cursor=does-not-exist');
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_cursor');
+  });
+
+  it('returns 400 invalid_cursor for cursor not in filtered set', async () => {
+    const eventStore = new InMemoryEventStore();
+    const indexer = new EventIndexer(eventStore);
+    const app = createApp(undefined, eventStore, indexer);
+
+    eventStore.append([
+      {
+        id: 'event-1',
+        ledger: 100,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-1',
+        event: {
+          type: 'Created',
+          data: {
+            escrowId: '1',
+            client: 'GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            freelancer: 'GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            total: '100',
+          },
+        },
+      },
+      {
+        id: 'event-2',
+        ledger: 101,
+        ledgerClosedAt: '2024-01-01T00:01:00Z',
+        txHash: 'hash-2',
+        event: {
+          type: 'Created',
+          data: {
+            escrowId: '2',
+            client: 'GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            freelancer: 'GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            total: '200',
+          },
+        },
+      },
+    ]);
+
+    // event-2 is for escrowId 2, not 1
+    const resEscrow = await request(app).get('/api/v1/chain/events?escrowId=1&cursor=event-2');
+    expect(resEscrow.status).toBe(400);
+    expect(resEscrow.body.error).toBe('invalid_cursor');
+
+    // event-1 is Created, not Deposit
+    const resType = await request(app).get('/api/v1/chain/events?type=Deposit&cursor=event-1');
+    expect(resType.status).toBe(400);
+    expect(resType.body.error).toBe('invalid_cursor');
+  });
+
+  it('returns 400 invalid_type for unknown event type', async () => {
+    const eventStore = new InMemoryEventStore();
+    const indexer = new EventIndexer(eventStore);
+    const app = createApp(undefined, eventStore, indexer);
+
+    const response = await request(app).get('/api/v1/chain/events?type=NonExistentType');
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_type');
+  });
+
   it('returns indexer status', async () => {
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);

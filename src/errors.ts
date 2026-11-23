@@ -29,6 +29,11 @@ export const ERRORS = {
   validation_failed: { status: 400, title: 'Validation failed', detail: 'The request did not match the expected schema' },
   invalid_query: { status: 400, title: 'Invalid query', detail: 'A query parameter is invalid' },
   invalid_cursor: { status: 400, title: 'Invalid cursor', detail: 'The pagination cursor is invalid or was issued for another sort' },
+  invalid_type: {
+    status: 400,
+    title: 'Invalid event type',
+    detail: 'type must be one of: Created, Deposit, Release, Dispute, Resolved, Cancel, Reputation, Paused, Init, Unknown',
+  },
   invalid_fields: { status: 400, title: 'Invalid fields', detail: 'The ?fields= selection names an unknown field' },
   // Contracts
   invalid_id: { status: 400, title: 'Invalid ID', detail: 'id must be a positive integer' },

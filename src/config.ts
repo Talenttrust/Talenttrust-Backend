@@ -92,7 +92,6 @@ export const config = {
   /** Extra comma-separated CORS origins (added to FRONTEND_URL and local dev origins). */
   corsOrigins: process.env.CORS_ORIGINS || '',
   /** Poll interval for the long-running server's event indexer (0 = disabled; serverless uses the cron). */
-  indexerIntervalMs: envInt('INDEXER_INTERVAL_MS', { default: 0, allowZero: true }),
   indexerIntervalMs: nonNegativeIntEnv('INDEXER_INTERVAL_MS', 0),
   /** Per-check timeout for /health/ready. */
   healthCheckTimeoutMs: envInt('HEALTH_CHECK_TIMEOUT_MS', { default: 2000 }),
@@ -101,7 +100,7 @@ export const config = {
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: envInt('TX_CACHE_MAX', { default: 200 }),
   /** Maximum audit entries retained in memory before oldest entries are evicted. */
-  auditMaxEntries: positiveIntEnv('AUDIT_MAX_ENTRIES', 100_000),
+  auditMaxEntries: envInt('AUDIT_MAX_ENTRIES', { default: 100_000 }),
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

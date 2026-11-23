@@ -3,9 +3,12 @@
  */
 
 import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import request from 'supertest';
+import { createApp } from '../src/app';
 import { EventIndexer } from '../src/indexer/indexer';
 import { InMemoryEventStore } from '../src/indexer/store';
 import { IndexedEvent, escrowIdOf } from '../src/indexer/types';
+import { HttpError } from '../src/amount-error';
 import { parseNonNegativeInt } from '../src/config';
 
 class FakeServer {
@@ -753,9 +756,27 @@ describe('InMemoryEventStore', () => {
     const f2 = store.query({ escrowId: 'esc-1', limit: 2, cursor: f1.nextCursor });
     expect(f2.data.map((e) => e.id)).toEqual(['e-2', 'e-1']);
 
-    // Unknown cursor falls back to start
-    const unknown = store.query({ limit: 2, cursor: 'does-not-exist' });
-    expect(unknown.data.map((e) => e.id)).toEqual(['e-5', 'e-4']);
+    // Unknown cursor throws 400 invalid_cursor
+    expect(() => store.query({ limit: 2, cursor: 'does-not-exist' })).toThrow(HttpError);
+    try {
+      store.query({ limit: 2, cursor: 'does-not-exist' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_cursor');
+    }
+
+    // Cursor not in filtered set throws 400 invalid_cursor
+    expect(() => store.query({ escrowId: 'esc-1', limit: 2, cursor: 'e-3' })).toThrow(HttpError);
+    try {
+      store.query({ escrowId: 'esc-1', limit: 2, cursor: 'e-3' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_cursor');
+    }
   });
 
   it('evicts oldest events beyond MAX_EVENTS from all indexes', () => {
@@ -777,5 +798,127 @@ describe('InMemoryEventStore', () => {
     expect(escrowIdOf(makeEvent('2', 1, 'Deposit', 'esc-9').event)).toBe('esc-9');
     expect(escrowIdOf(makeEvent('3', 1, 'Paused').event)).toBeUndefined();
     expect(escrowIdOf(makeEvent('4', 1, 'Unknown').event)).toBeUndefined();
+  });
+
+  it('rejects unknown cursor and cursor not in filtered set with 400 invalid_cursor', () => {
+    const store = new InMemoryEventStore();
+    store.append([
+      makeEvent('e-1', 1, 'Created', 'esc-1'),
+      makeEvent('e-2', 2, 'Deposit', 'esc-1'),
+      makeEvent('e-3', 3, 'Created', 'esc-2'),
+    ]);
+
+    expect(() => store.query({ cursor: 'unknown-id' })).toThrow(HttpError);
+    try {
+      store.query({ cursor: 'unknown-id' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_cursor');
+    }
+
+    // e-3 belongs to esc-2, not esc-1
+    expect(() => store.query({ escrowId: 'esc-1', cursor: 'e-3' })).toThrow(HttpError);
+    try {
+      store.query({ escrowId: 'esc-1', cursor: 'e-3' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_cursor');
+    }
+
+    // e-1 is Created, not Deposit
+    expect(() => store.query({ type: 'Deposit', cursor: 'e-1' })).toThrow(HttpError);
+    try {
+      store.query({ type: 'Deposit', cursor: 'e-1' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_cursor');
+    }
+  });
+
+  it('rejects invalid event type with 400 invalid_type', () => {
+    const store = new InMemoryEventStore();
+    store.append([makeEvent('e-1', 1, 'Created', 'esc-1')]);
+
+    expect(() => store.query({ type: 'NonExistentType' })).toThrow(HttpError);
+    try {
+      store.query({ type: 'NonExistentType' });
+      fail('expected HttpError');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid_type');
+    }
+  });
+});
+
+describe('GET /chain/events validation', () => {
+  it('rejects unknown cursor with 400 invalid_cursor', async () => {
+    const store = new InMemoryEventStore();
+    const indexer = new EventIndexer(store);
+    const app = createApp(undefined, store, indexer);
+
+    const res = await request(app).get('/api/v1/chain/events?cursor=bad-cursor');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_cursor');
+  });
+
+  it('rejects unknown event type with 400 invalid_type', async () => {
+    const store = new InMemoryEventStore();
+    const indexer = new EventIndexer(store);
+    const app = createApp(undefined, store, indexer);
+
+    const res = await request(app).get('/api/v1/chain/events?type=InvalidType');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_type');
+  });
+
+  it('validates valid type and cursor continue to paginate', async () => {
+    const store = new InMemoryEventStore();
+    const indexer = new EventIndexer(store);
+    const app = createApp(undefined, store, indexer);
+
+    const symbol = xdr.ScVal.scvSymbol('created');
+    const u64 = xdr.ScVal.scvU64(xdr.Uint64.fromString('1'));
+    const address = xdr.ScVal.scvString('GTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    const amount = nativeToScVal(100n, { type: 'u128' });
+
+    store.append([
+      {
+        id: 'ev-1',
+        ledger: 10,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-1',
+        event: {
+          type: 'Created',
+          data: { escrowId: '1', client: 'GA', freelancer: 'GB', total: '100' },
+        },
+      },
+      {
+        id: 'ev-2',
+        ledger: 11,
+        ledgerClosedAt: '2024-01-01T00:00:00Z',
+        txHash: 'hash-2',
+        event: {
+          type: 'Deposit',
+          data: { escrowId: '1', amount: '50' },
+        },
+      },
+    ]);
+
+    const resValidType = await request(app).get('/api/v1/chain/events?type=Created');
+    expect(resValidType.status).toBe(200);
+    expect(resValidType.body.data).toHaveLength(1);
+    expect(resValidType.body.data[0].id).toBe('ev-1');
+
+    const resValidCursor = await request(app).get('/api/v1/chain/events?cursor=ev-2');
+    expect(resValidCursor.status).toBe(200);
+    expect(resValidCursor.body.data).toHaveLength(1);
+    expect(resValidCursor.body.data[0].id).toBe('ev-1');
   });
 });
