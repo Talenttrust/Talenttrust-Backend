@@ -6,6 +6,7 @@ export interface StoredResponse {
   fingerprint: string;
   status: number;
   body: unknown;
+  noBody?: boolean;
   headers: Record<string, string>;
   createdAt: number;
 }
@@ -81,9 +82,10 @@ export function canonicalize(v: unknown): unknown {
 
 export const fingerprint = (body: unknown) =>
   createHash('sha256')
-    .update(JSON.stringify(canonicalize(body ?? {})))
+    .update(JSON.stringify(canonicalize(body === undefined || body === null || body === '' ? {} : body)))
     .digest('hex');
 
+const IDEMPOTENT_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 const KEY_RE = /^[\x20-\x7e]{1,255}$/;
 /** Response headers stored with the response and restored verbatim on replay (matched case-insensitively). */
 const REPLAY_HEADERS = ['location', 'etag', 'receipt'];
@@ -104,11 +106,11 @@ const pickHeaders = (res: Response) => {
 
 export function idempotency(store: IdempotencyStore, opts: { required?: boolean } = {}) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (req.method !== 'POST') return next();
+    if (!IDEMPOTENT_METHODS.has(req.method)) return next();
     try {
       const key = req.header('Idempotency-Key');
       if (key === undefined) {
-        if (opts.required) {
+        if (opts.required && req.method === 'POST') {
           throw new HttpError(400, 'idempotency_key_required', 'Idempotency-Key header is required on POST');
         }
         return next();
@@ -126,7 +128,11 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         }
         for (const [h, v] of Object.entries(hit.headers)) res.setHeader(h, v);
         res.setHeader('Idempotent-Replayed', 'true');
-        res.status(hit.status).json(hit.body);
+        if (hit.noBody) {
+          res.status(hit.status).end();
+        } else {
+          res.status(hit.status).json(hit.body);
+        }
       };
 
       const hit = await store.get(scope);
@@ -152,8 +158,10 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
       };
       res.on('close', () => void release()); // client abort or error path
 
+      let handled = false;
       const send = res.json.bind(res);
       res.json = ((payload: unknown) => {
+        handled = true;
         const status = res.statusCode;
         const stored: StoredResponse | undefined =
           status < 500
@@ -177,6 +185,36 @@ export function idempotency(store: IdempotencyStore, opts: { required?: boolean 
         })();
         return res;
       }) as Response['json'];
+
+      const end = res.end.bind(res);
+      res.end = ((...args: Parameters<Response['end']>) => {
+        if (handled) return end(...args);
+        const hasChunk = args.length > 0 && args[0] !== undefined && args[0] !== null && typeof args[0] !== 'function';
+        if (hasChunk) return end(...args);
+        handled = true;
+        const status = res.statusCode;
+        const stored: StoredResponse | undefined =
+          status < 500
+            ? {
+                fingerprint: fp,
+                status,
+                body: null,
+                noBody: true,
+                headers: pickHeaders(res),
+                createdAt: Date.now(),
+              }
+            : undefined;
+        void (async () => {
+          try {
+            if (stored) await store.set(scope, stored);
+          } catch {
+            /* fail open: the response is still sent */
+          }
+          await release();
+          end(...args);
+        })();
+        return res;
+      }) as Response['end'];
 
       next();
     } catch (err) {

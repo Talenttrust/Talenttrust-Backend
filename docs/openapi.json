@@ -621,6 +621,9 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -637,19 +640,7 @@
             "description": "Updated subscription"
           },
           "400": {
-            "description": "Invalid update",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Unauthorized",
@@ -683,6 +674,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -719,11 +716,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "200": {
             "description": "Deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Unauthorized",
@@ -757,6 +760,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -869,7 +878,7 @@
         "tags": [
           "Webhooks"
         ],
-        "summary": "List bounded webhook delivery history",
+        "summary": "List webhook delivery history, newest first",
         "security": [
           {
             "webhookAdmin": []
@@ -883,11 +892,70 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of newest deliveries to return (default 50)",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only return deliveries with this status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "success",
+                "failed"
+              ]
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Delivery history"
+            "description": "Delivery history, newest first, limited to `limit` records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query: limit must be an integer from 1 to 100; status must be pending, success or failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "401": {
             "description": "Unauthorized",
@@ -905,7 +973,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Not found or disabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -946,6 +1014,7 @@
           "Templates"
         ],
         "summary": "Create a milestone template (fixed amounts or percent of a budget)",
+        "description": "Also checked by the validator (400 `validation_failed`), beyond the schema:\n- milestones must match mode (amount for fixed, percentBps for percent)\n- percentBps must sum to exactly 10000",
         "requestBody": {
           "required": true,
           "content": {
@@ -1012,7 +1081,8 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           }
         ],
@@ -1082,11 +1152,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           }
         ],
         "responses": {
@@ -1140,16 +1210,20 @@
           "Templates"
         ],
         "summary": "Update a template (owner only; bumps version)",
+        "description": "Also checked by the validator (400 `validation_failed`), beyond the schema:\n- milestones must not mix amount and percentBps, and must match mode",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1157,7 +1231,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TemplateInput"
+                "$ref": "#/components/schemas/TemplateUpdateInput"
               }
             }
           }
@@ -1174,19 +1248,7 @@
             }
           },
           "400": {
-            "description": "Invalid template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "403": {
             "description": "Not the owner",
@@ -1220,6 +1282,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1248,11 +1316,14 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1260,15 +1331,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "owner"
-                ],
-                "properties": {
-                  "owner": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/TemplateDeleteRequest"
               }
             }
           }
@@ -1288,6 +1351,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "403": {
             "description": "Not the owner",
@@ -1321,6 +1387,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1351,11 +1423,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "limit",
@@ -2026,11 +2098,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2203,7 +2275,7 @@
         "tags": [
           "Auth"
         ],
-        "summary": "Show the scoped API key in use (id and scopes)",
+        "summary": "Show the scoped API key in use (id, scopes and expiry)",
         "security": [
           {
             "apiKey": []
@@ -2211,14 +2283,15 @@
         ],
         "responses": {
           "200": {
-            "description": "Key id and scopes",
+            "description": "Key id, scopes and expiry",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "required": [
                     "keyId",
-                    "scopes"
+                    "scopes",
+                    "expiresAt"
                   ],
                   "properties": {
                     "keyId": {
@@ -2229,6 +2302,12 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "When the key stops working (ISO 8601 UTC); null for a key that never expires."
                     }
                   }
                 }
@@ -2236,7 +2315,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid API key",
+            "description": "Missing, invalid or expired API key",
             "content": {
               "application/json": {
                 "schema": {
@@ -3057,6 +3136,9 @@
                     "processed": {
                       "type": "integer"
                     },
+                    "pages": {
+                      "type": "integer"
+                    },
                     "cursor": {
                       "type": "string"
                     },
@@ -3545,11 +3627,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "as",
@@ -3810,27 +3892,92 @@
         "description": "Returns a page of contracts (`data`) plus `page: { limit, nextCursor, hasMore }`. Pass `page.nextCursor` back as `cursor` (with the same `sort`) for the next page; ties are broken by id. Use `?fields=` to request a sparse response — only the listed fields are included, reducing payload size for list views.",
         "parameters": [
           {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "party",
+            "in": "query",
+            "required": false,
+            "description": "Client or freelancer address",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "description": "Restricts `party` to the given role; requires `party`",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "client",
+                "freelancer"
+              ]
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "description": "Exact token match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "createdAfter",
+            "in": "query",
+            "required": false,
+            "description": "ISO-8601 lower bound on createdAt",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "createdBefore",
+            "in": "query",
+            "required": false,
+            "description": "ISO-8601 upper bound on createdAt",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
+            "required": false,
+            "description": "Page size",
             "schema": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
               "default": 20
-            },
-            "description": "Page size"
+            }
           },
           {
             "name": "cursor",
             "in": "query",
+            "required": false,
+            "description": "Opaque cursor returned in `page.nextCursor`",
             "schema": {
               "type": "string"
-            },
-            "description": "Opaque cursor returned in `page.nextCursor`"
+            }
           },
           {
             "name": "sort",
             "in": "query",
+            "required": false,
+            "description": "Sort field and direction",
             "schema": {
               "type": "string",
               "enum": [
@@ -3842,63 +3989,20 @@
                 "-totalAmount"
               ],
               "default": "-createdAt"
-            },
-            "description": "Sort field and direction"
+            }
           },
           {
-            "name": "status",
+            "name": "linked",
             "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)"
-          },
-          {
-            "name": "party",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "maxLength": 64
-            },
-            "description": "Client or freelancer address"
-          },
-          {
-            "name": "role",
-            "in": "query",
+            "required": false,
+            "description": "Filter by whether contract is linked to on-chain escrow",
             "schema": {
               "type": "string",
               "enum": [
-                "client",
-                "freelancer"
+                "true",
+                "false"
               ]
-            },
-            "description": "Restricts `party` to the given role; requires `party`"
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Exact token match"
-          },
-          {
-            "name": "createdAfter",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            },
-            "description": "ISO-8601 lower bound on createdAt"
-          },
-          {
-            "name": "createdBefore",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            },
-            "description": "ISO-8601 upper bound on createdAt"
+            }
           },
           {
             "name": "fields",
@@ -3909,14 +4013,6 @@
               "type": "string",
               "example": "title,status,totalAmount"
             }
-          },
-          {
-            "name": "linked",
-            "in": "query",
-            "schema": {
-              "type": "boolean"
-            },
-            "description": "Filter by whether contract is linked to on-chain escrow"
           },
           {
             "name": "If-None-Match",
@@ -4021,6 +4117,7 @@
           "Contracts"
         ],
         "summary": "Create an escrow contract",
+        "description": "Also checked by the validator (400 `validation_failed`), beyond the schema:\n- client and freelancer must differ\n- Cannot provide both templateId and milestones\n- Either templateId or milestones must be provided\n- budget must not be provided when using milestones directly",
         "parameters": [
           {
             "name": "receipt",
@@ -4040,94 +4137,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "client",
-                  "freelancer"
-                ],
-                "properties": {
-                  "title": {
-                    "type": "string"
-                  },
-                  "client": {
-                    "type": "string"
-                  },
-                  "freelancer": {
-                    "type": "string"
-                  },
-                  "token": {
-                    "type": "string",
-                    "default": "XLM"
-                  },
-                  "fundingDeadline": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)"
-                  },
-                  "templateId": {
-                    "type": "integer",
-                    "description": "Create from a milestone template instead of `milestones` (exactly one of the two is required)"
-                  },
-                  "budget": {
-                    "oneOf": [
-                      {
-                        "type": "integer",
-                        "minimum": 1
-                      },
-                      {
-                        "type": "string",
-                        "pattern": "^[1-9][0-9]{0,37}$"
-                      }
-                    ],
-                    "description": "Total budget in base units; required for percent templates, forbidden otherwise"
-                  },
-                  "milestones": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 20,
-                    "items": {
-                      "oneOf": [
-                        {
-                          "oneOf": [
-                            {
-                              "type": "integer",
-                              "minimum": 1
-                            },
-                            {
-                              "type": "string",
-                              "pattern": "^[1-9][0-9]{0,37}$"
-                            }
-                          ],
-                          "description": "Amount in token base units. Must be a positive integer."
-                        },
-                        {
-                          "type": "object",
-                          "properties": {
-                            "title": {
-                              "type": "string"
-                            },
-                            "amount": {
-                              "oneOf": [
-                                {
-                                  "type": "integer",
-                                  "minimum": 1
-                                },
-                                {
-                                  "type": "string",
-                                  "pattern": "^[1-9][0-9]{0,37}$"
-                                }
-                              ],
-                              "description": "Amount in token base units. Must be a positive integer."
-                            }
-                          },
-                          "required": [
-                            "amount"
-                          ]
-                        }
-                      ]
-                    }
-                  }
-                }
+                "$ref": "#/components/schemas/CreateContractRequest"
               }
             }
           }
@@ -4286,11 +4296,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "fields",
@@ -4395,11 +4405,14 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           },
           {
             "name": "If-Match",
@@ -4429,47 +4442,53 @@
                     "type": "string"
                   },
                   "milestones": {
-                    "type": "array",
                     "minItems": 1,
                     "maxItems": 20,
+                    "type": "array",
                     "items": {
-                      "oneOf": [
+                      "anyOf": [
                         {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "integer",
-                              "minimum": 1
+                              "minimum": 0,
+                              "exclusiveMinimum": true,
+                              "maximum": 9007199254740991
                             },
                             {
                               "type": "string",
-                              "pattern": "^[1-9][0-9]{0,37}$"
+                              "pattern": "^[1-9][0-9]{0,38}$"
                             }
                           ],
-                          "description": "Amount in token base units. Must be a positive integer."
+                          "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
                         },
                         {
                           "type": "object",
                           "properties": {
                             "title": {
-                              "type": "string"
+                              "type": "string",
+                              "maxLength": 120
                             },
                             "amount": {
-                              "oneOf": [
+                              "anyOf": [
                                 {
                                   "type": "integer",
-                                  "minimum": 1
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true,
+                                  "maximum": 9007199254740991
                                 },
                                 {
                                   "type": "string",
-                                  "pattern": "^[1-9][0-9]{0,37}$"
+                                  "pattern": "^[1-9][0-9]{0,38}$"
                                 }
                               ],
-                              "description": "Amount in token base units. Must be a positive integer."
+                              "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
                             }
                           },
                           "required": [
                             "amount"
-                          ]
+                          ],
+                          "additionalProperties": false
                         }
                       ]
                     }
@@ -4499,19 +4518,7 @@
             }
           },
           "400": {
-            "description": "Empty patch, invalid contract id, or invalid milestones",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -4562,19 +4569,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "description": "Contract is funded or no longer editable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IdempotencyConflict"
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -4605,6 +4600,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
@@ -4654,11 +4652,14 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           },
           {
             "name": "If-Match",
@@ -4693,19 +4694,7 @@
             "description": "Contract withdrawn"
           },
           "400": {
-            "description": "Invalid contract id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -4756,19 +4745,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "description": "Contract is funded or no longer withdrawable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
+            "$ref": "#/components/responses/IdempotencyConflict"
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -4799,6 +4776,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
@@ -4849,11 +4829,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           }
         ],
         "responses": {
@@ -4932,11 +4912,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           }
         ],
         "responses": {
@@ -4988,11 +4968,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "receipt",
@@ -5017,26 +4997,11 @@
           }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "amount": {
-                    "oneOf": [
-                      {
-                        "type": "integer",
-                        "minimum": 1
-                      },
-                      {
-                        "type": "string",
-                        "pattern": "^[1-9][0-9]{0,37}$",
-                        "description": "Positive decimal integer string"
-                      }
-                    ],
-                    "description": "Deposit amount in token base units (e.g. stroops). Must be a positive integer."
-                  }
-                }
+                "$ref": "#/components/schemas/DepositRequest"
               }
             }
           }
@@ -5239,21 +5204,21 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "index",
             "in": "path",
             "required": true,
+            "description": "Milestone index (0-19)",
             "schema": {
               "type": "string",
               "pattern": "^(?:[0-9]|1[0-9])$"
-            },
-            "description": "Milestone index (0-19)"
+            }
           },
           {
             "name": "receipt",
@@ -5460,11 +5425,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "receipt",
@@ -5717,11 +5682,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "receipt",
@@ -5941,11 +5906,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "receipt",
@@ -5969,6 +5934,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Updated contract",
@@ -6153,11 +6128,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "name": "receipt",
@@ -6182,17 +6157,11 @@
           }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "rating": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5
-                  }
-                }
+                "$ref": "#/components/schemas/RateRequest"
               }
             }
           }
@@ -6374,11 +6343,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -6516,11 +6485,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -6657,11 +6626,11 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Contract ID (positive integer)",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
-            },
-            "description": "Contract ID (positive integer)"
+            }
           }
         ],
         "responses": {
@@ -7134,7 +7103,7 @@
         "name": "Idempotency-Key",
         "in": "header",
         "required": false,
-        "description": "1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.",
+        "description": "1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -8143,15 +8112,14 @@
       },
       "TemplateInput": {
         "type": "object",
-        "required": [
-          "owner"
-        ],
         "properties": {
           "owner": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "name": {
             "type": "string",
+            "minLength": 1,
             "maxLength": 80
           },
           "description": {
@@ -8166,55 +8134,167 @@
             ]
           },
           "milestones": {
-            "type": "array",
             "minItems": 1,
             "maxItems": 20,
+            "type": "array",
             "items": {
-              "oneOf": [
+              "anyOf": [
                 {
                   "type": "object",
-                  "required": [
-                    "amount"
-                  ],
                   "properties": {
                     "title": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 120
                     },
                     "amount": {
-                      "oneOf": [
+                      "anyOf": [
                         {
                           "type": "integer",
-                          "minimum": 1
+                          "minimum": 0,
+                          "exclusiveMinimum": true,
+                          "maximum": 9007199254740991
                         },
                         {
                           "type": "string",
-                          "pattern": "^[1-9][0-9]{0,37}$"
+                          "pattern": "^[1-9][0-9]{0,38}$"
                         }
                       ],
-                      "description": "Amount in token base units. Must be a positive integer."
+                      "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
                     }
-                  }
+                  },
+                  "required": [
+                    "amount"
+                  ],
+                  "additionalProperties": false
                 },
                 {
                   "type": "object",
-                  "required": [
-                    "percentBps"
-                  ],
                   "properties": {
                     "title": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 120
                     },
                     "percentBps": {
                       "type": "integer",
-                      "minimum": 1,
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
                       "maximum": 10000
                     }
-                  }
+                  },
+                  "required": [
+                    "percentBps"
+                  ],
+                  "additionalProperties": false
                 }
               ]
             }
           }
-        }
+        },
+        "required": [
+          "owner",
+          "name",
+          "mode",
+          "milestones"
+        ],
+        "additionalProperties": false
+      },
+      "TemplateUpdateInput": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "percent"
+            ]
+          },
+          "milestones": {
+            "minItems": 1,
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "maxLength": 120
+                    },
+                    "amount": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]{0,38}$"
+                        }
+                      ],
+                      "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
+                    }
+                  },
+                  "required": [
+                    "amount"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "maxLength": 120
+                    },
+                    "percentBps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 10000
+                    }
+                  },
+                  "required": [
+                    "percentBps"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "additionalProperties": false
+      },
+      "TemplateDeleteRequest": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "additionalProperties": false
       },
       "AuditEntry": {
         "type": "object",
@@ -9587,11 +9667,6 @@
       },
       "CreateContractRequest": {
         "type": "object",
-        "required": [
-          "client",
-          "freelancer",
-          "milestones"
-        ],
         "properties": {
           "title": {
             "type": "string",
@@ -9606,31 +9681,30 @@
             "minLength": 1
           },
           "token": {
+            "description": "Token code; defaults to XLM",
             "type": "string",
             "maxLength": 64
           },
-          "fundingDeadline": {
-            "type": "string",
-            "format": "date-time"
-          },
           "milestones": {
-            "type": "array",
             "minItems": 1,
             "maxItems": 20,
+            "type": "array",
             "items": {
-              "oneOf": [
+              "anyOf": [
                 {
-                  "oneOf": [
+                  "anyOf": [
                     {
                       "type": "integer",
-                      "minimum": 1
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 9007199254740991
                     },
                     {
                       "type": "string",
-                      "pattern": "^[1-9][0-9]{0,37}$"
+                      "pattern": "^[1-9][0-9]{0,38}$"
                     }
                   ],
-                  "description": "Amount in token base units. Must be a positive integer."
+                  "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
                 },
                 {
                   "type": "object",
@@ -9640,17 +9714,19 @@
                       "maxLength": 120
                     },
                     "amount": {
-                      "oneOf": [
+                      "anyOf": [
                         {
                           "type": "integer",
-                          "minimum": 1
+                          "minimum": 0,
+                          "exclusiveMinimum": true,
+                          "maximum": 9007199254740991
                         },
                         {
                           "type": "string",
-                          "pattern": "^[1-9][0-9]{0,37}$"
+                          "pattern": "^[1-9][0-9]{0,38}$"
                         }
                       ],
-                      "description": "Amount in token base units. Must be a positive integer."
+                      "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
                     }
                   },
                   "required": [
@@ -9660,37 +9736,67 @@
                 }
               ]
             }
+          },
+          "fundingDeadline": {
+            "format": "date-time",
+            "description": "ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days); checked by the store",
+            "type": "string"
+          },
+          "templateId": {
+            "description": "Create from a milestone template instead of `milestones` (exactly one of the two is required)",
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "maximum": 9007199254740991
+          },
+          "budget": {
+            "description": "Total budget in base units; required for percent templates, forbidden otherwise",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": true,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,38}$"
+              }
+            ]
           }
         },
+        "required": [
+          "client",
+          "freelancer"
+        ],
         "additionalProperties": false
       },
       "DepositRequest": {
         "type": "object",
-        "required": [
-          "amount"
-        ],
         "properties": {
           "amount": {
-            "oneOf": [
+            "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 0,
+                "exclusiveMinimum": true,
+                "maximum": 9007199254740991
               },
               {
                 "type": "string",
-                "pattern": "^[1-9][0-9]{0,37}$"
+                "pattern": "^[1-9][0-9]{0,38}$"
               }
             ],
-            "description": "Amount in token base units. Must be a positive integer."
+            "description": "Amount in token base units (e.g. stroops): a positive safe integer, or a positive decimal integer string without leading zeros for larger values."
           }
         },
+        "required": [
+          "amount"
+        ],
         "additionalProperties": false
       },
       "DisputeRequest": {
         "type": "object",
-        "required": [
-          "raisedBy"
-        ],
         "properties": {
           "raisedBy": {
             "type": "string",
@@ -9706,23 +9812,21 @@
       },
       "ResolveRequest": {
         "type": "object",
-        "required": [
-          "freelancerBps"
-        ],
         "properties": {
           "freelancerBps": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10000
+            "maximum": 10000,
+            "description": "Freelancer's share of the escrowed funds in basis points; the rest is refunded to the client"
           }
         },
+        "required": [
+          "freelancerBps"
+        ],
         "additionalProperties": false
       },
       "RateRequest": {
         "type": "object",
-        "required": [
-          "rating"
-        ],
         "properties": {
           "rating": {
             "type": "integer",
@@ -9730,6 +9834,14 @@
             "maximum": 5
           }
         },
+        "required": [
+          "rating"
+        ],
+        "additionalProperties": false
+      },
+      "CancelRequest": {
+        "type": "object",
+        "properties": {},
         "additionalProperties": false
       }
     }
