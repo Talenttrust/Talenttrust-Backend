@@ -88,7 +88,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 
 Webhook management is disabled (404) when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
 requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
-"https://example.com/events", "events": ["milestone.released"] }`; the generated `whsec_`
+"https://example.com/events", "events": ["milestone.released"], "filter": { "parties": ["G..."], "contractIds": [42] } }`; `filter` is optional, and either array may contain up to 50 entries. When both are present, both criteria must match; parties match a contract's `client` or `freelancer`, and IDs match its `id`. A filtered subscription skips events without `data.contract`. Filters are returned by GET and can be changed with PATCH; send `"filter": null` to clear one. Invalid filters return `400 invalid_filter`. The generated `whsec_`
 secret is returned only in that creation response and again when explicitly rotated. Events:
 `contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
 `dispute.resolved`, `contract.cancelled`, `reputation.issued` (dispute reasons are never included). Delivery

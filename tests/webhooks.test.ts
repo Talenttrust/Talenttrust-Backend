@@ -126,6 +126,21 @@ describe('webhook delivery', () => {
     expect(manager.get(created.subscription.id)).not.toHaveProperty('secret');
   });
 
+  it('filters by contract party and ID and skips events without a contract', async () => {
+    const client = jest.fn(async () => ({ statusCode: 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'], contractIds: [7] } });
+    const contract = (id: number, clientName: string, freelancer: string) => ({ contract: { id, client: clientName, freelancer } });
+    events.emit('contract.created', contract(7, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(8, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(7, 'other-client', 'other-freelancer'));
+    events.emit('contract.created', { contractId: 7 });
+    await waitFor(() => client.mock.calls.length === 1);
+    expect(manager.get(created.subscription.id).filter).toEqual({ parties: ['client-a'], contractIds: [7] });
+    expect(client).toHaveBeenCalledTimes(1);
+  });
+
   it('does not block the originating mutation on a slow receiver', async () => {
     let resolveDelivery!: () => void;
     const client = jest.fn(() => new Promise<{ statusCode: number }>((resolve) => { resolveDelivery = () => resolve({ statusCode: 200 }); }));
@@ -335,6 +350,21 @@ describe('webhook management routes', () => {
     expect(rotated.headers['cache-control']).toBe('no-store');
     await request(app).get(`/api/v1/webhook-subscriptions/${id}/deliveries`).set(auth).expect(200);
     await request(app).delete(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
+  });
+
+  it('accepts, returns, updates, clears, and validates subscription filters', async () => {
+    const app = createApp(new EscrowStore());
+    const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'] } }).expect(201);
+    const id = created.body.id;
+    expect(created.body.filter).toEqual({ parties: ['client-a'] });
+    expect((await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200)).body.filter).toEqual({ parties: ['client-a'] });
+    const updated = await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: { contractIds: [7] } }).expect(200);
+    expect(updated.body.filter).toEqual({ contractIds: [7] });
+    expect((await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: null }).expect(200)).body).not.toHaveProperty('filter');
+    for (const filter of [{ parties: [] }, { parties: Array.from({ length: 51 }, (_, i) => `p${i}`) }, { contractIds: [0] }, { contractIds: ['7'] }, { foo: ['bar'] }, {}]) {
+      await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+      await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+    }
   });
 
   it('returns 404 when token configuration is unset and rejects malformed requests', async () => {
