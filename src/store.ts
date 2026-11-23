@@ -1240,6 +1240,100 @@ export class EscrowStore {
     return { status: parityStatus, drift, checkedAt: now, latestLedger: result.latestLedger };
   }
 
+  /**
+   * Reconcile parity for all linked contracts with bounded concurrency and a
+   * time budget. A chain failure for one contract is recorded and does not
+   * abort the run. Emits `contract.drift_detected` for each drifted contract.
+   */
+  async reconcileParity(
+    chainReader: import('./chain').ChainReader,
+    options: { concurrency?: number; timeBudgetMs?: number } = {},
+  ): Promise<{
+    checked: number;
+    inSync: number;
+    drifted: number;
+    unreachable: number;
+    driftedContractIds: number[];
+    timedOut: boolean;
+  }> {
+    const concurrency = Math.max(1, Math.floor(options.concurrency ?? 5));
+    const timeBudgetMs = Math.max(0, Math.floor(options.timeBudgetMs ?? 25_000));
+    const deadline = Date.now() + timeBudgetMs;
+
+    const linked = Array.from(this.contracts.values())
+      .filter((c) => !!c.chain)
+      .sort((a, b) => a.id - b.id);
+
+    let inSync = 0;
+    let drifted = 0;
+    let unreachable = 0;
+    const driftedContractIds: number[] = [];
+    let timedOut = false;
+    let cursor = 0;
+
+    const remaining = () => deadline - Date.now();
+
+    const processContract = async (c: InternalContract) => {
+      if (remaining() <= 0) {
+        timedOut = true;
+        return;
+      }
+      const budgetLeft = remaining();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const parity = await Promise.race([
+          this.checkParity(c.id, chainReader),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('reconcile_time_budget_exceeded')), Math.max(1, budgetLeft));
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
+        if (parity.status === 'drift') {
+          drifted++;
+          driftedContractIds.push(c.id);
+          this.events.emit('contract.drift_detected', {
+            contractId: c.id,
+            escrowId: c.chain?.escrowId,
+            drift: parity.drift,
+            checkedAt: parity.checkedAt,
+            latestLedger: parity.latestLedger,
+            contract: publicContract(toPublic(c)),
+          });
+        } else {
+          inSync++;
+        }
+      } catch {
+        if (timer) clearTimeout(timer);
+        if (remaining() <= 0) timedOut = true;
+        unreachable++;
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(concurrency, linked.length) }, async () => {
+      while (true) {
+        if (remaining() <= 0) {
+          timedOut = true;
+          return;
+        }
+        const index = cursor++;
+        if (index >= linked.length) return;
+        await processContract(linked[index]);
+      }
+    });
+
+    await Promise.all(workers);
+    if (cursor < linked.length) timedOut = true;
+
+    return {
+      checked: inSync + drifted + unreachable,
+      inSync,
+      drifted,
+      unreachable,
+      driftedContractIds,
+      timedOut,
+    };
+  }
+
   private buildLeaderboardCache(reputationMap: Map<string, ReputationRecord>, C: number): LeaderboardCache {
     let globalTotal = 0;
     let globalCompleted = 0;

@@ -413,6 +413,7 @@ export function createApp(
 
   app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager().getPublishedKeys()));
 
+        'GET/POST /api/cron/reconcile-parity',
         'GET  /api/v1/contracts/:id/stream',
   app.get('/', wrap(() => rootApiInfo));
 
@@ -1034,7 +1035,19 @@ export function createApp(
     const checkedAt = store.currentTime();
     return { expired: store.sweepExpired(), checkedAt };
   });
+
+  const reconcileParity = wrap(async (req) => {
+    requireCronSecret(req);
+    const budgetRaw = Number(process.env.PARITY_RECONCILE_TIME_BUDGET_MS);
+    const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : 25_000;
+    const result = await store.reconcileParity(chainReader, { concurrency: 5, timeBudgetMs });
+    escrowParityDriftContracts.set({}, result.drifted);
+    escrowParityLastRunTimestampSeconds.set({}, Math.floor(Date.now() / 1000));
+    return result;
+  });
+
   app.get('/api/cron/expire-contracts', expireContracts);
+  app.post('/api/cron/expire-contracts', expireContracts);
 
   // Event indexer batch (Vercel cron sends GET). Fails closed (401) without CRON_SECRET.
   const indexEvents = wrap(async (req) => {
@@ -1065,12 +1078,23 @@ export function createApp(
   });
   app.get('/api/cron/index-events', indexEvents);
   app.post('/api/cron/index-events', indexEvents);
-  app.post('/api/cron/expire-contracts', expireContracts);
+  app.get('/api/cron/reconcile-parity', reconcileParity);
+  app.post('/api/cron/reconcile-parity', reconcileParity);
 
   // Prometheus scrape endpoint; disabled (404) unless METRICS_TOKEN is set, checked per request.
   const escrowContracts = registry.gauge('escrow_contracts', 'Escrow contracts by status', ['status']);
   const escrowValueEscrowed = registry.gauge('escrow_value_escrowed', 'Value currently escrowed (base units)', []);
   const escrowValueReleased = registry.gauge('escrow_value_released', 'Value released (base units)', []);
+  const escrowParityDriftContracts = registry.gauge(
+    'escrow_parity_drift_contracts',
+    'Number of linked contracts with API/chain parity drift in the last reconciliation run',
+    [],
+  );
+  const escrowParityLastRunTimestampSeconds = registry.gauge(
+    'escrow_parity_last_run_timestamp_seconds',
+    'Unix timestamp of the last parity reconciliation run',
+    [],
+  );
   const processUptime = registry.gauge('process_uptime_seconds', 'Process uptime in seconds', []);
   const nodejsHeapUsed = registry.gauge('nodejs_heap_used_bytes', 'Node.js heap used in bytes', []);
   app.get('/metrics', (req, res, next) => {

@@ -68,6 +68,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
+| GET/POST | `/api/cron/reconcile-parity` | Authenticated parity reconciliation for all linked contracts (bounded concurrency and time budget); reports in-sync/drifted/unreachable counts and drifted contract IDs, emits `contract.drift_detected`, and updates parity metrics |
 | GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
 | POST | `/api/v1/tx/submit` | Validate and relay a signed escrow transaction (`{ "xdr": "..." }`) |
@@ -92,7 +93,7 @@ requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url
 "https://example.com/events", "events": ["milestone.released"], "filter": { "parties": ["G..."], "contractIds": [42] } }`; `filter` is optional, and either array may contain up to 50 entries. When both are present, both criteria must match; parties match a contract's `client` or `freelancer`, and IDs match its `id`. A filtered subscription skips events without `data.contract`. Filters are returned by GET and can be changed with PATCH; send `"filter": null` to clear one. Invalid filters return `400 invalid_filter`. The generated `whsec_`
 secret is returned only in that creation response and again when explicitly rotated. Events:
 `contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
-`dispute.resolved`, `contract.cancelled`, `reputation.issued` (dispute reasons are never included). Delivery
+`dispute.resolved`, `contract.cancelled`, `reputation.issued`, `contract.drift_detected` (dispute reasons are never included). Delivery
 payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
 `X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
 failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
@@ -313,7 +314,7 @@ reads share one simulation and each client may make 60 chain reads per minute), 
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
-creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
+creation; explicit deadlines must be between one hour and 90 days in the future. GET/POST /api/cron/reconcile-parity (same CRON_SECRET bearer auth) checks every linked contract against the chain with bounded concurrency (5) and a time budget, returning counts (checked, inSync, drifted, unreachable), driftedContractIds, and 	imedOut; per-contract chain failures do not abort the run. Drifted contracts emit contract.drift_detected and update gauges escrow_parity_drift_contracts and escrow_parity_last_run_timestamp_seconds. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any
 partial funding is reported as `refundableAmount`/`refundableAmountUnits`. A client can extend a deadline
 through the endpoint above.
