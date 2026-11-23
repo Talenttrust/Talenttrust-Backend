@@ -71,6 +71,8 @@ export const config = {
   healthCacheMs: positiveIntEnv('HEALTH_CACHE_MS', 10000),
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
+  /** Maximum audit entries retained in memory before oldest entries are evicted. */
+  auditMaxEntries: positiveIntEnv('AUDIT_MAX_ENTRIES', 100_000),
 };
 
 export const explorerUrl = (id: string = config.contractId) =>
