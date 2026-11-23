@@ -111,6 +111,54 @@ describe('webhook delivery', () => {
     expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 6, statusCode: 503 });
   });
 
+  it('retries 429 then succeeds on attempt 2', async () => {
+    const responses = [429, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const sleeps = jest.fn(async () => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it.each([408, 425])('retries transient %i responses', async (statusCode) => {
+    const responses = [statusCode, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it('treats 404 as a terminal single-attempt failure', async () => {
+    const client = jest.fn(async () => ({ statusCode: 404 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(created.subscription.id).every((d) => d.status !== 'pending') && client.mock.calls.length >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(client).toHaveBeenCalledTimes(1);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 1, statusCode: 404 });
+  });
+
+  it('honours a numeric Retry-After on 429 up to the 30s cap', async () => {
+    const responses = [{ statusCode: 429, headers: { 'retry-after': '120' } }, { statusCode: 200 }];
+    const client = jest.fn(async () => responses.shift() ?? { statusCode: 500 });
+    const sleeps = jest.fn(async (_ms: number) => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client as any, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect(sleeps.mock.calls[0][0]).toBeLessThanOrEqual(30_000);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
   it('supports wildcard subscriptions, bounded history, and secret rotation', async () => {
     const client = jest.fn(async () => ({ statusCode: 200 }));
     const events = new StoreEventEmitter();
@@ -124,6 +172,21 @@ describe('webhook delivery', () => {
     const rotated = manager.rotateSecret(created.subscription.id);
     expect(rotated.secret).not.toBe(created.secret);
     expect(manager.get(created.subscription.id)).not.toHaveProperty('secret');
+  });
+
+  it('filters by contract party and ID and skips events without a contract', async () => {
+    const client = jest.fn(async () => ({ statusCode: 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'], contractIds: [7] } });
+    const contract = (id: number, clientName: string, freelancer: string) => ({ contract: { id, client: clientName, freelancer } });
+    events.emit('contract.created', contract(7, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(8, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(7, 'other-client', 'other-freelancer'));
+    events.emit('contract.created', { contractId: 7 });
+    await waitFor(() => client.mock.calls.length === 1);
+    expect(manager.get(created.subscription.id).filter).toEqual({ parties: ['client-a'], contractIds: [7] });
+    expect(client).toHaveBeenCalledTimes(1);
   });
 
   it('does not block the originating mutation on a slow receiver', async () => {
@@ -318,16 +381,38 @@ describe('webhook management routes', () => {
 
   it('requires the configured token, returns one-time secrets, and supports CRUD/rotation/history', async () => {
     const app = createApp(new EscrowStore());
-    await request(app).get('/api/v1/webhook-subscriptions').expect(401);
+    const unauth = await request(app).get('/api/v1/webhook-subscriptions');
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers['cache-control']).toBe('no-store');
+    expect(unauth.headers['pragma']).toBe('no-cache');
     const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'] }).expect(201);
     expect(created.body.secret).toMatch(/^whsec_/);
+    expect(created.headers['cache-control']).toBe('no-store');
+    expect(created.headers['pragma']).toBe('no-cache');
     const id = created.body.id;
     const fetched = await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
     expect(fetched.body).not.toHaveProperty('secret');
+    expect(fetched.headers['cache-control']).toBe('no-store');
     await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ active: false }).expect(200);
-    await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    const rotated = await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    expect(rotated.headers['cache-control']).toBe('no-store');
     await request(app).get(`/api/v1/webhook-subscriptions/${id}/deliveries`).set(auth).expect(200);
     await request(app).delete(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
+  });
+
+  it('accepts, returns, updates, clears, and validates subscription filters', async () => {
+    const app = createApp(new EscrowStore());
+    const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'] } }).expect(201);
+    const id = created.body.id;
+    expect(created.body.filter).toEqual({ parties: ['client-a'] });
+    expect((await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200)).body.filter).toEqual({ parties: ['client-a'] });
+    const updated = await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: { contractIds: [7] } }).expect(200);
+    expect(updated.body.filter).toEqual({ contractIds: [7] });
+    expect((await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: null }).expect(200)).body).not.toHaveProperty('filter');
+    for (const filter of [{ parties: [] }, { parties: Array.from({ length: 51 }, (_, i) => `p${i}`) }, { contractIds: [0] }, { contractIds: ['7'] }, { foo: ['bar'] }, {}]) {
+      await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+      await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+    }
   });
 
   it('returns 404 when token configuration is unset and rejects malformed requests', async () => {

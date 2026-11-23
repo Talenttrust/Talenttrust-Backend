@@ -356,14 +356,19 @@ const spec = {
       post: {
         tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
         security: [{ webhookAdmin: [] }],
-        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
-        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL, event selection, or filter (invalid_filter)' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
       },
       get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
     },
     '/api/v1/webhook-subscriptions/{id}': {
       get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
-      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      patch: {
+        tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: { content: json({ type: 'object', properties: { filter: { allOf: [{ $ref: '#/components/schemas/WebhookSubscriptionFilter' }], nullable: true, description: 'Set the filter, or null to clear it' } } }) },
+        responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update, including invalid_filter' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
       delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
@@ -476,6 +481,8 @@ const spec = {
           properties: {
             valid: { type: 'boolean' },
             entries: { type: 'integer' },
+            truncatedBeforeSeq: { type: ['integer', 'null'], description: 'seq of the first evicted entry, or null when no entries were evicted' },
+            maxEntries: { type: 'integer', description: 'maximum number of entries retained in memory' },
             brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
           },
         }),
@@ -1151,6 +1158,23 @@ const spec = {
         },
       },
     },
+    '/api/v1/contracts/{id}/stream': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Stream live contract events',
+        description:
+          'Opens a Server-Sent Events stream for one contract. Send `Last-Event-ID` to replay retained events; the per-process replay buffer holds up to 500 events.',
+        parameters: [
+          idParam,
+          { name: 'Last-Event-ID', in: 'header', required: false, schema: { type: 'string' }, description: 'Resume after this event ID.' },
+        ],
+        responses: {
+          200: { description: 'SSE stream; each message has an event type, event ID, and public JSON data.', content: { 'text/event-stream': { schema: { type: 'string' } } } },
+          404: errorResponse('Contract not found'),
+          503: errorResponse('SSE connection limit reached or server is draining'),
+        },
+      },
+    },
     '/api/v1/contracts/{id}/revisions': {
       get: {
         tags: ['Contracts'],
@@ -1329,12 +1353,25 @@ const spec = {
         summary: 'Ranked freelancer leaderboard (Bayesian score)',
         description:
           'score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there ' +
-          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.',
+          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. ' +
+          'Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.',
         parameters: [
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['score', 'completed', 'average'], default: 'score' } },
           { name: 'minCompleted', in: 'query', schema: { type: 'integer', minimum: 0, default: 1 } },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort)' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort and time window)' },
+          {
+            name: 'since',
+            in: 'query',
+            schema: { type: 'string', format: 'date-time' },
+            description: 'ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays',
+          },
+          {
+            name: 'windowDays',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1 },
+            description: 'Rolling lookback window in days (positive integer); mutually exclusive with since',
+          },
         ],
         responses: {
           ...ok('Leaderboard page', {
@@ -1347,7 +1384,7 @@ const spec = {
               },
             },
           }),
-          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor'),
+          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since'),
         },
       },
     },
@@ -1424,10 +1461,10 @@ const spec = {
         in: 'header',
         required: false,
         description:
-          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
-          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          '1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 ' +
           'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
-          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+          '(if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.',
         schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
       },
     },
@@ -1703,7 +1740,8 @@ const spec = {
           allowed: { type: 'array', items: { type: 'string' } },
         },
       },
-      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } } } },
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
@@ -2422,19 +2460,21 @@ const spec = {
 
 type Operation = { parameters?: object[]; responses: Record<string, object> };
 
-/** Documents Idempotency-Key and its error statuses on every POST operation. */
+/** Documents Idempotency-Key and its error statuses on every POST, PATCH, PUT and DELETE operation. */
 function withIdempotency<T extends { paths: object }>(doc: T): T {
-  const paths = doc.paths as Record<string, { post?: Operation }>;
+  const paths = doc.paths as Record<string, Partial<Record<'post' | 'patch' | 'put' | 'delete', Operation>>>;
   for (const item of Object.values(paths)) {
-    const op = item.post;
-    if (!op) continue;
-    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
-    op.responses = {
-      ...op.responses,
-      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
-      409: { $ref: '#/components/responses/IdempotencyConflict' },
-      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
-    };
+    for (const method of ['post', 'patch', 'put', 'delete'] as const) {
+      const op = item[method];
+      if (!op) continue;
+      op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+      op.responses = {
+        ...op.responses,
+        400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+        409: { $ref: '#/components/responses/IdempotencyConflict' },
+        422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+      };
+    }
   }
   return doc;
 }

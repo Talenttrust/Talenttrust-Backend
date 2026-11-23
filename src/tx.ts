@@ -11,6 +11,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { config } from './config';
 import { HttpError } from './store';
+import { escrowErrors } from './stellar/escrowErrors';
 
 export const ESCROW_MUTATING_FUNCTIONS = [
   'initialize',
@@ -28,24 +29,7 @@ export type EscrowMutatingFunction = (typeof ESCROW_MUTATING_FUNCTIONS)[number];
 
 const MUTATING_SET = new Set<string>(ESCROW_MUTATING_FUNCTIONS);
 
-export const ESCROW_ERRORS: Record<number, string> = {
-  1: 'AlreadyInitialized',
-  2: 'NotInitialized',
-  3: 'Unauthorized',
-  4: 'Paused',
-  5: 'ContractNotFound',
-  6: 'InvalidParties',
-  7: 'InvalidMilestones',
-  8: 'InvalidAmount',
-  9: 'OverFunded',
-  10: 'InvalidStatus',
-  11: 'MilestoneNotFound',
-  12: 'MilestoneAlreadyReleased',
-  13: 'InsufficientFunds',
-  14: 'InvalidSplit',
-  15: 'InvalidRating',
-  16: 'ReputationAlreadyIssued',
-};
+export const ESCROW_ERRORS: Record<number, string> = escrowErrors;
 
 export interface RelayedTxEntry {
   hash: string;

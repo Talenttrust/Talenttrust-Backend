@@ -1057,6 +1057,7 @@ Delay formula: `min(initialDelay × 2^retryIndex, maxDelay) ± 10% jitter`
 The following failures trigger a retry:
 
 - HTTP 5xx responses (transient server-side failures)
+- HTTP 408 (Request Timeout), 425 (Too Early), and 429 (Too Many Requests) responses (transient client-side failures)
 - Network/transport failures (timeouts, `ECONNRESET`, `ETIMEDOUT`, `ECONNABORTED`, `ECONNREFUSED`, DNS failures, etc.)
 
 Retrying only these transient failures keeps retries bounded and avoids wasting attempts on permanent client errors.
@@ -1068,7 +1069,9 @@ The following failures are moved **directly to the DLQ on the first attempt** (n
 - Payload exceeds `WEBHOOK_MAX_PAYLOAD_SIZE_BYTES` → `WEBHOOK_PAYLOAD_TOO_LARGE`
 - Destination URL blocked by SSRF guard → `WEBHOOK_SSRF_BLOCKED`
 - Per-host rate limit exceeded → `WEBHOOK_RATE_LIMITED`
-- HTTP 4xx client error response → `WEBHOOK_DELIVERY_4XX` (permanent client error; retrying cannot succeed)
+- HTTP 4xx client error response other than 408, 425, and 429 → `WEBHOOK_DELIVERY_4XX` (permanent client error; retrying cannot succeed)
+
+When a retryable response includes a numeric `Retry-After` header, the delay before the next attempt honours that value in seconds, capped at the 30 000 ms maximum backoff (`WEBHOOK_RETRY_MAX_DELAY_MS`).
 
 ### After Retry Exhaustion
 
