@@ -1041,13 +1041,9 @@ export function createApp(
   app.get('/api/cron/expire-contracts', expireContracts);
   app.post('/api/cron/expire-contracts', expireContracts);
 
-  // Event indexer batch (Vercel cron sends GET). Fails closed (401) without CRON_SECRET.
+  // Event indexer batch (Vercel cron sends GET). Fails closed (404) without CRON_SECRET.
   const indexEvents = wrap(async (req) => {
-    const expected = process.env.CRON_SECRET;
-    const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-    if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
-      throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
-    }
+    requireCronSecret(req);
     const limitParam = typeof req.query.limit === 'string' && /^[1-9]\d*$/.test(req.query.limit) ? Number(req.query.limit) : undefined;
     const maxPagesParam = typeof req.query.maxPages === 'string' && /^[1-9]\d*$/.test(req.query.maxPages) ? Number(req.query.maxPages) : undefined;
     // Few, short retries (the batch must fit in a serverless invocation); a busy indexer is not retried.

@@ -805,7 +805,7 @@ const spec = {
       get: {
         tags: ['Cron'],
         summary: 'Index a batch of escrow contract events (Vercel cron; also accepts POST)',
-        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.',
+        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.',
         parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
         responses: {
           200: {
@@ -820,7 +820,8 @@ const spec = {
               },
             }),
           },
-          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
           409: { description: 'Conflict - indexer already running' },
         },
       },

@@ -3137,7 +3137,7 @@
           "Cron"
         ],
         "summary": "Index a batch of escrow contract events (Vercel cron; also accepts POST)",
-        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.",
+        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.",
         "parameters": [
           {
             "name": "Authorization",
@@ -3174,7 +3174,22 @@
             }
           },
           "401": {
-            "description": "Unauthorized - missing or invalid CRON_SECRET",
+            "description": "Invalid or missing bearer secret (cron_unauthorized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cron secret is not configured",
             "content": {
               "application/json": {
                 "schema": {
