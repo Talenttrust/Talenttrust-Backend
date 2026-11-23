@@ -59,11 +59,11 @@ import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge'
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
+import { createRateLimiterFromEnv, type RateLimitPolicy } from './rateLimit';
 
 import { createContractsRouter } from './routes/contracts';
 import {
   callerOf,
-  ChainRateLimiter,
   ChainReadCache,
   chainIdParam,
   createMaybeAttachReceipt,
@@ -134,6 +134,8 @@ export type AppDeps = {
   apiKeyClock?: () => number;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
+  /** Injectable rate limiter (tests inject one with tight limits or disabled). */
+  rateLimiter?: ReturnType<typeof createRateLimiterFromEnv>;
 };
 
 /**
@@ -244,13 +246,6 @@ export function createApp(
   const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
   const chainReadTtl = envInt('CHAIN_READ_TTL_MS', { default: config.chainReadTtlMs, allowZero: true });
   const chainCache = new ChainReadCache(chainReadTtl);
-  const chainRateLimiter = new ChainRateLimiter();
-  const allowChainRead = (req: Request, res: Response) => {
-    if (!chainRateLimiter.allow(req.ip || 'unknown')) {
-      res.setHeader('Retry-After', '60');
-      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
-    }
-  };
   const chainStatus = () => (chainStatusReader ??= createStellarChainReader());
   /** 503 for mutations whose Soroban counterparts call require_not_paused. */
   const requireNotPaused = createRequireNotPaused(pauseGuard);
@@ -315,6 +310,49 @@ export function createApp(
     'result',
   ]);
   store.setMutationRecorder((action, result) => escrowMutationsTotal.inc({ action, result }));
+
+  // --- Rate limiting ---
+  const rateLimiter = deps.rateLimiter ?? createRateLimiterFromEnv();
+  const rateLimitedTotal = registry.counter('rate_limited_total', 'Total number of rate-limited requests', ['policy']);
+
+  /**
+   * Express middleware factory: checks the named policy for the client IP
+   * (and falls through transparently when allowed).
+   * On breach: sets RFC-compliant headers and throws 429 rate_limited.
+   */
+  const rateLimit = (policy: RateLimitPolicy): ((req: Request, res: Response, next: NextFunction) => void) =>
+    (req: Request, res: Response, next: NextFunction) => {
+      const key = req.ip ?? 'unknown';
+      const result = rateLimiter.check(policy, key);
+      // Always attach standard headers on non-exempt responses
+      if (Number.isFinite(result.limit)) {
+        res.setHeader('RateLimit-Limit', String(result.limit));
+        res.setHeader('RateLimit-Remaining', String(result.remaining));
+        res.setHeader('RateLimit-Reset', String(result.resetAt));
+      }
+      if (!result.allowed) {
+        res.setHeader('Retry-After', String(result.retryAfter));
+        rateLimitedTotal.inc({ policy });
+        return next(new HttpError(429, 'rate_limited', 'Too many requests'));
+      }
+      next();
+    };
+
+  /** Chain read rate limit: 429 chain_rate_limited (keeps existing error code/message). */
+  const allowChainRead = (req: Request, res: Response) => {
+    const key = req.ip ?? 'unknown';
+    const result = rateLimiter.check('chain', key);
+    if (Number.isFinite(result.limit)) {
+      res.setHeader('RateLimit-Limit', String(result.limit));
+      res.setHeader('RateLimit-Remaining', String(result.remaining));
+      res.setHeader('RateLimit-Reset', String(result.resetAt));
+    }
+    if (!result.allowed) {
+      res.setHeader('Retry-After', String(result.retryAfter));
+      rateLimitedTotal.inc({ policy: 'chain' });
+      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
+    }
+  };
 
   app.use(
     helmet({
@@ -489,6 +527,9 @@ export function createApp(
       apiKeys,
     }),
   );
+
+  // Apply the default rate-limit policy to every /api/v1 route.
+  v1.use(rateLimit('default'));
   // --- Wallet-signature auth (public) ---
 
   // GET /api/v1/auth/challenge?address=G...
@@ -507,6 +548,7 @@ export function createApp(
   // POST /api/v1/auth/token  { address, challenge, signature }
   v1.post(
     '/auth/token',
+    rateLimit('auth'),
     wrap((req) => {
       const { address, challenge, signature } = req.body ?? {};
       if (!isValidStellarAddress(address)) {
@@ -559,6 +601,7 @@ export function createApp(
   );
   v1.post(
     '/tx/build',
+    rateLimit('tx'),
     wrap(async (req) =>
       buildEscrowTransaction(req.body, txRpcServer ? { server: txRpcServer } : {}),
     ),
@@ -815,6 +858,7 @@ export function createApp(
   const HEX64_RE = /^[0-9a-fA-F]{64}$/;
   v1.post(
     '/tx/submit',
+    rateLimit('tx'),
     wrap(async (req, res) => {
       const result = await txRelay.submit(req.body?.xdr);
       if (result.retryAfter !== undefined) res.setHeader('Retry-After', String(result.retryAfter));
