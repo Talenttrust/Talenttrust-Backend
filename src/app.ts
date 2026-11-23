@@ -2,7 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import { config, explorerUrl } from './config';
+import { config, envInt, explorerUrl } from './config';
 import {
   DEFAULT_DISPUTE_LIMIT,
   EscrowStore,
@@ -539,8 +539,8 @@ export function createApp(
   const webhooks = new WebhookManager(store.events);
   let chainReadClient: ChainReadClient | undefined = isChainReadClient(second) ? second : deps.chainReadClient;
   const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
-  const chainReadTtl = Number(process.env.CHAIN_READ_TTL_MS ?? 5000);
-  const chainCache = new ChainReadCache(Number.isFinite(chainReadTtl) && chainReadTtl >= 0 ? chainReadTtl : 5000);
+  const chainReadTtl = envInt('CHAIN_READ_TTL_MS', { default: config.chainReadTtlMs, allowZero: true });
+  const chainCache = new ChainReadCache(chainReadTtl);
   const chainRateLimiter = new ChainRateLimiter();
   const allowChainRead = (req: Request, res: Response) => {
     if (!chainRateLimiter.allow(req.ip || 'unknown')) {
