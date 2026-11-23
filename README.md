@@ -313,7 +313,7 @@ result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
-`GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
+`GET`/`POST /api/cron/expire-contracts` and `/api/cron/index-events`). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. GET/POST /api/cron/reconcile-parity (same CRON_SECRET bearer auth) checks every linked contract against the chain with bounded concurrency (5) and a time budget, returning counts (checked, inSync, drifted, unreachable), driftedContractIds, and 	imedOut; per-contract chain failures do not abort the run. Drifted contracts emit contract.drift_detected and update gauges escrow_parity_drift_contracts and escrow_parity_last_run_timestamp_seconds. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any
 partial funding is reported as `refundableAmount`/`refundableAmountUnits`. A client can extend a deadline

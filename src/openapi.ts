@@ -481,7 +481,7 @@ const spec = {
           properties: {
             valid: { type: 'boolean' },
             entries: { type: 'integer' },
-            truncatedBeforeSeq: { type: ['integer', 'null'], description: 'seq of the first evicted entry, or null when no entries were evicted' },
+            truncatedBeforeSeq: { type: 'integer', nullable: true, description: 'seq of the first evicted entry, or null when no entries were evicted' },
             maxEntries: { type: 'integer', description: 'maximum number of entries retained in memory' },
             brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
           },
@@ -805,7 +805,7 @@ const spec = {
       get: {
         tags: ['Cron'],
         summary: 'Index a batch of escrow contract events (Vercel cron; also accepts POST)',
-        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.',
+        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.',
         parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
         responses: {
           200: {
@@ -820,7 +820,8 @@ const spec = {
               },
             }),
           },
-          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
           409: { description: 'Conflict - indexer already running' },
         },
       },
@@ -847,17 +848,6 @@ const spec = {
               },
             }),
           },
-          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
-          404: { description: 'Not found - CRON_SECRET is unset' },
-        },
-      },
-      post: {
-        tags: ['Cron'],
-        summary: 'Reconcile API/chain parity for all linked contracts',
-        description: 'Same as GET. Requires `Authorization: Bearer <CRON_SECRET>`.',
-        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
-        responses: {
-          200: { description: 'Parity reconciliation completed' },
           401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
           404: { description: 'Not found - CRON_SECRET is unset' },
         },
