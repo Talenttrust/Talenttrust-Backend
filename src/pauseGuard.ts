@@ -1,4 +1,6 @@
+import { rpc } from '@stellar/stellar-sdk';
 import { config } from './config';
+import { getRpcServer } from './stellar/server';
 
 export type PauseSource = 'chain' | 'env' | 'none';
 
@@ -45,7 +47,7 @@ export async function defaultRpcReader(): Promise<boolean> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const StellarSdk = require('@stellar/stellar-sdk');
   const networkPassphrase = config.network === 'mainnet' ? StellarSdk.Networks.PUBLIC : StellarSdk.Networks.TESTNET;
-  const server = new StellarSdk.rpc.Server(config.rpcUrl, { timeout: 5000 });
+  const server = getRpcServer(config.rpcUrl);
   // Simulation only needs a syntactically valid source account; it is never signed or submitted.
   const source = new StellarSdk.Account('GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7', '0');
   const tx = new StellarSdk.TransactionBuilder(source, { fee: '100', networkPassphrase })
@@ -53,8 +55,8 @@ export async function defaultRpcReader(): Promise<boolean> {
     .setTimeout(30)
     .build();
   const sim = await server.simulateTransaction(tx);
-  if (StellarSdk.rpc.Api.isSimulationError(sim)) throw new Error(String(sim.error));
-  const retval = sim.result?.retval;
+  if (rpc.Api.isSimulationError(sim)) throw new Error(String(sim.error));
+  const retval = (sim as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
   return retval ? Boolean(StellarSdk.scValToNative(retval)) : false;
 }
 
