@@ -50,6 +50,7 @@ export interface QueryFilters {
   createdAfter?: string;
   createdBefore?: string;
   linked?: boolean;
+  q?: string;
 }
 
 export type TemplateMode = 'fixed' | 'percent';
@@ -1801,6 +1802,7 @@ function matchesFilters(c: InternalContract, f: QueryFilters | undefined): boole
   if (f.createdAfter && c.createdAt < f.createdAfter) return false;
   if (f.createdBefore && c.createdAt > f.createdBefore) return false;
   if (f.linked !== undefined && !!c.chain !== f.linked) return false;
+  if (f.q !== undefined && !c.title.toLowerCase().includes(f.q.toLowerCase())) return false;
   return true;
 }
 

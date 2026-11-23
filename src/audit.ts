@@ -259,8 +259,12 @@ export class AuditStore {
    * Export a deep-cloned snapshot of the audit store state.
    */
   toSnapshot(): AuditSnapshot {
+    const entries: AuditEntry[] = [];
+    for (let i = 0; i < this.count; i++) {
+      entries.push(this.ring[(this.head + i) % this.maxEntries] as AuditEntry);
+    }
     return {
-      entries: structuredClone(this.entries),
+      entries: structuredClone(entries),
       nextSeq: this.nextSeq,
       prevHash: this.prevHash,
       truncatedBeforeSeq: this.truncatedBeforeSeq,
@@ -271,7 +275,22 @@ export class AuditStore {
    * Restore audit store state from a snapshot.
    */
   loadSnapshot(snapshot: AuditSnapshot): void {
-    this.entries = structuredClone(snapshot.entries);
+    const entries = structuredClone(snapshot.entries);
+    const retained = entries.length > this.maxEntries ? entries.slice(-this.maxEntries) : entries;
+    this.ring = new Array<AuditEntry | undefined>(this.maxEntries);
+    this.head = 0;
+    this.count = retained.length;
+    this.byContract.clear();
+    for (let i = 0; i < retained.length; i++) {
+      const entry = retained[i];
+      this.ring[i] = entry;
+      let bucket = this.byContract.get(entry.contractId);
+      if (!bucket) {
+        bucket = { entries: [], head: 0 };
+        this.byContract.set(entry.contractId, bucket);
+      }
+      bucket.entries.push(entry);
+    }
     this.nextSeq = snapshot.nextSeq;
     this.prevHash = snapshot.prevHash;
     this.truncatedBeforeSeq = snapshot.truncatedBeforeSeq;

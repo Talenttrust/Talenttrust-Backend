@@ -390,6 +390,13 @@ function parseFilters(q: Request['query']): QueryFilters {
   if (typeof q.createdBefore === 'string') f.createdBefore = q.createdBefore;
   if (q.linked === 'true') f.linked = true;
   else if (q.linked === 'false') f.linked = false;
+  if (typeof q.q === 'string') {
+    const trimmed = q.q.trim();
+    if (trimmed.length === 0 || trimmed.length > 64) {
+      throw new HttpError(400, 'invalid_query', 'q must be 1-64 non-whitespace characters');
+    }
+    f.q = trimmed;
+  }
   return f;
 }
 

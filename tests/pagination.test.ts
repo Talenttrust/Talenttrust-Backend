@@ -219,4 +219,82 @@ describe('contract list pagination, sorting and filters', () => {
     const secondIds = second.body.data.map((c: { id: number }) => c.id);
     expect(new Set([...firstIds, ...secondIds]).size).toBe(firstIds.length + secondIds.length);
   });
+
+  it('filters by title substring q (case-insensitive and trimmed)', async () => {
+    const store = steppedStore();
+    store.create({ title: 'Landing page redesign', client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    store.create({ title: 'Smart contract audit', client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] });
+    store.create({ title: 'Mobile UI DESIGN system', client: 'GA', freelancer: 'GB', milestones: [{ amount: 150 }] });
+    const app = createApp(store);
+
+    const res = await request(app).get('/api/v1/contracts?q=design');
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((c: { title: string }) => c.title)).toEqual([
+      'Mobile UI DESIGN system',
+      'Landing page redesign',
+    ]);
+
+    // Trims surrounding whitespace and matches case-insensitively.
+    const trimmed = await request(app).get('/api/v1/contracts?q=%20%20ReDeSiGn%20%20');
+    expect(trimmed.status).toBe(200);
+    expect(trimmed.body.data.map((c: { title: string }) => c.title)).toEqual(['Landing page redesign']);
+
+    // 64-character query is accepted.
+    const maxLen = await request(app).get(`/api/v1/contracts?q=${'a'.repeat(64)}`);
+    expect(maxLen.status).toBe(200);
+    expect(maxLen.body.data).toEqual([]);
+  });
+
+  it('paginates filtered q results with stable pages and cursors', async () => {
+    const store = steppedStore();
+    for (let i = 1; i <= 5; i++) {
+      store.create({ title: `Design milestone ${i}`, client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      store.create({ title: `Backend task ${i}`, client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    }
+    const app = createApp(store);
+
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      let url = '/api/v1/contracts?q=design&limit=2';
+      if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+      const res = await request(app).get(url);
+      expect(res.status).toBe(200);
+      for (const c of res.body.data) collected.push(c.title);
+      cursor = res.body.page.nextCursor;
+      if (!res.body.page.hasMore || !cursor) break;
+    }
+    expect(collected).toEqual([
+      'Design milestone 5',
+      'Design milestone 4',
+      'Design milestone 3',
+      'Design milestone 2',
+      'Design milestone 1',
+    ]);
+  });
+
+  it('includes q in the list ETag query string', async () => {
+    const store = steppedStore();
+    store.create({ title: 'Landing page redesign', client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    const app = createApp(store);
+
+    const a = await request(app).get('/api/v1/contracts?q=design').expect(200);
+    const b = await request(app).get('/api/v1/contracts?q=landing').expect(200);
+    expect(a.headers.etag).toBeDefined();
+    expect(b.headers.etag).toBeDefined();
+    expect(a.headers.etag).not.toBe(b.headers.etag);
+
+    await request(app).get('/api/v1/contracts?q=design').set('If-None-Match', a.headers.etag).expect(304);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', '   '],
+    ['overlong (65 chars)', 'a'.repeat(65)],
+  ])('rejects %s q with 400 invalid_query', async (_label, value) => {
+    const app = createApp(new EscrowStore().seed());
+    const res = await request(app).get(`/api/v1/contracts?q=${encodeURIComponent(value)}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_query');
+  });
 });
