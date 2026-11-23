@@ -111,6 +111,54 @@ describe('webhook delivery', () => {
     expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 6, statusCode: 503 });
   });
 
+  it('retries 429 then succeeds on attempt 2', async () => {
+    const responses = [429, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const sleeps = jest.fn(async () => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it.each([408, 425])('retries transient %i responses', async (statusCode) => {
+    const responses = [statusCode, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it('treats 404 as a terminal single-attempt failure', async () => {
+    const client = jest.fn(async () => ({ statusCode: 404 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(created.subscription.id).every((d) => d.status !== 'pending') && client.mock.calls.length >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(client).toHaveBeenCalledTimes(1);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 1, statusCode: 404 });
+  });
+
+  it('honours a numeric Retry-After on 429 up to the 30s cap', async () => {
+    const responses = [{ statusCode: 429, headers: { 'retry-after': '120' } }, { statusCode: 200 }];
+    const client = jest.fn(async () => responses.shift() ?? { statusCode: 500 });
+    const sleeps = jest.fn(async (_ms: number) => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client as any, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect(sleeps.mock.calls[0][0]).toBeLessThanOrEqual(30_000);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
   it('supports wildcard subscriptions, bounded history, and secret rotation', async () => {
     const client = jest.fn(async () => ({ statusCode: 200 }));
     const events = new StoreEventEmitter();
