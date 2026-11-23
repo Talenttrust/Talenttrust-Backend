@@ -481,7 +481,7 @@ const spec = {
           properties: {
             valid: { type: 'boolean' },
             entries: { type: 'integer' },
-            truncatedBeforeSeq: { type: ['integer', 'null'], description: 'seq of the first evicted entry, or null when no entries were evicted' },
+            truncatedBeforeSeq: { type: 'integer', nullable: true, description: 'seq of the first evicted entry, or null when no entries were evicted' },
             maxEntries: { type: 'integer', description: 'maximum number of entries retained in memory' },
             brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
           },
@@ -851,17 +851,6 @@ const spec = {
           404: { description: 'Not found - CRON_SECRET is unset' },
         },
       },
-      post: {
-        tags: ['Cron'],
-        summary: 'Reconcile API/chain parity for all linked contracts',
-        description: 'Same as GET. Requires `Authorization: Bearer <CRON_SECRET>`.',
-        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
-        responses: {
-          200: { description: 'Parity reconciliation completed' },
-          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
-          404: { description: 'Not found - CRON_SECRET is unset' },
-        },
-      },
     },
     '/api/v1/chain/events': {
       get: {
@@ -869,17 +858,28 @@ const spec = {
         summary: 'List indexed contract events',
         parameters: [
           { name: 'escrowId', in: 'query', schema: { type: 'string' }, description: 'Filter by escrow ID' },
-          { name: 'type', in: 'query', schema: { type: 'string' }, description: 'Filter by event type' },
+          {
+            name: 'type',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['Created', 'Deposit', 'Release', 'Dispute', 'Resolved', 'Cancel', 'Reputation', 'Paused', 'Init', 'Unknown'],
+            },
+            description: 'Filter by event type',
+          },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 }, description: 'Max events to return (default 50)' },
           { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Pagination cursor' },
         ],
-        responses: ok('Events', {
-          type: 'object',
-          properties: {
-            data: { type: 'array', items: { $ref: '#/components/schemas/IndexedEvent' } },
-            nextCursor: { type: 'string' },
-          },
-        }),
+        responses: {
+          ...ok('Events', {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/IndexedEvent' } },
+              nextCursor: { type: 'string' },
+            },
+          }),
+          400: errorResponse('invalid_limit, invalid_type or invalid_cursor'),
+        },
       },
     },
     '/api/v1/chain/indexer': {

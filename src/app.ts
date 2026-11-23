@@ -3,25 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { config, envInt, explorerUrl } from './config';
-  PORT,
-  CORS_ORIGINS,
-  PROXY_SECRET,
-  METRICS_IP_ALLOWLIST,
-  API_KEYS,
-  REQUEST_BODY_LIMIT,
-  RATE_LIMIT_MAX,
-  RATE_LIMIT_WINDOW_MS,
-  MAX_CURSOR_LENGTH,
-  DEFAULT_PAGE_LIMIT,
-  MAX_PAGE_LIMIT,
-  MAX_ID_LENGTH,
-  MAX_FIELD_LENGTH,
-  MAX_IDEMPOTENCY_KEY_LENGTH,
-} from './config';
-  type Cursor,
-  type EscrowContract,
-  type QueryFilters,
-} from './store';
+import { EscrowStore, HttpError, publicContract, type EscrowContract } from './store';
 import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
@@ -35,6 +17,7 @@ import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './h
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
+import { EVENT_TYPES } from './indexer/types';
 import {
   DEFAULT_WEBHOOK_HISTORY_LIMIT,
   isWebhookAdminTokenValid,
@@ -102,6 +85,7 @@ import {
   requireAdminRead,
   requireCronSecret,
   rootApiInfo,
+  safeEqual,
   wrap,
 } from './routes/helpers';
 export { getContractEtag, getContractsListEtag, PreconditionFailedError, PreconditionRequiredError };
@@ -414,8 +398,6 @@ export function createApp(
 
   app.get('/.well-known/talenttrust-receipts.json', wrap(() => receiptManager().getPublishedKeys()));
 
-        'GET/POST /api/cron/reconcile-parity',
-        'GET  /api/v1/contracts/:id/stream',
   app.get('/', wrap(() => rootApiInfo));
 
   app.get('/health', (req, res) => {
@@ -620,7 +602,18 @@ export function createApp(
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
         throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
       }
-      return eventStore.query({ escrowId: str(req.query.escrowId), type: str(req.query.type), limit, cursor: str(req.query.cursor) });
+      const typeRaw = req.query.type;
+      let type: string | undefined;
+      if (typeRaw !== undefined) {
+        if (typeof typeRaw !== 'string' || !EVENT_TYPES.includes(typeRaw as any)) {
+          throw new HttpError(400, 'invalid_type', `type must be one of: ${EVENT_TYPES.join(', ')}`);
+        }
+        type = typeRaw;
+      }
+      if (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') {
+        throw new HttpError(400, 'invalid_cursor', 'cursor must be a string');
+      }
+      return eventStore.query({ escrowId: str(req.query.escrowId), type, limit, cursor: str(req.query.cursor) });
     }),
   );
   v1.get('/chain/indexer', wrap(() => eventIndexer.getState()));
@@ -699,7 +692,6 @@ export function createApp(
   );
   // --- Escrow state machine discovery (read-only, same rules as the mutations) ---
   v1.get('/state-machine', wrap(() => describeStateMachine()));
-  v1.get(
   v1.get('/contracts/:id/stream', (req, res, next) => {
     let contractId: number;
     try {
@@ -757,6 +749,7 @@ export function createApp(
   v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.use(createContractsRouter({ segment: 'main1', ...contractRouteDeps }));
+  v1.get(
     '/reputation',
     wrap((req) =>
       store.listReputation({
@@ -774,7 +767,6 @@ export function createApp(
     validate({ params: ReputationAddressParam }),
     wrap((req) => store.getReputationWithClient(req.params.address)),
   );
-  v1.post(
   v1.use(createContractsRouter({ segment: 'main2', ...contractRouteDeps }));
   v1.get(
     '/reputation/:address/reviews',
@@ -996,7 +988,6 @@ export function createApp(
   );
 
   // --- Audit log ---
-  v1.get(
   v1.use(createContractsRouter({ segment: 'history', ...contractRouteDeps }));
   v1.get('/audit/verify', wrap(() => store.audit.verify()));
 

@@ -1,12 +1,23 @@
 import { createHmac, randomBytes, timingSafeEqual, createHash } from 'crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { StrKey } from '@stellar/stellar-sdk';
-import { HttpError, LIST_STATUSES, publicContract, type Cursor, type EscrowContract, type QueryFilters, type DisputeSort, type DisputeStatusFilter } from '../store';
+import {
+  DEFAULT_DISPUTE_LIMIT,
+  MAX_DISPUTE_LIMIT,
+  HttpError,
+  LIST_STATUSES,
+  publicContract,
+  type Cursor,
+  type EscrowContract,
+  type QueryFilters,
+  type DisputeSort,
+  type DisputeStatusFilter,
+} from '../store';
 import type { WalletAuthRequest } from '../auth/middleware';
 import type { PauseGuard } from '../pauseGuard';
-import { parseFieldSpec } from '../utils/project';
+import { parseFieldSpec, project } from '../utils/project';
 import { bigIntReplacer } from '../amount';
-import { DEFAULT_DISPUTE_LIMIT, MAX_DISPUTE_LIMIT } from '../config';
+import { config, explorerUrl } from '../config';
 
 // --- Handler/wrap utilities ---
 
@@ -124,7 +135,7 @@ export function conditionalGet(req: Request, res: Response, etag: string): boole
 
 const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
 
-function safeEqual(a: string, b: string): boolean {
+export function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a, 'utf8');
   const bb = Buffer.from(b, 'utf8');
   return ba.length === bb.length && timingSafeEqual(ba, bb);
@@ -281,14 +292,14 @@ export const oneParam = (value: unknown, code: string, name: string): string | u
 
 export function disputeStatus(value: unknown): DisputeStatusFilter {
   const v = oneParam(value, 'invalid_status', 'status') ?? 'all';
-  if (v === 'all' || v === 'open' || v === 'resolved' || v === 'cancelled') return v;
-  throw new HttpError(400, 'invalid_status', 'status must be one of all, open, resolved, cancelled');
+  if (v === 'all' || v === 'open' || v === 'resolved') return v;
+  throw new HttpError(400, 'invalid_status', 'status must be one of all, open, resolved');
 }
 
 export function disputeSort(value: unknown): DisputeSort {
   const v = oneParam(value, 'invalid_sort', 'sort') ?? 'oldest';
-  if (v === 'oldest' || v === 'newest' || v === 'client' || v === 'freelancer') return v;
-  throw new HttpError(400, 'invalid_sort', 'sort must be one of oldest, newest, client, freelancer');
+  if (v === 'oldest' || v === 'newest' || v === 'value') return v;
+  throw new HttpError(400, 'invalid_sort', 'sort must be one of oldest, newest, value');
 }
 
 export function disputeOverdue(value: unknown): boolean {
@@ -314,76 +325,63 @@ export function isValidStellarAddress(addr: unknown): addr is string {
   return typeof addr === 'string' && StrKey.isValidEd25519PublicKey(addr);
 }
 
-import type { ChainReadClient } from '../chain';
+import type { ChainReadClient } from '../stellar/client';
 
 export class ChainReadCache {
-  private readonly store = new Map<string, { value: unknown; expiresAt: number }>();
+  private readonly values = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
 
   constructor(
     private readonly ttlMs: number,
-    private readonly maxEntries: number
+    private readonly maxEntries = 256,
   ) {}
 
-  get<T>(key: string): T | undefined {
-    const hit = this.store.get(key);
-    if (!hit) return undefined;
-    if (hit.expiresAt <= Date.now()) {
-      this.store.delete(key);
-      return undefined;
-    }
-    // LRU-lite: refresh insertion order on reads.
-    this.store.delete(key);
-    this.store.set(key, hit);
-    return hit.value as T;
-  }
-
-  set(key: string, value: unknown): void {
-    if (this.maxEntries <= 0 || this.ttlMs <= 0) return;
-    if (this.store.has(key)) this.store.delete(key);
-    this.store.set(key, { value, expiresAt: Date.now() + this.ttlMs });
-    while (this.store.size > this.maxEntries) {
-      const oldest = this.store.keys().next().value;
-      if (oldest === undefined) break;
-      this.store.delete(oldest);
-    }
+  get<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const cached = this.values.get(key);
+    if (cached && cached.expiresAt > now) return cached.promise as Promise<T>;
+    if (cached) this.values.delete(key);
+    while (this.values.size >= this.maxEntries) this.values.delete(this.values.keys().next().value as string);
+    const promise = load();
+    this.values.set(key, { expiresAt: now + this.ttlMs, promise });
+    promise.catch(() => {
+      if (this.values.get(key)?.promise === promise) this.values.delete(key);
+    });
+    return promise;
   }
 }
 
 export class ChainRateLimiter {
-  private readonly hits = new Map<string, number[]>();
+  private readonly clients = new Map<string, { windowStarted: number; count: number }>();
 
   constructor(
-    private readonly windowMs: number,
-    private readonly max: number
+    private readonly maxRequests = 60,
+    private readonly windowMs = 60_000,
+    private readonly maxClients = 1024,
   ) {}
 
-  consume(ip: string): { ok: boolean; retryAfterSec: number } {
-    if (this.max <= 0 || this.windowMs <= 0) return { ok: true, retryAfterSec: 0 };
+  allow(key: string): boolean {
     const now = Date.now();
-    const cutoff = now - this.windowMs;
-    const kept = (this.hits.get(ip) ?? []).filter((t) => t > cutoff);
-    if (kept.length >= this.max) {
-      this.hits.set(ip, kept);
-      const retryAfterSec = Math.max(1, Math.ceil((kept[0] + this.windowMs - now) / 1000));
-      return { ok: false, retryAfterSec };
+    const current = this.clients.get(key);
+    if (!current || now - current.windowStarted >= this.windowMs) {
+      while (this.clients.size >= this.maxClients) this.clients.delete(this.clients.keys().next().value as string);
+      this.clients.set(key, { windowStarted: now, count: 1 });
+      return true;
     }
-    kept.push(now);
-    this.hits.set(ip, kept);
-    return { ok: true, retryAfterSec: 0 };
+    if (current.count >= this.maxRequests) return false;
+    current.count += 1;
+    return true;
   }
 }
 
 export const chainIdParam = (raw: string): bigint => {
-  if (!/^[0-9]+$/.test(raw)) {
-    throw new HttpError(400, 'invalid_contract_id', 'contract id must be a positive integer');
-  }
-  return BigInt(raw);
+  if (!/^[1-9]\d*$/.test(raw)) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  const value = BigInt(raw);
+  if (value > 18_446_744_073_709_551_615n) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  return value;
 };
 
 export const isChainReadClient = (value: unknown): value is ChainReadClient =>
-  !!value &&
-  typeof value === 'object' &&
-  typeof (value as ChainReadClient).getEscrowByContractId === 'function';
+  !!value && typeof value === 'object' && typeof (value as ChainReadClient).getReputation === 'function';
 
 export function requireAdminRead(req: Request, _res: Response, next: NextFunction) {
   const expected = process.env.ADMIN_READ_TOKEN;
@@ -483,78 +481,4 @@ export const rootApiInfo = {
         'GET  /api/v1/chain/events',
         'GET  /api/v1/chain/indexer',
       ],
-};
-
-export const rootApiInfo = {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 };
