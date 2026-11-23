@@ -382,6 +382,9 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "filter": {
+                    "$ref": "#/components/schemas/WebhookSubscriptionFilter"
                   }
                 }
               }
@@ -630,7 +633,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "filter": {
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/WebhookSubscriptionFilter"
+                      }
+                    ],
+                    "nullable": true,
+                    "description": "Set the filter, or null to clear it"
+                  }
+                }
               }
             }
           }
@@ -1541,6 +1555,15 @@
                     },
                     "entries": {
                       "type": "integer"
+                    },
+                    "truncatedBeforeSeq": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "seq of the first evicted entry, or null when no entries were evicted"
+                    },
+                    "maxEntries": {
+                      "type": "integer",
+                      "description": "maximum number of entries retained in memory"
                     },
                     "brokenAt": {
                       "type": "integer",
@@ -3114,7 +3137,7 @@
           "Cron"
         ],
         "summary": "Index a batch of escrow contract events (Vercel cron; also accepts POST)",
-        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.",
+        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.",
         "parameters": [
           {
             "name": "Authorization",
@@ -3151,7 +3174,22 @@
             }
           },
           "401": {
-            "description": "Unauthorized - missing or invalid CRON_SECRET",
+            "description": "Invalid or missing bearer secret (cron_unauthorized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cron secret is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -3182,6 +3220,108 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/reconcile-parity": {
+      "get": {
+        "tags": [
+          "Cron"
+        ],
+        "summary": "Reconcile API/chain parity for all linked contracts (Vercel cron; also accepts POST)",
+        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset. Checks linked contracts with bounded concurrency and a time budget, reporting in-sync/drifted/unreachable counts and drifted contract IDs. Unreachable chain reads for individual contracts do not abort the run.",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parity reconciliation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "checked": {
+                      "type": "integer"
+                    },
+                    "inSync": {
+                      "type": "integer"
+                    },
+                    "drifted": {
+                      "type": "integer"
+                    },
+                    "unreachable": {
+                      "type": "integer"
+                    },
+                    "driftedContractIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    "timedOut": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid CRON_SECRET",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found - CRON_SECRET is unset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -4816,6 +4956,96 @@
             "bearerAuth": []
           }
         ]
+      }
+    },
+    "/api/v1/contracts/{id}/stream": {
+      "get": {
+        "tags": [
+          "Contracts"
+        ],
+        "summary": "Stream live contract events",
+        "description": "Opens a Server-Sent Events stream for one contract. Send `Last-Event-ID` to replay retained events; the per-process replay buffer holds up to 500 events.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Contract ID (positive integer)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resume after this event ID."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream; each message has an event type, event ID, and public JSON data.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Contract not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "SSE connection limit reached or server is draining",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/contracts/{id}/revisions": {
@@ -7746,6 +7976,31 @@
           }
         }
       },
+      "WebhookSubscriptionFilter": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "parties": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "contractIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
       "WebhookSubscription": {
         "type": "object",
         "required": [
@@ -7769,6 +8024,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "filter": {
+            "$ref": "#/components/schemas/WebhookSubscriptionFilter"
           },
           "active": {
             "type": "boolean"

@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { constantTimeEqual } from '../src/metrics';
+import { constantTimeEqual, Histogram } from '../src/metrics';
 
 function metricLine(body: string, name: string, labels: Record<string, string>): string | undefined {
   const labelPairs = Object.entries(labels)
@@ -117,5 +117,51 @@ describe('Prometheus metrics', () => {
     const res1 = await request(app1).get('/metrics').set('authorization', 'Bearer test-token');
     expect(res1.status).toBe(200);
     expect(res1.text).toContain(':id');
+  });
+});
+
+describe('Histogram', () => {
+  it('emits all configured buckets in ascending order ending with +Inf for a single observation', () => {
+    const buckets = [0.1, 0.01, 1, 0.05, 0.5];
+    const histogram = new Histogram('test_duration_seconds', 'Test duration', ['method'], buckets);
+    histogram.observe({ method: 'GET' }, 0.04);
+
+    const samples = histogram.exposition();
+    const bucketSamples = samples.filter((s) => s.name === 'test_duration_seconds_bucket');
+
+    // Expected ascending order of le:
+    const expectedLes = ['0.01', '0.05', '0.1', '0.5', '1', '+Inf'];
+    expect(bucketSamples.map((s) => s.labels.le)).toEqual(expectedLes);
+
+    // Cumulative counts: value 0.04 is > 0.01, <= 0.05, <= 0.1, <= 0.5, <= 1, <= +Inf
+    expect(bucketSamples.map((s) => s.value)).toEqual([0, 1, 1, 1, 1, 1]);
+
+    const countSample = samples.find((s) => s.name === 'test_duration_seconds_count');
+    const infSample = bucketSamples.find((s) => s.labels.le === '+Inf');
+    expect(countSample?.value).toBe(1);
+    expect(infSample?.value).toBe(countSample?.value);
+  });
+
+  it('accumulates multiple observations with cumulative counts matching +Inf and _count', () => {
+    const histogram = new Histogram('test_request_duration_seconds', 'Help', [], [1, 5, 10]);
+    histogram.observe({}, 0.5);
+    histogram.observe({}, 2.5);
+    histogram.observe({}, 7.0);
+    histogram.observe({}, 12.0);
+
+    const samples = histogram.exposition();
+    const bucketSamples = samples.filter((s) => s.name === 'test_request_duration_seconds_bucket');
+
+    expect(bucketSamples.map((s) => s.labels.le)).toEqual(['1', '5', '10', '+Inf']);
+    // <= 1: 1 (0.5)
+    // <= 5: 2 (0.5, 2.5)
+    // <= 10: 3 (0.5, 2.5, 7.0)
+    // <= +Inf: 4
+    expect(bucketSamples.map((s) => s.value)).toEqual([1, 2, 3, 4]);
+
+    const countSample = samples.find((s) => s.name === 'test_request_duration_seconds_count');
+    expect(countSample?.value).toBe(4);
+    const sumSample = samples.find((s) => s.name === 'test_request_duration_seconds_sum');
+    expect(sumSample?.value).toBe(22);
   });
 });

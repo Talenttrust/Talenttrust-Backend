@@ -10,16 +10,19 @@ import { EventIndexer } from '../src/indexer/indexer';
 
 describe('Cron endpoint', () => {
   it('returns 401 without authorization header', async () => {
+    process.env.CRON_SECRET = 'test-secret';
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
     const app = createApp(undefined, eventStore, indexer);
 
     const response = await request(app).post('/api/cron/index-events');
     expect(response.status).toBe(401);
-    expect(response.body.error).toBe('unauthorized');
+    expect(response.body.error).toBe('cron_unauthorized');
+    delete process.env.CRON_SECRET;
   });
 
   it('returns 401 with wrong secret', async () => {
+    process.env.CRON_SECRET = 'test-secret';
     const eventStore = new InMemoryEventStore();
     const indexer = new EventIndexer(eventStore);
     const app = createApp(undefined, eventStore, indexer);
@@ -28,7 +31,8 @@ describe('Cron endpoint', () => {
       .post('/api/cron/index-events')
       .set('Authorization', 'Bearer wrong-secret');
     expect(response.status).toBe(401);
-    expect(response.body.error).toBe('unauthorized');
+    expect(response.body.error).toBe('cron_unauthorized');
+    delete process.env.CRON_SECRET;
   });
 
   it('returns 200 with correct secret', async () => {
@@ -125,7 +129,14 @@ describe('Cron endpoint', () => {
     const response = await request(app)
       .post('/api/cron/index-events')
       .set('Authorization', 'Bearer any-token');
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('not_found');
+
+    const getRes = await request(app)
+      .get('/api/cron/index-events')
+      .set('Authorization', 'Bearer any-token');
+    expect(getRes.status).toBe(404);
+    expect(getRes.body.error).toBe('not_found');
   });
 });
 

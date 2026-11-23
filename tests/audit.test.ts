@@ -200,7 +200,7 @@ describe('TalentTrust API', () => {
       }
 
       expect(audit.getTruncatedBeforeSeq()).toBe(1);
-      expect(audit.verify()).toEqual({ valid: true, entries: 5 });
+      expect(audit.verify()).toEqual({ valid: true, entries: 5, truncatedBeforeSeq: 1, maxEntries: 5 });
 
       // Contract 10 should have seqs 3, 6, 7 (seq 1 was evicted)
       const c10All = audit.getContractHistory(10);
@@ -240,7 +240,7 @@ describe('TalentTrust API', () => {
       audit._tamperWithEntry(8, (entry) => {
         entry.after.fundedAmount = 12345;
       });
-      expect(audit.verify()).toEqual({ valid: false, entries: 5, brokenAt: 8 });
+      expect(audit.verify()).toEqual({ valid: false, entries: 5, truncatedBeforeSeq: 1, maxEntries: 5, brokenAt: 8 });
     });
 
     it('performs 20k appends with eviction and history query within a generous time bound', () => {

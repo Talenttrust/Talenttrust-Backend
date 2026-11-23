@@ -692,9 +692,9 @@ describe('EscrowStore.reconcileParity', () => {
       milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
     });
 
-    await store.linkToChain(inSync.id, 'R1', fakeChain);
-    await store.linkToChain(drifted.id, 'R2', fakeChain);
-    await store.linkToChain(unreachable.id, 'R3', fakeChain);
+    await store.linkEscrow(inSync.id, 'R1', fakeChain);
+    await store.linkEscrow(drifted.id, 'R2', fakeChain);
+    await store.linkEscrow(unreachable.id, 'R3', fakeChain);
 
     // introduce drift and make one contract unreachable during reconciliation
     fakeChain.escrows.set('R2', {
@@ -751,7 +751,7 @@ describe('EscrowStore.reconcileParity', () => {
     for (let i = 1; i <= 6; i++) {
       const c = store.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
       (store as any).contracts.get(c.id).chain = {
-        escrowId: C, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
+        escrowId: `C${i}`, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
       };
     }
     const conc = await store.reconcileParity(reader, { concurrency: 5, timeBudgetMs: 2000 });
@@ -776,10 +776,10 @@ describe('EscrowStore.reconcileParity', () => {
     for (let i = 1; i <= 5; i++) {
       const c = store2.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
       (store2 as any).contracts.get(c.id).chain = {
-        escrowId: B, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
+        escrowId: `B${i}`, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
       };
     }
-    const timed = await store2.reconcileParity(new VerySlowReader() as any, { concurrency: 5, timeBudgetMs: 10 });
+    const timed = await store2.reconcileParity(new VerySlowReader() as any, { concurrency: 2, timeBudgetMs: 10 });
     expect(timed.checked).toBeLessThan(5);
     expect(timed.timedOut).toBe(true);
   });

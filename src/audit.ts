@@ -106,11 +106,6 @@ export class AuditStore {
     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
       throw new Error(`Invalid audit maxEntries: "${maxEntries}". Must be a positive integer.`);
     }
-  }
-  private readonly maxEntries: number;
-
-  constructor(maxEntries = 100_000) {
-    this.maxEntries = maxEntries;
     this.ring = new Array<AuditEntry | undefined>(maxEntries);
   }
 
@@ -249,12 +244,11 @@ export class AuditStore {
       if (hash !== expectedHash) {
         return {
           valid: false,
-          entries: this.entries.length,
+          entries: this.count,
           truncatedBeforeSeq: this.truncatedBeforeSeq,
           maxEntries: this.maxEntries,
           brokenAt: entry.seq,
         };
-        return { valid: false, entries: this.count, brokenAt: entry.seq };
       }
 
       currentHash = hash;
@@ -262,11 +256,10 @@ export class AuditStore {
 
     return {
       valid: true,
-      entries: this.entries.length,
+      entries: this.count,
       truncatedBeforeSeq: this.truncatedBeforeSeq,
       maxEntries: this.maxEntries,
     };
-    return { valid: true, entries: this.count };
   }
 
   /**
