@@ -101,7 +101,7 @@ export class SorobanRpcChainReader implements ChainReader {
           const reader = new ContractReader({
             rpcUrl: this.rpcUrl,
             contractId: this.contractId,
-            network: config.network,
+            networkPassphrase: this.networkPassphrase || config.networkPassphrase,
             transport: this.transport,
           });
           latestLedger = await reader.getLatestLedger();
@@ -130,10 +130,7 @@ export class SorobanRpcChainReader implements ChainReader {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const StellarSdk = require('@stellar/stellar-sdk');
       const networkPassphrase =
-        this.networkPassphrase ||
-        (config.network === 'mainnet'
-          ? StellarSdk.Networks.PUBLIC
-          : StellarSdk.Networks.TESTNET);
+        this.networkPassphrase || config.networkPassphrase;
 
       const rpcServer = this.transport ?? new StellarSdk.rpc.Server(this.rpcUrl);
       const contract = new StellarSdk.Contract(this.contractId);

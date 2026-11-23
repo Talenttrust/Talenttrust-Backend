@@ -3,7 +3,6 @@ import {
   BASE_FEE,
   Contract,
   nativeToScVal,
-  Networks,
   rpc,
   StrKey,
   TransactionBuilder,
@@ -234,9 +233,7 @@ export async function buildEscrowTransaction(
     throw new TxBuildError(400, 'source_mismatch', `source must match the party required by ${request.action}`);
   }
 
-  const networkPassphrase = options.networkPassphrase ??
-    process.env.STELLAR_NETWORK_PASSPHRASE ??
-    (config.network === 'mainnet' || config.network === 'public' ? Networks.PUBLIC : Networks.TESTNET);
+  const networkPassphrase = options.networkPassphrase ?? config.networkPassphrase;
   const timeoutSeconds = options.timeoutSeconds ?? config.txTimeoutSeconds;
   const server = options.server ?? new rpc.Server(config.rpcUrl);
 

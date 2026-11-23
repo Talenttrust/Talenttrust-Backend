@@ -39,13 +39,6 @@ export interface HealthRpcClient {
   hasContractInstance(contractId: string): Promise<boolean>;
 }
 
-export const NETWORK_PASSPHRASES: Record<string, string> = {
-  public: 'Public Global Stellar Network ; September 2015',
-  testnet: 'Test SDF Network ; September 2015',
-  futurenet: 'Test SDF Future Network ; October 2022',
-  local: 'Local Stellar Network ; September 2015',
-};
-
 const CRITICAL_CHECKS = ['rpc', 'network', 'contract', 'storage'] as const;
 type CriticalCheck = (typeof CRITICAL_CHECKS)[number];
 
@@ -89,7 +82,7 @@ export class HealthService {
     this.rpc = opts.rpc;
     this.network = opts.network ?? config.network;
     this.expectedPassphrase =
-      opts.networkPassphrase ?? NETWORK_PASSPHRASES[this.network];
+      opts.networkPassphrase ?? config.networkPassphrase;
     this.contractId = opts.contractId ?? config.contractId;
     this.timeoutMs = opts.timeoutMs ?? config.healthCheckTimeoutMs;
     this.cacheMs = opts.cacheMs ?? config.healthCacheMs;

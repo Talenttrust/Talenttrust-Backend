@@ -8,14 +8,13 @@ function resolveBodyLimit(raw: string | undefined): string {
   }
   return value;
 }
-const network = process.env.STELLAR_NETWORK || 'testnet';
-
 /** Stellar network passphrases by STELLAR_NETWORK name. */
-const NETWORK_PASSPHRASES: Record<string, string> = {
+export const NETWORK_PASSPHRASES: Record<string, string> = {
   testnet: 'Test SDF Network ; September 2015',
   mainnet: 'Public Global Stellar Network ; September 2015',
   public: 'Public Global Stellar Network ; September 2015',
   futurenet: 'Test SDF Future Network ; October 2022',
+  local: 'Local Stellar Network ; September 2015',
 };
 
 export interface EnvIntOptions {
@@ -60,11 +59,22 @@ export function nonNegativeIntEnv(name: string, fallback?: number): number | und
 
 
 export const config = {
-  network,
-  networkPassphrase:
-    process.env.STELLAR_NETWORK_PASSPHRASE ||
-    NETWORK_PASSPHRASES[network.toLowerCase()] ||
-    NETWORK_PASSPHRASES.testnet,
+  get network(): string {
+    return process.env.STELLAR_NETWORK || 'testnet';
+  },
+  set network(value: string) {
+    process.env.STELLAR_NETWORK = value;
+  },
+  get networkPassphrase(): string {
+    if (process.env.STELLAR_NETWORK_PASSPHRASE) {
+      return process.env.STELLAR_NETWORK_PASSPHRASE;
+    }
+    const net = (process.env.STELLAR_NETWORK || 'testnet').toLowerCase();
+    return NETWORK_PASSPHRASES[net] || NETWORK_PASSPHRASES.testnet;
+  },
+  set networkPassphrase(value: string) {
+    process.env.STELLAR_NETWORK_PASSPHRASE = value;
+  },
   contractId:
     process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
