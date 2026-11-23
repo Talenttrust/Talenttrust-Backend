@@ -386,7 +386,7 @@ describe('Idempotency-Key', () => {
     const walletApp = createApp({ store: new EscrowStore(), authSecret });
     const alice = await authHeader(Keypair.random(), walletApp);
     const bob = await authHeader(Keypair.random(), walletApp);
-    const body = { client: 'GA', freelancer: 'GB', milestones: [100] };
+    const body = { freelancer: 'GB', milestones: [100] };
     const post = (authorization: string) => request(walletApp)
       .post('/api/v1/contracts')
       .set('Authorization', authorization)

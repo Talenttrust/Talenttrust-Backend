@@ -112,7 +112,7 @@ const principalOf = (req: Request, opts: IdempotencyOptions): string | null => {
     if (rawKey) {
       try {
         const matched = matchApiKey(opts.apiKeys, rawKey);
-        if (matched) return `api-key:${matched.id}`;
+        if (matched && matched.status === 'valid') return `api-key:${matched.key.id}`;
       } catch {
         // An unrecognized key remains anonymous; route middleware handles auth.
       }
