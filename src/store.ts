@@ -404,6 +404,9 @@ const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
   ['resolveDispute', 'resolve'],
   ['cancel', 'cancel'],
   ['rate', 'rate'],
+  ['edit', 'edit'],
+  ['extendDeadline', 'extend_deadline'],
+  ['delete', 'withdraw'],
 ];
 
 const parseIsoMillis = (value: unknown): number | undefined => {
@@ -609,35 +612,51 @@ export class EscrowStore {
   }
 
   private recordAudit(action: AuditAction, contractId: number, before: AuditState | undefined, args: unknown[]) {
+    // For 'withdraw' the contract has already been deleted; use the before snapshot for both states.
+    const isWithdrawn = action === 'withdraw';
     const c = this.contracts.get(contractId);
-    const after = this.auditState(contractId);
-    if (!c || !after) return;
+    const after = isWithdrawn
+      ? { status: 'Withdrawn', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' }
+      : this.auditState(contractId);
+    if (!isWithdrawn && (!c || !after)) return;
     const prev = before ?? { status: 'N/A', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' };
-    const delta = (field: 'fundedAmountUnits' | 'releasedAmountUnits') => BigInt(after[field]!) - BigInt(prev[field]!);
+    const delta = (field: 'fundedAmountUnits' | 'releasedAmountUnits') => BigInt((after as AuditState)[field]!) - BigInt(prev[field]!);
     let details: Record<string, unknown> = {};
-    if (action === 'create') details = { title: c.title, totalAmount: Number(c.totalAmount), totalAmountUnits: c.totalAmount.toString() };
+    if (action === 'create') details = { title: c!.title, totalAmount: Number(c!.totalAmount), totalAmountUnits: c!.totalAmount.toString() };
     else if (action === 'deposit') details = { amount: Number(delta('fundedAmountUnits')), amountUnits: delta('fundedAmountUnits').toString() };
     else if (action === 'release') {
       details = { index: args[1], amount: Number(delta('releasedAmountUnits')), amountUnits: delta('releasedAmountUnits').toString() };
-    } else if (action === 'dispute') details = { raisedBy: c.dispute?.raisedBy }; // reason stays confidential
+    } else if (action === 'dispute') details = { raisedBy: c!.dispute?.raisedBy }; // reason stays confidential
     else if (action === 'resolve') {
       const held = BigInt(prev.fundedAmountUnits!) - BigInt(prev.releasedAmountUnits!);
       const toFreelancer = delta('releasedAmountUnits');
       details = {
-        freelancerBps: c.dispute?.freelancerBps,
+        freelancerBps: c!.dispute?.freelancerBps,
         toFreelancer: Number(toFreelancer),
         toClient: Number(held - toFreelancer),
         toFreelancerUnits: toFreelancer.toString(),
         toClientUnits: (held - toFreelancer).toString(),
       };
     } else if (action === 'rate') details = { rating: Number(args[1]) };
+    else if (action === 'edit') {
+      // args[1] is the input object; expose only changed field names (not values)
+      const input = args[1] as { title?: unknown; milestones?: unknown } | undefined;
+      const changedFields: string[] = [];
+      if (input && Object.prototype.hasOwnProperty.call(input, 'title')) changedFields.push('title');
+      if (input && Object.prototype.hasOwnProperty.call(input, 'milestones')) changedFields.push('milestones');
+      details = { changedFields, revision: c!.revision };
+    } else if (action === 'extend_deadline') {
+      // args[2] is the new fundingDeadline ISO string
+      details = { newDeadline: c!.fundingDeadline };
+    }
+    // 'withdraw' leaves details empty — no sensitive contract data
     const ctx = this.auditContext ?? {};
     this.audit.append({
       contractId,
       action,
-      ctx: { ...ctx, actor: ctx.actor ?? (action === 'dispute' ? c.dispute?.raisedBy : undefined) },
+      ctx: { ...ctx, actor: ctx.actor ?? (action === 'dispute' ? c?.dispute?.raisedBy : undefined) },
       before: prev,
-      after,
+      after: after as AuditState,
       details,
       at: this.nowIso(),
     });
