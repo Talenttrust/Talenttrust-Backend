@@ -13,20 +13,23 @@ export class HttpError extends Error {
   public status: number;
   public code: string;
   public details?: Record<string, unknown>;
+  public headers?: Record<string, string>;
 
   constructor(key: ErrorKey, message?: string, details?: Record<string, unknown>);
-  constructor(status: number, code: string, message: string, details?: Record<string, unknown>);
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>, headers?: Record<string, string>);
   constructor(
     statusOrKey: number | ErrorKey,
     codeOrMessage?: string,
     messageOrDetails?: string | Record<string, unknown>,
     details?: Record<string, unknown>,
+    headers?: Record<string, string>,
   ) {
     if (typeof statusOrKey === 'number') {
       super(codeOrMessage === undefined ? 'Error' : (messageOrDetails as string));
       this.status = statusOrKey;
       this.code = codeOrMessage ?? 'internal_error';
       this.details = details;
+      this.headers = headers;
     } else {
       const entry: ErrorEntry = ERRORS[statusOrKey];
       super(codeOrMessage ?? entry.detail);

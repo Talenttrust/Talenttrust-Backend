@@ -123,6 +123,7 @@ export const ERRORS = {
   invalid_chain_id: { status: 400, title: 'Invalid chain id', detail: 'chainId must be a positive u64' },
   chain_error: { status: 502, title: 'Chain error', detail: 'On-chain read failed' },
   chain_rate_limited: { status: 429, title: 'Chain reads rate limited', detail: 'Too many chain read requests (60 per minute per client)' },
+  rate_limited: { status: 429, title: 'Rate limited', detail: 'Too many requests. See Retry-After header.' },
   method_not_allowed: { status: 405, title: 'Method not allowed', detail: 'The path exists but does not support this HTTP method (see Allow)' },
   indexer_busy: { status: 409, title: 'Indexer busy', detail: 'The event indexer is already running' },
   insufficient_scope: { status: 403, title: 'Insufficient scope', detail: 'The API key does not have the required scope' },

@@ -27,6 +27,17 @@ import {
 } from '../src/tx';
 import { contractErrorFromMessage } from '../src/stellar/escrowErrors';
 
+function metricValue(body: string, name: string, labels: Record<string, string>): number | undefined {
+  const labelPairs = Object.entries(labels)
+    .map(([k, v]) => `${k}="${v.replace(/"/g, '\\"')}"`)
+    .join(',');
+  const prefix = `${name}{${labelPairs}} `;
+  for (const line of body.split('\n')) {
+    if (line.startsWith(prefix)) return parseFloat(line.trim().split(/\s+/).pop()!);
+  }
+  return undefined;
+}
+
 const ESCROW_ID = config.contractId;
 const WRONG_CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
 
@@ -332,6 +343,37 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
       const res = await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr });
       expect(res.status).toBe(503);
       expect(res.headers['retry-after']).toBe('7');
+    });
+
+    it('increments tx_submissions_total counter for each submission status', async () => {
+      process.env.METRICS_TOKEN = 'test-token';
+      const { xdr: txXdr, hash } = buildSignedEscrowTx({ fn: 'create_contract' });
+
+      mockRpc.sendTransaction.mockResolvedValueOnce({
+        status: 'PENDING',
+        hash,
+        latestLedger: 600,
+        latestLedgerCloseTime: 1700000100,
+      });
+      await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr }).expect(202);
+
+      mockRpc.sendTransaction.mockResolvedValueOnce({
+        status: 'TRY_AGAIN_LATER',
+        hash,
+        latestLedger: 601,
+        latestLedgerCloseTime: 1700000105,
+      });
+      await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr }).expect(503);
+
+      const res = await request(app).get('/metrics').set('authorization', 'Bearer test-token');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('# TYPE tx_submissions_total counter');
+
+      const pendingValue = metricValue(res.text, 'tx_submissions_total', { status: 'PENDING' });
+      expect(pendingValue).toBe(1);
+
+      const tryAgainValue = metricValue(res.text, 'tx_submissions_total', { status: 'TRY_AGAIN_LATER' });
+      expect(tryAgainValue).toBe(1);
     });
 
     it('handles sendTransaction ERROR -> 422 submission_failed with decoded errorResult code (txBadSeq, txInsufficientFee)', async () => {
@@ -782,6 +824,85 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
       expect(res.body.components.schemas.TxStatusResponse).toBeDefined();
       expect(res.body.components.schemas.RelayedTransaction).toBeDefined();
       expect(res.body.components.schemas.ContractError).toBeDefined();
+    });
+  });
+
+  describe('Soroban RPC unreachable / error handling (503 and 502 mapping)', () => {
+    it('returns 503 chain_unavailable with Retry-After header when submit encounters connection error', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:8000')),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc, retryAfterSeconds: 5 });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(503);
+
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body.error).toBe('chain_unavailable');
+      expect(res.body.status).toBe(503);
+    });
+
+    it('returns 503 chain_unavailable with Retry-After header when getStatus encounters timeout', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn(),
+        getTransaction: jest.fn().mockRejectedValue(new Error('fetch failed: request timed out after 4000ms')),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc, retryAfterSeconds: 5 });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const fakeHash = 'a'.repeat(64);
+      const res = await request(app)
+        .get(`/api/v1/tx/${fakeHash}`)
+        .expect(503);
+
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body.error).toBe('chain_unavailable');
+      expect(res.body.status).toBe(503);
+    });
+
+    it('returns 502 rpc_error when RPC returns malformed payload or general failure', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockResolvedValue({} as any),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(502);
+
+      expect(res.body.error).toBe('rpc_error');
+      expect(res.body.status).toBe(502);
+    });
+
+    it('sanitizes raw RPC URLs and secrets in error responses', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockRejectedValue(new Error('Failed connecting to https://secret-rpc-provider.org/v1/secret-key-12345: connect ECONNREFUSED')),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(503);
+
+      expect(res.body.detail).not.toContain('https://secret-rpc-provider.org');
+      expect(res.body.detail).toContain('[redacted-url]');
     });
   });
 });

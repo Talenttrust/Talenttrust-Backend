@@ -266,5 +266,156 @@ describe('TalentTrust API', () => {
       expect(history.data.every((e) => e.contractId === 42)).toBe(true);
       expect(elapsedMs).toBeLessThan(5000);
     });
+
+    it('edit appends an audit entry with changedFields', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      await request(freshApp)
+        .patch(`/api/v1/contracts/${contractId}`)
+        .set('If-Match', etag)
+        .send({ client: 'GA', title: 'New title' })
+        .expect(200);
+
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      const editEntry = history.body.data.find((e: any) => e.action === 'edit');
+      expect(editEntry).toBeDefined();
+      expect(editEntry.details.changedFields).toContain('title');
+      expect(editEntry.before.status).toBe('Created');
+      expect(editEntry.after.status).toBe('Created');
+      // verify() must still pass after the edit entry
+      const verify = await request(freshApp).get('/api/v1/audit/verify').expect(200);
+      expect(verify.body.valid).toBe(true);
+    });
+
+    it('failed edit does not append an audit entry', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      // Wrong client — should 403, no audit entry
+      await request(freshApp)
+        .patch(`/api/v1/contracts/${contractId}`)
+        .set('If-Match', etag)
+        .send({ client: 'WRONG', title: 'Bad actor' })
+        .expect(403);
+
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      expect(history.body.data.every((e: any) => e.action !== 'edit')).toBe(true);
+    });
+
+    it('extend_deadline appends an audit entry with newDeadline', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      const newDeadline = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString();
+      await request(freshApp)
+        .post(`/api/v1/contracts/${contractId}/extend-deadline`)
+        .set('If-Match', etag)
+        .send({ client: 'GA', fundingDeadline: newDeadline })
+        .expect(200);
+
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      const extEntry = history.body.data.find((e: any) => e.action === 'extend_deadline');
+      expect(extEntry).toBeDefined();
+      expect(extEntry.details.newDeadline).toBe(newDeadline);
+      expect(extEntry.before.status).toBe('Created');
+      expect(extEntry.after.status).toBe('Created');
+      const verify = await request(freshApp).get('/api/v1/audit/verify').expect(200);
+      expect(verify.body.valid).toBe(true);
+    });
+
+    it('failed extend_deadline does not append an audit entry', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      // Invalid deadline (in the past relative to current deadline)
+      await request(freshApp)
+        .post(`/api/v1/contracts/${contractId}/extend-deadline`)
+        .set('If-Match', etag)
+        .send({ client: 'GA', fundingDeadline: '2000-01-01T00:00:00.000Z' })
+        .expect(400);
+
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      expect(history.body.data.every((e: any) => e.action !== 'extend_deadline')).toBe(true);
+    });
+
+    it('withdraw appends an audit entry and history remains accessible after deletion', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      await request(freshApp)
+        .delete(`/api/v1/contracts/${contractId}`)
+        .set('If-Match', etag)
+        .send({ client: 'GA' })
+        .expect(204);
+
+      // Contract is gone — GET should 404
+      await request(freshApp).get(`/api/v1/contracts/${contractId}`).expect(404);
+
+      // But history must still be accessible and contain a withdraw entry
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      const withdrawEntry = history.body.data.find((e: any) => e.action === 'withdraw');
+      expect(withdrawEntry).toBeDefined();
+      expect(withdrawEntry.after.status).toBe('Withdrawn');
+      expect(withdrawEntry.before.status).toBe('Created');
+      // Chain must remain valid
+      const verify = await request(freshApp).get('/api/v1/audit/verify').expect(200);
+      expect(verify.body.valid).toBe(true);
+    });
+
+    it('failed withdraw does not append an audit entry', async () => {
+      const freshStore = new EscrowStore();
+      const freshApp = createApp(freshStore);
+
+      const { body: created } = await request(freshApp)
+        .post('/api/v1/contracts')
+        .send({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      const contractId = created.id;
+      const etag = `"${contractId}-${created.version}"`;
+
+      // Wrong client — 403, no audit entry
+      await request(freshApp)
+        .delete(`/api/v1/contracts/${contractId}`)
+        .set('If-Match', etag)
+        .send({ client: 'WRONG' })
+        .expect(403);
+
+      const history = await request(freshApp).get(`/api/v1/contracts/${contractId}/history`).expect(200);
+      expect(history.body.data.every((e: any) => e.action !== 'withdraw')).toBe(true);
+    });
+
+    it('history returns 404 for a truly unknown contract id with no audit entries', async () => {
+      await request(app).get('/api/v1/contracts/99999/history').expect(404);
+    });
   });
 });
