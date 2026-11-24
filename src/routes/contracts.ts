@@ -142,7 +142,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
+        const updated = audited(req, () => store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) }));
         setEtag(res, updated);
         return publicContract(updated);
       }),
@@ -152,7 +152,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        store.delete(id(req), clientOf(req));
+        audited(req, () => store.delete(id(req), clientOf(req)));
         res.status(204).end();
       }),
     );
@@ -162,7 +162,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
+        const updated = audited(req, () => store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline));
         setEtag(res, updated);
         return publicContract(updated);
       }),
@@ -283,7 +283,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       '/contracts/:id/history',
       w((req) => {
         const contractId = id(req);
-        store.get(contractId); // 404 for unknown contracts
+        // For a withdrawn contract the record is gone; we still serve history if entries exist.
+        // Only throw 404 when neither the contract nor any audit entries are present.
         const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
         const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
         if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
@@ -292,7 +293,12 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
           throw new HttpError(400, 'invalid_cursor', 'cursor must be a non-negative integer');
         }
-        return store.audit.getContractHistory(contractId, limit, cursor);
+        const result = store.audit.getContractHistory(contractId, limit, cursor);
+        if (result.data.length === 0) {
+          // No audit entries — verify the contract exists (throws 404 for truly unknown ids)
+          store.get(contractId);
+        }
+        return result;
       }),
     );
   };
