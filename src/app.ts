@@ -51,8 +51,8 @@ import {
 import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
-import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
-import { createHash, createHmac, timingSafeEqual } from 'crypto';
+import { createRegistry, type Registry, HTTP_DURATION_BUCKETS } from './metrics';
+import { bearerToken, secureEqual } from './utils/secureCompare';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
 import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
@@ -85,7 +85,6 @@ import {
   requireAdminRead,
   requireCronSecret,
   rootApiInfo,
-  safeEqual,
   wrap,
 } from './routes/helpers';
 export { getContractEtag, getContractsListEtag, PreconditionFailedError, PreconditionRequiredError };
@@ -1088,8 +1087,8 @@ export function createApp(
   app.get('/metrics', (req, res, next) => {
     const token = process.env.METRICS_TOKEN;
     if (!token) return next(new HttpError(404, 'not_found', 'Metrics endpoint disabled'));
-    const auth = req.headers.authorization;
-    if (!auth || !constantTimeEqual(auth, `Bearer ${token}`)) {
+    const presented = bearerToken(req.headers.authorization);
+    if (!presented || !secureEqual(presented, token)) {
       return next(new HttpError(401, 'unauthorized', 'Invalid metrics token'));
     }
     const stats = store.stats();
