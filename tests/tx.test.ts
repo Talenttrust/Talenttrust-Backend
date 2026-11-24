@@ -27,6 +27,17 @@ import {
 } from '../src/tx';
 import { contractErrorFromMessage } from '../src/stellar/escrowErrors';
 
+function metricValue(body: string, name: string, labels: Record<string, string>): number | undefined {
+  const labelPairs = Object.entries(labels)
+    .map(([k, v]) => `${k}="${v.replace(/"/g, '\\"')}"`)
+    .join(',');
+  const prefix = `${name}{${labelPairs}} `;
+  for (const line of body.split('\n')) {
+    if (line.startsWith(prefix)) return parseFloat(line.trim().split(/\s+/).pop()!);
+  }
+  return undefined;
+}
+
 const ESCROW_ID = config.contractId;
 const WRONG_CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
 
@@ -332,6 +343,37 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
       const res = await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr });
       expect(res.status).toBe(503);
       expect(res.headers['retry-after']).toBe('7');
+    });
+
+    it('increments tx_submissions_total counter for each submission status', async () => {
+      process.env.METRICS_TOKEN = 'test-token';
+      const { xdr: txXdr, hash } = buildSignedEscrowTx({ fn: 'create_contract' });
+
+      mockRpc.sendTransaction.mockResolvedValueOnce({
+        status: 'PENDING',
+        hash,
+        latestLedger: 600,
+        latestLedgerCloseTime: 1700000100,
+      });
+      await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr }).expect(202);
+
+      mockRpc.sendTransaction.mockResolvedValueOnce({
+        status: 'TRY_AGAIN_LATER',
+        hash,
+        latestLedger: 601,
+        latestLedgerCloseTime: 1700000105,
+      });
+      await request(app).post('/api/v1/tx/submit').send({ xdr: txXdr }).expect(503);
+
+      const res = await request(app).get('/metrics').set('authorization', 'Bearer test-token');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('# TYPE tx_submissions_total counter');
+
+      const pendingValue = metricValue(res.text, 'tx_submissions_total', { status: 'PENDING' });
+      expect(pendingValue).toBe(1);
+
+      const tryAgainValue = metricValue(res.text, 'tx_submissions_total', { status: 'TRY_AGAIN_LATER' });
+      expect(tryAgainValue).toBe(1);
     });
 
     it('handles sendTransaction ERROR -> 422 submission_failed with decoded errorResult code (txBadSeq, txInsufficientFee)', async () => {
