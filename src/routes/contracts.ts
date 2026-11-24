@@ -35,6 +35,20 @@ import type { ScopedApiKeyRequest } from '../auth/scopedApiKeyMiddleware';
 
 export type ContractsRouteSegment = 'actions' | 'main1' | 'main2' | 'history' | 'all';
 
+/** POST routes that require a JSON object body (shared with the lenient JSON parser in src/app.ts). */
+export const CONTRACT_OBJECT_BODY_ROUTES = [
+  '/contracts',
+  '/contracts/:id/extend-deadline',
+  '/contracts/:id/deposit',
+  '/contracts/:id/dispute',
+  '/contracts/:id/resolve',
+  '/contracts/:id/reputation',
+  '/contracts/:id/reviews',
+  '/contracts/:id/link',
+] as const;
+
+export type ContractObjectBodyRoute = (typeof CONTRACT_OBJECT_BODY_ROUTES)[number];
+
 export interface ContractsRouterDeps {
   v1?: Router;
   segment?: ContractsRouteSegment;
@@ -58,6 +72,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
   const { store, chainReader, requireAuth, requireNotPaused, requireResolveKey } = deps;
   const w = deps.wrapFn ?? wrap;
   const jb = deps.jsonBody ?? jsonObjectBody;
+  const postObjectBody = (path: ContractObjectBodyRoute, ...handlers: RequestHandler[]) =>
+    router.post(path, ...jb, ...handlers);
   const v = deps.validateFn ?? validate;
   const { audited, checkPreconditions, setEtag, clientOf } = createContractRouteHelpers({ store });
   const maybeAttachReceipt = deps.maybeAttachReceipt;
@@ -95,9 +111,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         };
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts',
-      ...jb,
       requireNotPaused,
       requireAuth,
       (req, _res, next) => {
@@ -157,7 +172,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       }),
     );
     router.get('/contracts/:id/revisions', w((req) => store.getRevisions(id(req))));
-    router.post(
+    postObjectBody(
       '/contracts/:id/extend-deadline',
       requireAuth,
       checkPreconditions,
@@ -167,9 +182,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/deposit',
-      ...jb,
       requireNotPaused,
       requireAuth,
       v({ params: IdParam, body: DepositBody }),
@@ -194,9 +208,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/dispute',
-      ...jb,
       requireNotPaused,
       requireAuth,
       v({ params: IdParam, body: DisputeBody }),
@@ -210,9 +223,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/resolve',
-      ...jb,
       requireResolveKey,
       v({ params: IdParam, body: ResolveBody }),
       checkPreconditions,
@@ -237,9 +249,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/reputation',
-      ...jb,
       requireAuth,
       v({ params: IdParam, body: RateBody }),
       checkPreconditions,
@@ -255,7 +266,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
   };
 
   const addMain2 = () => {
-    router.post(
+    postObjectBody(
       '/contracts/:id/reviews',
       requireAuth,
       w((req, res) => {
@@ -267,9 +278,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         res.status(201).json(store.createReview(id(req), caller === undefined ? body : { ...body, reviewer: caller }));
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/link',
-      ...jb,
       w(async (req) => publicContract(await store.linkEscrow(id(req), req.body?.escrowId, chainReader))),
     );
     router.get(

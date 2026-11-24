@@ -28,10 +28,13 @@ describe('request body errors', () => {
   });
 
   it.each([
+    '/api/v1/contracts/1/extend-deadline',
     '/api/v1/contracts/1/deposit',
     '/api/v1/contracts/1/dispute',
     '/api/v1/contracts/1/resolve',
     '/api/v1/contracts/1/reputation',
+    '/api/v1/contracts/1/reviews',
+    '/api/v1/contracts/1/link',
   ])('returns 415 for a non-JSON body on POST %s', async (path) => {
     const res = await request(app).post(path).set('Content-Type', 'text/plain').send('{"amount":1}');
     expect(res.status).toBe(415);
@@ -59,6 +62,15 @@ describe('request body errors', () => {
 
   it.each([['[]'], ['"x"'], ['42']])('returns 400 invalid_body for a top-level %s body', async (raw) => {
     const res = await request(app).post('/api/v1/contracts').set('Content-Type', 'application/json').send(raw);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_body');
+  });
+
+  it.each([
+    '/api/v1/contracts/1/extend-deadline',
+    '/api/v1/contracts/1/reviews',
+  ])('returns 400 invalid_body for a top-level primitive body on POST %s', async (path) => {
+    const res = await request(app).post(path).set('Content-Type', 'application/json').send('42');
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_body');
   });

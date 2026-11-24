@@ -380,7 +380,7 @@ the grace deadline, then force-closes remaining sockets and exits.
 
 ## Request bodies
 
-Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
+Routes that take a body (`POST /api/v1/contracts` and `/extend-deadline`, `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/reviews`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
 
 | Situation | Status | Error code |
 | --- | --- | --- |

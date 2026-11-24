@@ -62,7 +62,7 @@ import { TokenRevocationList } from './auth/revocation';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
 import { createRateLimiterFromEnv, type RateLimitPolicy } from './rateLimit';
 
-import { createContractsRouter } from './routes/contracts';
+import { CONTRACT_OBJECT_BODY_ROUTES, createContractsRouter } from './routes/contracts';
 import {
   callerOf,
   ChainReadCache,
@@ -412,8 +412,11 @@ export function createApp(
 
   // Strict parsing (the default) rejects top-level primitives such as 42 or "x" with invalid_json.
   // The body-taking routes parse leniently instead, so requireObjectBody can reply invalid_body.
-  // Keep this pattern in sync with the routes that use jsonObjectBody below.
-  const objectBodyRoutes = /^\/api\/v1\/contracts(\/[^/]+\/(deposit|dispute|resolve|reputation|link))?\/?$/i;
+  // Derived from CONTRACT_OBJECT_BODY_ROUTES so parser selection stays in sync with jsonObjectBody.
+  const objectBodyRoutes = new RegExp(
+    `^/api/v1(?:${CONTRACT_OBJECT_BODY_ROUTES.map((r) => r.replace('/:id/', '/[^/]+/')).join('|')})/?$`,
+    'i',
+  );
   const jsonStrict = express.json({ limit: config.bodyLimit });
   const jsonLenient = express.json({ limit: config.bodyLimit, strict: false });
   app.use((req, res, next) =>
