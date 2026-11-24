@@ -116,6 +116,10 @@ const errorResponses = {
     description: 'Conflict',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
   },
+  429: {
+    description: 'Rate limited (rate_limited) — see Retry-After and RateLimit-* headers',
+    content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+  },
   500: {
     description: 'Internal error',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
@@ -286,6 +290,7 @@ const spec = {
             },
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
+          429: errorResponse('Rate limited (tx policy, RATE_LIMIT_TX_PER_MIN) — see Retry-After'),
         },
       },
     },
@@ -767,6 +772,7 @@ const spec = {
         responses: {
           ...ok('Token issued.', { $ref: '#/components/schemas/TokenResponse' }),
           401: errorResponse('invalid_challenge / challenge_expired / challenge_replayed / invalid_signature.'),
+          429: errorResponse('Rate limited (auth policy, RATE_LIMIT_AUTH_PER_MIN) — see Retry-After'),
         },
       },
     },
@@ -1144,6 +1150,7 @@ const spec = {
           422: errorResponse('Contract simulation failed (contract_error)', {
             $ref: '#/components/schemas/TxBuildErrorResponse',
           }),
+          429: errorResponse('Rate limited (tx policy, RATE_LIMIT_TX_PER_MIN) — see Retry-After'),
           503: errorResponse('Stellar RPC unavailable', {
             $ref: '#/components/schemas/TxBuildErrorResponse',
           }),
