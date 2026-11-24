@@ -1314,10 +1314,13 @@ export class EscrowStore {
         } else {
           inSync++;
         }
-      } catch {
+      } catch (err) {
         if (timer) clearTimeout(timer);
-        if (remaining() <= 0) timedOut = true;
-        unreachable++;
+        if (remaining() <= 0 || (err instanceof Error && err.message === 'reconcile_time_budget_exceeded')) {
+          timedOut = true;
+        } else {
+          unreachable++;
+        }
       }
     };
 
@@ -1830,14 +1833,36 @@ export class EscrowStore {
     // Sum with bigint to match contract precision; expose as decimal strings.
     let totalEscrowedBig = 0n;
     let totalReleasedBig = 0n;
+    const tokenBigInts: Record<string, { contracts: number; escrowed: bigint; released: bigint }> = {};
+
     for (const c of all) {
-      totalEscrowedBig += c.fundedAmount - c.releasedAmount;
-      totalReleasedBig += c.releasedAmount;
+      const escrowed = c.fundedAmount - c.releasedAmount;
+      const released = c.releasedAmount;
+      totalEscrowedBig += escrowed;
+      totalReleasedBig += released;
+
+      const tokenKey = c.token || 'XLM';
+      if (!tokenBigInts[tokenKey]) {
+        tokenBigInts[tokenKey] = { contracts: 0, escrowed: 0n, released: 0n };
+      }
+      tokenBigInts[tokenKey].contracts += 1;
+      tokenBigInts[tokenKey].escrowed += escrowed;
+      tokenBigInts[tokenKey].released += released;
+    }
+
+    const byToken: Record<string, { contracts: number; totalEscrowedUnits: string; totalReleasedUnits: string }> = {};
+    for (const [token, data] of Object.entries(tokenBigInts)) {
+      byToken[token] = {
+        contracts: data.contracts,
+        totalEscrowedUnits: data.escrowed.toString(),
+        totalReleasedUnits: data.released.toString(),
+      };
     }
 
     return {
       contracts: all.length,
       byStatus,
+      byToken,
       /** @deprecated lossy above 2^53; use totalEscrowedUnits */
       totalEscrowed: Number(totalEscrowedBig),
       totalEscrowedUnits: totalEscrowedBig.toString(),

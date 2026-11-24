@@ -711,3 +711,167 @@ describe('contract.updated and reputation.updated events', () => {
     expect(seen).toEqual(['contract.updated']);
   });
 });
+
+describe('secret rotation grace period and dual-signing (Issue #1692)', () => {
+  it('dual-signs deliveries during rotation grace period and allows verification with old and new secret', async () => {
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody = '';
+    const client = jest.fn(async (_url: any, body: any, headers: any) => {
+      capturedHeaders = headers;
+      capturedBody = body;
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const { subscription, secret: originalSecret } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Rotate with 3600 seconds grace period
+    const { secret: newSecret, subscription: updatedSub } = manager.rotateSecret(subscription.id, 3600);
+    expect(newSecret).not.toBe(originalSecret);
+    expect(updatedSub.previousExpiresAt).toBeDefined();
+
+    // Trigger delivery
+    events.emit('contract.created', { contractId: 1 });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    const sigHeader = capturedHeaders['X-Signature'];
+    expect(sigHeader).toBeDefined();
+    // Signature header should contain both signatures separated by comma
+    expect(sigHeader.split(',')).toHaveLength(2);
+
+    // Both new and original secrets verify the payload
+    expect(verifyWebhookSignature(newSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature(originalSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature('wrong_secret', capturedHeaders, capturedBody)).toBe(false);
+  });
+
+  it('drops previous secret once grace period expires', async () => {
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody = '';
+    const client = jest.fn(async (_url: any, body: any, headers: any) => {
+      capturedHeaders = headers;
+      capturedBody = body;
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const { subscription, secret: originalSecret } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Rotate with 0 grace period (immediate expiry)
+    const { secret: newSecret } = manager.rotateSecret(subscription.id, 0);
+
+    events.emit('contract.created', { contractId: 1 });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    const sigHeader = capturedHeaders['X-Signature'];
+    expect(sigHeader.split(',')).toHaveLength(1);
+    expect(verifyWebhookSignature(newSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature(originalSecret, capturedHeaders, capturedBody)).toBe(false);
+  });
+
+  it('enforces 7-day maximum grace cap and never exposes previousSecret', async () => {
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events);
+    const { subscription } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Request 30 days, should cap at 7 days (604800s)
+    const now = Date.now();
+    const rotated = manager.rotateSecret(subscription.id, 30 * 86400);
+    expect(rotated.subscription).not.toHaveProperty('previousSecret');
+    expect(manager.get(subscription.id)).not.toHaveProperty('previousSecret');
+
+    const expiresAtMs = new Date(rotated.subscription.previousExpiresAt!).getTime();
+    const diffSeconds = Math.round((expiresAtMs - now) / 1000);
+    expect(diffSeconds).toBeLessThanOrEqual(604800);
+    expect(diffSeconds).toBeGreaterThanOrEqual(604790);
+  });
+});
+
+describe('on-chain event delivery and filtering (Issue #1710)', () => {
+  it('delivers chain.event to subscribers filtering by escrowId', async () => {
+    const client = jest.fn(async () => ({ statusCode: 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+
+    await manager.create({
+      url: 'http://localhost:12345/hook',
+      events: ['chain.event'],
+      filter: { escrowId: ['ESCROW_TARGET_1', 'ESCROW_TARGET_2'] },
+    });
+
+    // Emit matching chain event
+    events.emit('chain.event', { escrowId: 'ESCROW_TARGET_1', event: { id: 'evt-1' } });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    // Emit non-matching chain event
+    events.emit('chain.event', { escrowId: 'ESCROW_OTHER', event: { id: 'evt-2' } });
+    // Emit non-chain event
+    events.emit('contract.created', { contract: { id: 1 } });
+
+    // Brief wait to ensure no extra invocations occurred
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(client).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('persisted due queue retry runner (Issue #1716)', () => {
+  it('schedules retries and processes due deliveries with processDue', async () => {
+    let callCount = 0;
+    const client = jest.fn(async () => {
+      callCount++;
+      if (callCount <= 1) {
+        return { statusCode: 500 };
+      }
+      return { statusCode: 200 };
+    });
+
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      queueRetriesOnly: true,
+      random: () => 0.5,
+    });
+
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    events.emit('contract.created', {});
+
+    // Initial attempt fails and schedules nextAttemptAt
+    await waitFor(() => client.mock.calls.length === 1);
+    const history1 = await manager.history(created.subscription.id);
+    expect(history1).toHaveLength(1);
+    expect(history1[0].status).toBe('pending');
+    expect(history1[0].attempts).toBe(1);
+    expect(history1[0].nextAttemptAt).toBeDefined();
+
+    // Advance time past nextAttemptAt and process due queue
+    const futureTime = new Date(history1[0].nextAttemptAt!).getTime() + 1000;
+    const result = await manager.processDue(futureTime);
+    expect(result.processed).toBe(1);
+    expect(result.succeeded).toBe(1);
+    expect(result.failed).toBe(0);
+
+    const history2 = await manager.history(created.subscription.id);
+    expect(history2[0].status).toBe('success');
+    expect(history2[0].attempts).toBe(2);
+    expect(history2[0].nextAttemptAt).toBeNull();
+  });
+
+  it('does not process deliveries whose nextAttemptAt is in the future', async () => {
+    const client = jest.fn(async () => ({ statusCode: 500 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      queueRetriesOnly: true,
+      random: () => 0.5,
+    });
+
+    await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 1);
+
+    // Call processDue at current time (before nextAttemptAt)
+    const result = await manager.processDue(Date.now() - 10_000);
+    expect(result.processed).toBe(0);
+  });
+});
+

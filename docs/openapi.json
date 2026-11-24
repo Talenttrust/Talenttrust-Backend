@@ -152,8 +152,23 @@
               }
             }
           },
+          "502": {
+            "description": "Soroban RPC returned an error or unexpected response (rpc_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Soroban RPC returned TRY_AGAIN_LATER",
+            "description": "Soroban RPC is unreachable (chain_unavailable) or returned TRY_AGAIN_LATER",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying submission",
@@ -333,8 +348,31 @@
               }
             }
           },
+          "502": {
+            "description": "Soroban RPC returned an error or unexpected response (rpc_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Too many concurrent long-poll requests",
+            "description": "Soroban RPC is unreachable (chain_unavailable) or too many concurrent long-poll requests (too_many_waits)",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -823,6 +861,24 @@
             "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "graceSeconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800,
+                    "default": 86400,
+                    "description": "Grace period in seconds during which the previous secret remains valid (max 7 days)"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "New secret; returned only once"
@@ -2189,6 +2245,106 @@
                       "items": {
                         "type": "integer"
                       }
+                    },
+                    "checkedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or missing bearer secret (cron_unauthorized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cron secret is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/deliver-webhooks": {
+      "get": {
+        "tags": [
+          "Cron"
+        ],
+        "summary": "Process due webhook retries",
+        "description": "Periodic sweep (Vercel cron) that processes due webhook retry attempts. Also accepts POST. Requires `Authorization: Bearer <CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sweep result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "processed",
+                    "succeeded",
+                    "failed",
+                    "checkedAt"
+                  ],
+                  "properties": {
+                    "processed": {
+                      "type": "integer"
+                    },
+                    "succeeded": {
+                      "type": "integer"
+                    },
+                    "failed": {
+                      "type": "integer"
                     },
                     "checkedAt": {
                       "type": "string",
@@ -4097,6 +4253,29 @@
                     },
                     "byStatus": {
                       "type": "object"
+                    },
+                    "byToken": {
+                      "type": "object",
+                      "description": "Escrow totals grouped by token address/symbol",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "contracts": {
+                            "type": "integer"
+                          },
+                          "totalEscrowedUnits": {
+                            "type": "string"
+                          },
+                          "totalReleasedUnits": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "contracts",
+                          "totalEscrowedUnits",
+                          "totalReleasedUnits"
+                        ]
+                      }
                     },
                     "totalEscrowed": {
                       "description": "DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.",
@@ -8231,6 +8410,15 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          "escrowId": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       },
@@ -8262,13 +8450,18 @@
             "$ref": "#/components/schemas/WebhookSubscriptionFilter"
           },
           "active": {
-            "type": "boolean"
+            "type": "boolean",
+            "default": true
           },
           "createdAt": {
             "type": "string",
             "format": "date-time"
           },
           "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previousExpiresAt": {
             "type": "string",
             "format": "date-time"
           }
@@ -8304,6 +8497,11 @@
           "redeliveryOf": {
             "type": "string",
             "description": "Original delivery id for manual redeliveries"
+          },
+          "nextAttemptAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           },
           "createdAt": {
             "type": "string",

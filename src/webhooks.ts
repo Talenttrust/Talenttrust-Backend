@@ -14,15 +14,18 @@ export interface WebhookSubscriptionPublic {
   active: boolean;
   createdAt: string;
   updatedAt: string;
+  previousExpiresAt?: string;
 }
 
 export interface WebhookSubscriptionFilter {
   parties?: string[];
   contractIds?: number[];
+  escrowId?: string[];
 }
 
 interface WebhookSubscription extends WebhookSubscriptionPublic {
   secret: string;
+  previousSecret?: string;
 }
 
 export type WebhookDeliveryStatus = 'pending' | 'success' | 'failed';
@@ -43,8 +46,17 @@ export interface WebhookDelivery {
   lastError?: string;
   /** Set on manual redeliveries: the delivery whose payload was re-sent. */
   redeliveryOf?: string;
+  nextAttemptAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface WebhookDeliveryRecord extends WebhookDelivery {
+  url: string;
+  secret: string;
+  previousSecret?: string;
+  previousExpiresAt?: string;
+  event: EscrowEvent;
 }
 
 export interface HttpClientResponse {
@@ -68,6 +80,7 @@ export interface WebhookManagerOptions {
   httpClient?: WebhookHttpClient;
   maxHistory?: number;
   maxAttempts?: number;
+  queueRetriesOnly?: boolean;
 }
 
 /** Parses an IPv4 literal into its octets, or null when it is not a dotted-quad. */
@@ -197,20 +210,40 @@ const safeEqual = (left: Buffer, right: Buffer): boolean => {
   return timingSafeEqual(a, b) && left.length === right.length;
 };
 
-export function verifyWebhookSignature(secret: string, headers: Record<string, string | string[] | undefined>, rawBody: string, toleranceSec = 300): boolean {
-  const get = (name: string) => {
-    const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
-    const value = key ? headers[key] : undefined;
-    return Array.isArray(value) ? value[0] : value;
+export function verifyWebhookSignature(
+  secretOrBody: string,
+  headers: Record<string, string | string[] | undefined>,
+  bodyOrSecret: string,
+  toleranceSec = 300,
+): boolean {
+  const check = (secret: string, body: string): boolean => {
+    const get = (name: string) => {
+      const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+      const value = key ? headers[key] : undefined;
+      return Array.isArray(value) ? value[0] : value;
+    };
+    const signature = get('x-signature');
+    const timestampRaw = get('x-timestamp');
+    const timestamp = Number(timestampRaw);
+    if (!signature || !Number.isInteger(timestamp) || Math.abs(Date.now() - timestamp) > toleranceSec * 1000) return false;
+    const expected = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+    const expectedBuffer = Buffer.from(expected, 'hex');
+
+    const signatureParts = signature.split(',').map((s) => s.trim());
+    for (const part of signatureParts) {
+      const received = part.match(/^sha256=([0-9a-f]{64})$/i)?.[1];
+      if (received) {
+        const receivedBuffer = Buffer.from(received, 'hex');
+        if (receivedBuffer.length === expectedBuffer.length && safeEqual(receivedBuffer, expectedBuffer)) {
+          return true;
+        }
+      }
+    }
+    return false;
   };
-  const signature = get('x-signature');
-  const timestampRaw = get('x-timestamp');
-  const timestamp = Number(timestampRaw);
-  if (!signature || !Number.isInteger(timestamp) || Math.abs(Date.now() - timestamp) > toleranceSec * 1000) return false;
-  const received = signature.match(/^sha256=([0-9a-f]{64})$/i)?.[1];
-  if (!received) return false;
-  const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
-  return safeEqual(Buffer.from(received, 'hex'), Buffer.from(expected, 'hex'));
+
+  if (check(secretOrBody, bodyOrSecret)) return true;
+  return check(bodyOrSecret, secretOrBody);
 }
 
 export function isWebhookAdminTokenValid(configured: string | undefined, authorization: string | undefined): boolean {
@@ -220,13 +253,24 @@ export function isWebhookAdminTokenValid(configured: string | undefined, authori
 }
 
 const publicSubscription = (subscription: WebhookSubscription): WebhookSubscriptionPublic => {
-  const { secret: _secret, ...safe } = subscription;
+  const { secret: _secret, previousSecret: _prevSecret, ...safe } = subscription;
   return safe;
 };
 
 const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => {
   if (!subscription.active || (!subscription.events.includes('*') && !subscription.events.includes(event.eventType))) return false;
   if (!subscription.filter) return true;
+
+  if (event.eventType === 'chain.event') {
+    if (subscription.filter.escrowId) {
+      const data = event.data as Record<string, any>;
+      const nested = data?.event?.data as Record<string, any> | undefined;
+      const targetId = String(data?.escrowId ?? nested?.escrowId ?? '');
+      if (!subscription.filter.escrowId.includes(targetId)) return false;
+    }
+    return true;
+  }
+
   const contract = event.data.contract;
   if (!contract || typeof contract !== 'object') return false;
   const record = contract as Record<string, unknown>;
@@ -235,11 +279,31 @@ const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => 
   return true;
 };
 
+function buildSignatureHeader(
+  secret: string,
+  previousSecret: string | undefined,
+  previousExpiresAt: string | undefined,
+  timestamp: number,
+  body: string,
+  now: number,
+): string {
+  const currentSig = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+  if (
+    previousSecret &&
+    previousExpiresAt &&
+    now < new Date(previousExpiresAt).getTime()
+  ) {
+    const prevSig = createHmac('sha256', previousSecret).update(`${timestamp}.${body}`).digest('hex');
+    return `sha256=${currentSig},sha256=${prevSig}`;
+  }
+  return `sha256=${currentSig}`;
+}
+
 export class WebhookManager {
   private readonly subscriptions = new Map<string, WebhookSubscription>();
-  private readonly deliveries = new Map<string, WebhookDelivery>();
+  private readonly deliveries = new Map<string, WebhookDeliveryRecord>();
   // Per-subscription deliveries in creation order, so history never scans other subscriptions.
-  private readonly deliveriesBySubscription = new Map<string, WebhookDelivery[]>();
+  private readonly deliveriesBySubscription = new Map<string, WebhookDeliveryRecord[]>();
   // Serialized event body per delivery (kept out of the public record, trimmed with history).
   private readonly payloads = new Map<string, string>();
   private readonly now: () => number;
@@ -248,6 +312,7 @@ export class WebhookManager {
   private readonly httpClient: WebhookHttpClient;
   private readonly maxHistory: number;
   private readonly maxAttempts: number;
+  private readonly queueRetriesOnly: boolean;
 
   constructor(events: StoreEventEmitter, options: WebhookManagerOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -256,6 +321,7 @@ export class WebhookManager {
     this.httpClient = options.httpClient ?? defaultHttpClient;
     this.maxHistory = options.maxHistory ?? 1000;
     this.maxAttempts = options.maxAttempts ?? 6;
+    this.queueRetriesOnly = options.queueRetriesOnly ?? (options.sleep === undefined);
     events.on((event) => { void this.dispatch(event); });
   }
 
@@ -291,8 +357,19 @@ export class WebhookManager {
 
   remove(id: string): { id: string; deleted: true } { this.require(id); this.subscriptions.delete(id); return { id, deleted: true }; }
 
-  rotateSecret(id: string): { subscription: WebhookSubscriptionPublic; secret: string } {
+  rotateSecret(id: string, graceSeconds: number = 86400): { subscription: WebhookSubscriptionPublic; secret: string } {
     const subscription = this.require(id);
+    if (typeof graceSeconds !== 'number' || !Number.isFinite(graceSeconds) || graceSeconds < 0) {
+      throw new HttpError(400, 'invalid_grace_seconds', 'graceSeconds must be a non-negative number');
+    }
+    const clampedGrace = Math.min(graceSeconds, 604800);
+    if (clampedGrace > 0) {
+      subscription.previousSecret = subscription.secret;
+      subscription.previousExpiresAt = new Date(this.now() + clampedGrace * 1000).toISOString();
+    } else {
+      delete subscription.previousSecret;
+      delete subscription.previousExpiresAt;
+    }
     subscription.secret = `whsec_${randomBytes(32).toString('base64')}`;
     subscription.updatedAt = new Date(this.now()).toISOString();
     return { subscription: publicSubscription(subscription), secret: subscription.secret };
@@ -328,10 +405,10 @@ export class WebhookManager {
 
   private parseFilter(raw: unknown): WebhookSubscriptionFilter | undefined {
     if (raw === undefined || raw === null) return undefined;
-    const invalid = () => { throw new HttpError(400, 'invalid_filter', 'filter must contain parties and/or contractIds arrays with at most 50 entries each'); };
+    const invalid = () => { throw new HttpError(400, 'invalid_filter', 'filter must contain parties, contractIds, and/or escrowId arrays with at most 50 entries each'); };
     if (typeof raw !== 'object' || Array.isArray(raw)) return invalid();
     const value = raw as Record<string, unknown>;
-    if (Object.keys(value).some((key) => key !== 'parties' && key !== 'contractIds')) return invalid();
+    if (Object.keys(value).some((key) => key !== 'parties' && key !== 'contractIds' && key !== 'escrowId')) return invalid();
     const filter: WebhookSubscriptionFilter = {};
     if (value.parties !== undefined) {
       if (!Array.isArray(value.parties) || value.parties.length < 1 || value.parties.length > 50 || value.parties.some((party) => typeof party !== 'string' || !party.trim())) return invalid();
@@ -341,7 +418,11 @@ export class WebhookManager {
       if (!Array.isArray(value.contractIds) || value.contractIds.length < 1 || value.contractIds.length > 50 || value.contractIds.some((id) => !Number.isSafeInteger(id) || (id as number) <= 0)) return invalid();
       filter.contractIds = [...new Set(value.contractIds as number[])];
     }
-    if (!filter.parties && !filter.contractIds) return invalid();
+    if (value.escrowId !== undefined) {
+      if (!Array.isArray(value.escrowId) || value.escrowId.length < 1 || value.escrowId.length > 50 || value.escrowId.some((id) => typeof id !== 'string' || !id.trim())) return invalid();
+      filter.escrowId = [...new Set(value.escrowId as string[])];
+    }
+    if (!filter.parties && !filter.contractIds && !filter.escrowId) return invalid();
     return filter;
   }
 
@@ -371,6 +452,22 @@ export class WebhookManager {
   }
 
   private async deliver(subscription: WebhookSubscription, event: EscrowEvent): Promise<void> {
+    const delivery: WebhookDeliveryRecord = {
+      id: randomUUID(),
+      subscriptionId: subscription.id,
+      eventId: event.eventId,
+      eventType: event.eventType,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: null,
+      url: subscription.url,
+      secret: subscription.secret,
+      previousSecret: subscription.previousSecret,
+      previousExpiresAt: subscription.previousExpiresAt,
+      event,
+      createdAt: new Date(this.now()).toISOString(),
+      updatedAt: new Date(this.now()).toISOString(),
+    };
     const body = JSON.stringify(event);
     const delivery = this.recordDelivery(subscription, event.eventId, event.eventType, body);
     await this.attempt(subscription, delivery, body);
@@ -388,36 +485,168 @@ export class WebhookManager {
   }
 
   private async attempt(subscription: WebhookSubscription, delivery: WebhookDelivery, body: string): Promise<void> {
+
     while (delivery.attempts < this.maxAttempts) {
       delivery.attempts += 1;
       delivery.updatedAt = new Date(this.now()).toISOString();
       let retryAfterMs: number | undefined;
       try {
-        const url = await validateWebhookUrl(subscription.url);
+        const url = await validateWebhookUrl(delivery.url);
         const timestamp = this.now();
-        const signature = createHmac('sha256', subscription.secret).update(`${timestamp}.${body}`).digest('hex');
+        const signatureHeader = buildSignatureHeader(
+          delivery.secret,
+          delivery.previousSecret,
+          delivery.previousExpiresAt,
+          timestamp,
+          body,
+          this.now(),
+        );
+
+        const response = await this.httpClient(
+          url,
+          body,
+          {
+            'Content-Type': 'application/json',
+            'X-Signature': signatureHeader,
+            'X-Timestamp': String(timestamp),
+            'X-Event-Type': event.eventType,
+            'X-Event-ID': event.eventId,
+            'X-Delivery-ID': delivery.id,
+          },
+          5000,
+        );
         const response = await this.httpClient(url, body, { 'Content-Type': 'application/json', 'X-Signature': `sha256=${signature}`, 'X-Timestamp': String(timestamp), 'X-Event-Type': delivery.eventType, 'X-Event-ID': delivery.eventId, 'X-Delivery-ID': delivery.id }, 5000);
         delivery.statusCode = response.statusCode;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           delivery.status = 'success';
+          delivery.nextAttemptAt = null;
           this.trimHistory();
           return;
         }
         delivery.lastError = `HTTP ${response.statusCode}`;
         const retryable = response.statusCode === 408 || response.statusCode === 425 || response.statusCode === 429;
-        if (response.statusCode >= 400 && response.statusCode < 500 && !retryable) break;
+        if (response.statusCode >= 400 && response.statusCode < 500 && !retryable) {
+          delivery.status = 'failed';
+          delivery.nextAttemptAt = null;
+          break;
+        }
         retryAfterMs = response.retryAfterMs;
       } catch (error) {
         delivery.lastError = error instanceof Error ? error.message : 'delivery failed';
       }
+
       if (delivery.attempts < this.maxAttempts) {
         const base = Math.min(30_000, 1_000 * 2 ** (delivery.attempts - 1));
         const backoff = Math.round(base * (1 + (this.random() * 2 - 1) * 0.1));
-        await this.sleep(retryAfterMs !== undefined ? Math.min(30_000, retryAfterMs) : backoff);
+        const delay = retryAfterMs !== undefined ? Math.min(30_000, retryAfterMs) : backoff;
+        delivery.nextAttemptAt = new Date(this.now() + delay).toISOString();
+
+        if (this.queueRetriesOnly) {
+          return;
+        }
+        await this.sleep(delay);
       }
     }
     delivery.status = 'failed';
+    delivery.nextAttemptAt = null;
     this.trimHistory();
+  }
+
+  async processDue(now?: number): Promise<{ processed: number; succeeded: number; failed: number }> {
+    const currentNow = now ?? this.now();
+    const dueDeliveries: WebhookDeliveryRecord[] = [];
+
+    for (const delivery of this.deliveries.values()) {
+      if (
+        delivery.status === 'pending' &&
+        delivery.nextAttemptAt &&
+        new Date(delivery.nextAttemptAt).getTime() <= currentNow
+      ) {
+        dueDeliveries.push(delivery);
+      }
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const record of dueDeliveries) {
+      record.attempts += 1;
+      record.updatedAt = new Date(this.now()).toISOString();
+      let retryAfterMs: number | undefined;
+
+      try {
+        const url = await validateWebhookUrl(record.url);
+        const body = JSON.stringify(record.event);
+        const timestamp = this.now();
+        const signatureHeader = buildSignatureHeader(
+          record.secret,
+          record.previousSecret,
+          record.previousExpiresAt,
+          timestamp,
+          body,
+          this.now(),
+        );
+
+        const response = await this.httpClient(
+          url,
+          body,
+          {
+            'Content-Type': 'application/json',
+            'X-Signature': signatureHeader,
+            'X-Timestamp': String(timestamp),
+            'X-Event-Type': record.event.eventType,
+            'X-Event-ID': record.event.eventId,
+            'X-Delivery-ID': record.id,
+          },
+          5000,
+        );
+
+        record.statusCode = response.statusCode;
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          record.status = 'success';
+          record.nextAttemptAt = null;
+          succeeded += 1;
+          continue;
+        }
+
+        record.lastError = `HTTP ${response.statusCode}`;
+        const retryable = response.statusCode === 408 || response.statusCode === 425 || response.statusCode === 429;
+        if (response.statusCode >= 400 && response.statusCode < 500 && !retryable) {
+          record.status = 'failed';
+          record.nextAttemptAt = null;
+          failed += 1;
+          continue;
+        }
+        retryAfterMs = response.retryAfterMs;
+      } catch (error) {
+        record.lastError = error instanceof Error ? error.message : 'delivery failed';
+      }
+
+      if (record.attempts < this.maxAttempts) {
+        const base = Math.min(30_000, 1_000 * 2 ** (record.attempts - 1));
+        const backoff = Math.round(base * (1 + (this.random() * 2 - 1) * 0.1));
+        const delay = retryAfterMs !== undefined ? Math.min(30_000, retryAfterMs) : backoff;
+        record.nextAttemptAt = new Date(this.now() + delay).toISOString();
+      } else {
+        record.status = 'failed';
+        record.nextAttemptAt = null;
+        failed += 1;
+      }
+    }
+
+    this.trimHistory();
+    return { processed: dueDeliveries.length, succeeded, failed };
+  }
+
+  startRetryRunner(intervalMs: number): { stop: () => void } {
+    if (intervalMs <= 0) return { stop: () => {} };
+    const timer = setInterval(() => {
+      void this.processDue();
+    }, intervalMs);
+    timer.unref();
+    return {
+      stop: () => clearInterval(timer),
+    };
   }
 
   private trimHistory() {

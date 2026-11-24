@@ -12,6 +12,7 @@ import {
 import { z } from 'zod';
 import { config } from '../config';
 import { contractErrorFromMessage } from './escrowErrors';
+import { getRpcServer } from './server';
 
 const I128_MIN = -(1n << 127n);
 const I128_MAX = (1n << 127n) - 1n;
@@ -238,7 +239,7 @@ export async function buildEscrowTransaction(
     process.env.STELLAR_NETWORK_PASSPHRASE ??
     (config.network === 'mainnet' || config.network === 'public' ? Networks.PUBLIC : Networks.TESTNET);
   const timeoutSeconds = options.timeoutSeconds ?? config.txTimeoutSeconds;
-  const server = options.server ?? new rpc.Server(config.rpcUrl);
+  const server = options.server ?? getRpcServer(config.rpcUrl);
 
   try {
     const account = await server.getAccount(request.source);

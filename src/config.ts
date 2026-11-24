@@ -93,6 +93,8 @@ export const config = {
   corsOrigins: process.env.CORS_ORIGINS || '',
   /** Poll interval for the long-running server's event indexer (0 = disabled; serverless uses the cron). */
   indexerIntervalMs: nonNegativeIntEnv('INDEXER_INTERVAL_MS', 0),
+  /** Retry interval for background webhook delivery runner (0 = disabled; serverless uses the cron). */
+  webhookRetryIntervalMs: nonNegativeIntEnv('WEBHOOK_RETRY_INTERVAL_MS', 0),
   /** Per-check timeout for /health/ready. */
   healthCheckTimeoutMs: envInt('HEALTH_CHECK_TIMEOUT_MS', { default: 2000 }),
   /** How long /health/ready reuses the last result (single-flight in between). */

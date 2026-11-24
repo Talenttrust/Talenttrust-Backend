@@ -272,8 +272,12 @@ const spec = {
               },
             }),
           },
+          502: {
+            description: 'Soroban RPC returned an error or unexpected response (rpc_error)',
+            content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+          },
           503: {
-            description: 'Soroban RPC returned TRY_AGAIN_LATER',
+            description: 'Soroban RPC is unreachable (chain_unavailable) or returned TRY_AGAIN_LATER',
             headers: {
               'Retry-After': {
                 description: 'Seconds to wait before retrying submission',
@@ -345,8 +349,18 @@ const spec = {
             description: 'Invalid transaction hash format',
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
+          502: {
+            description: 'Soroban RPC returned an error or unexpected response (rpc_error)',
+            content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+          },
           503: {
-            description: 'Too many concurrent long-poll requests',
+            description: 'Soroban RPC is unreachable (chain_unavailable) or too many concurrent long-poll requests (too_many_waits)',
+            headers: {
+              'Retry-After': {
+                description: 'Seconds to wait before retrying',
+                schema: { type: 'integer' },
+              },
+            },
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
         },
@@ -372,7 +386,27 @@ const spec = {
       delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
-      post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Rotate a webhook secret',
+        security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          content: json({
+            type: 'object',
+            properties: {
+              graceSeconds: {
+                type: 'integer',
+                minimum: 0,
+                maximum: 604800,
+                default: 86400,
+                description: 'Grace period in seconds during which the previous secret remains valid (max 7 days)',
+              },
+            },
+          }),
+        },
+        responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
     },
     '/api/v1/webhook-subscriptions/{id}/deliveries': {
       get: {
@@ -605,6 +639,30 @@ const spec = {
             required: ['expired', 'checkedAt'],
             properties: {
               expired: { type: 'array', items: { type: 'integer' } },
+              checkedAt: { type: 'string', format: 'date-time' },
+            },
+          }),
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
+        },
+      },
+    },
+    '/api/cron/deliver-webhooks': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Process due webhook retries',
+        description:
+          'Periodic sweep (Vercel cron) that processes due webhook retry attempts. ' +
+          'Also accepts POST. Requires `Authorization: Bearer <CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Sweep result', {
+            type: 'object',
+            required: ['processed', 'succeeded', 'failed', 'checkedAt'],
+            properties: {
+              processed: { type: 'integer' },
+              succeeded: { type: 'integer' },
+              failed: { type: 'integer' },
               checkedAt: { type: 'string', format: 'date-time' },
             },
           }),
@@ -1057,7 +1115,7 @@ const spec = {
         },
       },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, byToken: { type: 'object', description: 'Escrow totals grouped by token address/symbol', additionalProperties: { type: 'object', properties: { contracts: { type: 'integer' }, totalEscrowedUnits: { type: 'string' }, totalReleasedUnits: { type: 'string' } }, required: ['contracts', 'totalEscrowedUnits', 'totalReleasedUnits'] } }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/tx/build': {
       post: {
         tags: ['Transaction'],
@@ -1780,8 +1838,9 @@ const spec = {
           allowed: { type: 'array', items: { type: 'string' } },
         },
       },
-      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } } } },
-      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } }, escrowId: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } } } },
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean', default: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' }, previousExpiresAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, nextAttemptAt: { type: 'string', format: 'date-time', nullable: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, redeliveryOf: { type: 'string', description: 'Original delivery id for manual redeliveries' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
