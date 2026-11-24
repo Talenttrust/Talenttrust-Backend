@@ -155,8 +155,14 @@ function resolveAuth(deps: AppDeps) {
   return { secret, required, now };
 }
 
+function createDefaultStore(seedDemoData: boolean): EscrowStore {
+  const store = new EscrowStore();
+  return seedDemoData ? store.seed() : store;
+}
+
 function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts: EscrowStore | AppDeps | undefined,
+  seedDemoData: boolean,
 ): { store: EscrowStore; logger: Logger; chainReader: ChainReader; txRpcServer?: RpcClient } {
   if (
     storeOrOpts &&
@@ -168,7 +174,7 @@ function resolveStoreAndLogger(
   }
   const opts = (storeOrOpts as AppDeps | undefined) ?? {};
   return {
-    store: opts.store ?? new EscrowStore().seed(),
+    store: opts.store ?? createDefaultStore(seedDemoData),
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
     txRpcServer: opts.txRpcServer,
@@ -183,14 +189,15 @@ export interface AppOptions {
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts?: EscrowStore | AppDeps,
   /** A chain reader, receipt manager, tx relay or chain read client to inject, or the CORS origin allowlist. */
   fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | InMemoryEventStore | string[],
   /** App options, or the event indexer to use (with an InMemoryEventStore as the second argument). */
   optionsOrIndexer: AppOptions | EventIndexer = {},
 ) {
+  const seedDemoData = process.env.SEED_DEMO_DATA !== 'false';
   const options: AppOptions = optionsOrIndexer instanceof EventIndexer ? {} : optionsOrIndexer;
-  const resolved = resolveStoreAndLogger(storeOrOpts);
+  const resolved = resolveStoreAndLogger(storeOrOpts, seedDemoData);
   const store = resolved.store;
   const logger = resolved.logger;
   const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();

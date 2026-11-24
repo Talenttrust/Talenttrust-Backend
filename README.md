@@ -339,6 +339,7 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
+`SEED_DEMO_DATA` (seeds demo contracts into the default store on startup; default `true`, set to `false` to start empty),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; defaults to `HMAC-SHA256(AUTH_SECRET, "cursor")` when `AUTH_SECRET` is set, or a random per-process secret otherwise with a one-time production warning), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `SSE_MAX_CONNECTIONS` (maximum concurrent contract event streams per app process; default 100), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
