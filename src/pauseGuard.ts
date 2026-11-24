@@ -43,10 +43,13 @@ export const GUARDED_ROUTES = [
  * via Soroban RPC (no signature or fee needed) and returns its boolean result.
  * Rejects on RPC/simulation errors so the guard can apply PAUSE_FAIL_MODE.
  */
-export async function defaultRpcReader(): Promise<boolean> {
+export async function defaultRpcReader(
+  networkPassphrase: string = config.networkPassphrase,
+  server?: { simulateTransaction: (tx: any) => Promise<any> },
+): Promise<boolean> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const StellarSdk = require('@stellar/stellar-sdk');
-  const networkPassphrase = config.network === 'mainnet' ? StellarSdk.Networks.PUBLIC : StellarSdk.Networks.TESTNET;
+  const rpcServer = server ?? new StellarSdk.rpc.Server(config.rpcUrl, { timeout: 5000 });
   const server = getRpcServer(config.rpcUrl);
   // Simulation only needs a syntactically valid source account; it is never signed or submitted.
   const source = new StellarSdk.Account('GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7', '0');
@@ -54,7 +57,7 @@ export async function defaultRpcReader(): Promise<boolean> {
     .addOperation(new StellarSdk.Contract(config.contractId).call('is_paused'))
     .setTimeout(30)
     .build();
-  const sim = await server.simulateTransaction(tx);
+  const sim = await rpcServer.simulateTransaction(tx);
   if (rpc.Api.isSimulationError(sim)) throw new Error(String(sim.error));
   const retval = (sim as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
   return retval ? Boolean(StellarSdk.scValToNative(retval)) : false;
@@ -65,6 +68,8 @@ export interface PauseGuardOptions {
   ttlMs?: number;
   failMode?: 'open' | 'closed';
   apiPaused?: boolean;
+  networkPassphrase?: string;
+  server?: { simulateTransaction: (tx: any) => Promise<any> };
 }
 
 export class PauseGuard {
@@ -80,8 +85,10 @@ export class PauseGuard {
 
   constructor(options: PauseGuardOptions = {}) {
     this.forcePaused = options.apiPaused === true;
-    this.injectedReader = options.rpcReader !== undefined;
-    this.rpcReader = options.rpcReader ?? defaultRpcReader;
+    this.injectedReader = options.rpcReader !== undefined || options.server !== undefined;
+    this.rpcReader =
+      options.rpcReader ??
+      (() => defaultRpcReader(options.networkPassphrase ?? config.networkPassphrase, options.server));
     this.ttlMs = options.ttlMs ?? config.pauseCheckTtlMs;
     this.failMode = options.failMode ?? config.pauseFailMode;
   }

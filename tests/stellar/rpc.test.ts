@@ -185,3 +185,71 @@ describe('sanitizeRpcError', () => {
     expect(Keypair.random().secret()).not.toBe(sanitizeRpcError(new Error('boom')));
   });
 });
+
+describe('ContractReader network passphrase', () => {
+  const originalNetwork = process.env.STELLAR_NETWORK;
+  const originalPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+
+  afterEach(() => {
+    if (originalNetwork === undefined) delete process.env.STELLAR_NETWORK;
+    else process.env.STELLAR_NETWORK = originalNetwork;
+    if (originalPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+    else process.env.STELLAR_NETWORK_PASSPHRASE = originalPassphrase;
+  });
+
+  it('derives passphrase from config for futurenet, public, and override env var', async () => {
+    const transport: RpcTransport = {
+      simulateTransaction: jest.fn().mockResolvedValue(hydrateSimulation(versionFixture)),
+      getLatestLedger: async () => ({ latestLedger: 123 }),
+    };
+
+    process.env.STELLAR_NETWORK = 'futurenet';
+    delete process.env.STELLAR_NETWORK_PASSPHRASE;
+    const readerFuturenet = new ContractReader({
+      rpcUrl: 'https://example.invalid',
+      contractId: CONTRACT_ID,
+      transport,
+    });
+    await readerFuturenet.simulateRead('version');
+    let call = (transport.simulateTransaction as jest.Mock).mock.calls[0][0];
+    expect(call.networkPassphrase).toBe('Test SDF Future Network ; October 2022');
+
+    process.env.STELLAR_NETWORK = 'public';
+    const readerPublic = new ContractReader({
+      rpcUrl: 'https://example.invalid',
+      contractId: CONTRACT_ID,
+      transport,
+    });
+    await readerPublic.simulateRead('version');
+    call = (transport.simulateTransaction as jest.Mock).mock.calls[1][0];
+    expect(call.networkPassphrase).toBe('Public Global Stellar Network ; September 2015');
+
+    process.env.STELLAR_NETWORK_PASSPHRASE = 'Custom Rpc Passphrase';
+    const readerOverride = new ContractReader({
+      rpcUrl: 'https://example.invalid',
+      contractId: CONTRACT_ID,
+      transport,
+    });
+    await readerOverride.simulateRead('version');
+    call = (transport.simulateTransaction as jest.Mock).mock.calls[2][0];
+    expect(call.networkPassphrase).toBe('Custom Rpc Passphrase');
+  });
+
+  it('honours explicit networkPassphrase option over config', async () => {
+    const transport: RpcTransport = {
+      simulateTransaction: jest.fn().mockResolvedValue(hydrateSimulation(versionFixture)),
+      getLatestLedger: async () => ({ latestLedger: 123 }),
+    };
+
+    process.env.STELLAR_NETWORK = 'futurenet';
+    const reader = new ContractReader({
+      rpcUrl: 'https://example.invalid',
+      contractId: CONTRACT_ID,
+      networkPassphrase: 'Explicit Reader Passphrase',
+      transport,
+    });
+    await reader.simulateRead('version');
+    const call = (transport.simulateTransaction as jest.Mock).mock.calls[0][0];
+    expect(call.networkPassphrase).toBe('Explicit Reader Passphrase');
+  });
+});
