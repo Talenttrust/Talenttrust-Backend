@@ -70,13 +70,13 @@ export function issueWalletToken(
  * @param token  - The compact JWT string.
  * @param secret - AUTH_SECRET used to sign.
  * @param nowFn  - Injectable clock; defaults to Date.now.
- * @returns      - `{ ok: true, address }` or `{ ok: false }`.
+ * @returns      - `{ ok: true, address, jti, exp }` or `{ ok: false }`.
  */
 export function verifyWalletToken(
   token: string,
   secret: string,
   nowFn: () => number = Date.now,
-): { ok: true; address: string } | { ok: false } {
+): { ok: true; address: string; jti: string; exp: number } | { ok: false } {
   const parts = token.split('.');
   if (parts.length !== 3) return { ok: false };
 
@@ -131,5 +131,5 @@ export function verifyWalletToken(
   // Enforce expiry.
   if (claims.exp < nowSec) return { ok: false };
 
-  return { ok: true, address: claims.sub };
+  return { ok: true, address: claims.sub, jti: claims.jti, exp: claims.exp };
 }

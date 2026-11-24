@@ -8,7 +8,10 @@ export type AuditAction =
   | 'dispute'
   | 'resolve'
   | 'cancel'
-  | 'rate';
+  | 'rate'
+  | 'edit'
+  | 'extend_deadline'
+  | 'withdraw';
 
 export interface AuditState {
   status: string;

@@ -114,7 +114,7 @@ export function escrowIdOf(event: EscrowEvent): string | undefined {
 export interface EventStore {
   getCursor(): string | null;
   setCursor(cursor: string): void;
-  append(events: IndexedEvent[]): void;
+  append(events: IndexedEvent[]): IndexedEvent[];
   query(filter: {
     escrowId?: string;
     type?: string;

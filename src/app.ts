@@ -58,12 +58,13 @@ import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
+import { TokenRevocationList } from './auth/revocation';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
+import { createRateLimiterFromEnv, type RateLimitPolicy } from './rateLimit';
 
-import { createContractsRouter } from './routes/contracts';
+import { CONTRACT_OBJECT_BODY_ROUTES, createContractsRouter } from './routes/contracts';
 import {
   callerOf,
-  ChainRateLimiter,
   ChainReadCache,
   chainIdParam,
   createMaybeAttachReceipt,
@@ -82,8 +83,9 @@ import {
   optionalString,
   PreconditionFailedError,
   PreconditionRequiredError,
-  requireAdminRead,
+  createRequireAdminRead,
   requireCronSecret,
+  resolveCursorSecret,
   rootApiInfo,
   safeEqual,
   wrap,
@@ -134,6 +136,8 @@ export type AppDeps = {
   apiKeyClock?: () => number;
   /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
   health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
+  /** Injectable rate limiter (tests inject one with tight limits or disabled). */
+  rateLimiter?: ReturnType<typeof createRateLimiterFromEnv>;
 };
 
 /**
@@ -151,8 +155,14 @@ function resolveAuth(deps: AppDeps) {
   return { secret, required, now };
 }
 
+function createDefaultStore(seedDemoData: boolean): EscrowStore {
+  const store = new EscrowStore();
+  return seedDemoData ? store.seed() : store;
+}
+
 function resolveStoreAndLogger(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts: EscrowStore | AppDeps | undefined,
+  seedDemoData: boolean,
 ): { store: EscrowStore; logger: Logger; chainReader: ChainReader; txRpcServer?: RpcClient } {
   if (
     storeOrOpts &&
@@ -164,7 +174,7 @@ function resolveStoreAndLogger(
   }
   const opts = (storeOrOpts as AppDeps | undefined) ?? {};
   return {
-    store: opts.store ?? new EscrowStore().seed(),
+    store: opts.store ?? createDefaultStore(seedDemoData),
     logger: opts.logger ?? createLogger(),
     chainReader: opts.chainReader ?? new SorobanRpcChainReader(),
     txRpcServer: opts.txRpcServer,
@@ -179,20 +189,24 @@ export interface AppOptions {
 }
 
 export function createApp(
-  storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
+  storeOrOpts?: EscrowStore | AppDeps,
   /** A chain reader, receipt manager, tx relay or chain read client to inject, or the CORS origin allowlist. */
   fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | InMemoryEventStore | string[],
   /** App options, or the event indexer to use (with an InMemoryEventStore as the second argument). */
   optionsOrIndexer: AppOptions | EventIndexer = {},
 ) {
+  const seedDemoData = process.env.SEED_DEMO_DATA !== 'false';
   const options: AppOptions = optionsOrIndexer instanceof EventIndexer ? {} : optionsOrIndexer;
-  const resolved = resolveStoreAndLogger(storeOrOpts);
+  const resolved = resolveStoreAndLogger(storeOrOpts, seedDemoData);
   const store = resolved.store;
   const logger = resolved.logger;
   const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();
   const eventStore =
     fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore ? fallbackChainReaderOrReceiptManager : new InMemoryEventStore();
-  const eventIndexer = optionsOrIndexer instanceof EventIndexer ? optionsOrIndexer : new EventIndexer(eventStore);
+  const eventIndexer = optionsOrIndexer instanceof EventIndexer ? optionsOrIndexer : new EventIndexer(eventStore, undefined, store.events);
+  if ('setEmitter' in eventIndexer && typeof (eventIndexer as any).setEmitter === 'function') {
+    (eventIndexer as any).setEmitter(store.events);
+  }
   const second =
     Array.isArray(fallbackChainReaderOrReceiptManager) || fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore
       ? undefined
@@ -239,18 +253,13 @@ export function createApp(
       err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
     );
   };
+  /** Dispute queue: ADMIN_READ_TOKEN bearer or a scoped API key with `admin:read`. */
+  const requireAdminRead = createRequireAdminRead(apiKeys, apiKeyAuthOptions);
   const webhooks = new WebhookManager(store.events);
   let chainReadClient: ChainReadClient | undefined = isChainReadClient(second) ? second : deps.chainReadClient;
   const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
   const chainReadTtl = envInt('CHAIN_READ_TTL_MS', { default: config.chainReadTtlMs, allowZero: true });
   const chainCache = new ChainReadCache(chainReadTtl);
-  const chainRateLimiter = new ChainRateLimiter();
-  const allowChainRead = (req: Request, res: Response) => {
-    if (!chainRateLimiter.allow(req.ip || 'unknown')) {
-      res.setHeader('Retry-After', '60');
-      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
-    }
-  };
   const chainStatus = () => (chainStatusReader ??= createStellarChainReader());
   /** 503 for mutations whose Soroban counterparts call require_not_paused. */
   const requireNotPaused = createRequireNotPaused(pauseGuard);
@@ -259,7 +268,11 @@ export function createApp(
     second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
   const receiptManager = () =>
     (receiptManagerInstance ??= new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET));
-  const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required);
+  // Per-process jti revocation list fed by POST /api/v1/auth/logout.
+  const revokedTokens = new TokenRevocationList({ now: auth.now });
+  const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required, revokedTokens);
+  // Logout always needs a valid token, even in legacy (auth optional) mode.
+  const requireToken = createRequireAuth(auth.secret, auth.now, true, revokedTokens);
 
   const app = express();
   const sseStreams = new Set<() => void>();
@@ -316,6 +329,49 @@ export function createApp(
   ]);
   store.setMutationRecorder((action, result) => escrowMutationsTotal.inc({ action, result }));
 
+  // --- Rate limiting ---
+  const rateLimiter = deps.rateLimiter ?? createRateLimiterFromEnv();
+  const rateLimitedTotal = registry.counter('rate_limited_total', 'Total number of rate-limited requests', ['policy']);
+
+  /**
+   * Express middleware factory: checks the named policy for the client IP
+   * (and falls through transparently when allowed).
+   * On breach: sets RFC-compliant headers and throws 429 rate_limited.
+   */
+  const rateLimit = (policy: RateLimitPolicy): ((req: Request, res: Response, next: NextFunction) => void) =>
+    (req: Request, res: Response, next: NextFunction) => {
+      const key = req.ip ?? 'unknown';
+      const result = rateLimiter.check(policy, key);
+      // Always attach standard headers on non-exempt responses
+      if (Number.isFinite(result.limit)) {
+        res.setHeader('RateLimit-Limit', String(result.limit));
+        res.setHeader('RateLimit-Remaining', String(result.remaining));
+        res.setHeader('RateLimit-Reset', String(result.resetAt));
+      }
+      if (!result.allowed) {
+        res.setHeader('Retry-After', String(result.retryAfter));
+        rateLimitedTotal.inc({ policy });
+        return next(new HttpError(429, 'rate_limited', 'Too many requests'));
+      }
+      next();
+    };
+
+  /** Chain read rate limit: 429 chain_rate_limited (keeps existing error code/message). */
+  const allowChainRead = (req: Request, res: Response) => {
+    const key = req.ip ?? 'unknown';
+    const result = rateLimiter.check('chain', key);
+    if (Number.isFinite(result.limit)) {
+      res.setHeader('RateLimit-Limit', String(result.limit));
+      res.setHeader('RateLimit-Remaining', String(result.remaining));
+      res.setHeader('RateLimit-Reset', String(result.resetAt));
+    }
+    if (!result.allowed) {
+      res.setHeader('Retry-After', String(result.retryAfter));
+      rateLimitedTotal.inc({ policy: 'chain' });
+      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
+    }
+  };
+
   // Transaction submission counter, incremented from the tx relay.
   const txSubmissionsTotal = registry.counter('tx_submissions_total', 'Total number of transaction submissions', ['status']);
 
@@ -367,8 +423,11 @@ export function createApp(
 
   // Strict parsing (the default) rejects top-level primitives such as 42 or "x" with invalid_json.
   // The body-taking routes parse leniently instead, so requireObjectBody can reply invalid_body.
-  // Keep this pattern in sync with the routes that use jsonObjectBody below.
-  const objectBodyRoutes = /^\/api\/v1\/contracts(\/[^/]+\/(deposit|dispute|resolve|reputation|link))?\/?$/i;
+  // Derived from CONTRACT_OBJECT_BODY_ROUTES so parser selection stays in sync with jsonObjectBody.
+  const objectBodyRoutes = new RegExp(
+    `^/api/v1(?:${CONTRACT_OBJECT_BODY_ROUTES.map((r) => r.replace('/:id/', '/[^/]+/')).join('|')})/?$`,
+    'i',
+  );
   const jsonStrict = express.json({ limit: config.bodyLimit });
   const jsonLenient = express.json({ limit: config.bodyLimit, strict: false });
   app.use((req, res, next) =>
@@ -492,6 +551,9 @@ export function createApp(
       apiKeys,
     }),
   );
+
+  // Apply the default rate-limit policy to every /api/v1 route.
+  v1.use(rateLimit('default'));
   // --- Wallet-signature auth (public) ---
 
   // GET /api/v1/auth/challenge?address=G...
@@ -510,6 +572,7 @@ export function createApp(
   // POST /api/v1/auth/token  { address, challenge, signature }
   v1.post(
     '/auth/token',
+    rateLimit('auth'),
     wrap((req) => {
       const { address, challenge, signature } = req.body ?? {};
       if (!isValidStellarAddress(address)) {
@@ -542,6 +605,18 @@ export function createApp(
     }),
   );
 
+  // POST /api/v1/auth/logout  (Authorization: Bearer <token>) — revokes this token only.
+  v1.post(
+    '/auth/logout',
+    requireToken,
+    wrap((req, res) => {
+      const { jti, exp } = (req as WalletAuthRequest).auth!;
+      // verifyWalletToken accepts a token for the whole `exp` second, so keep the entry until it ends.
+      revokedTokens.revoke(jti, (exp + 1) * 1000);
+      res.status(204).end();
+    }),
+  );
+
   v1.get(
     '/chain',
     wrap(async (req) => {
@@ -562,6 +637,7 @@ export function createApp(
   );
   v1.post(
     '/tx/build',
+    rateLimit('tx'),
     wrap(async (req) =>
       buildEscrowTransaction(req.body, txRpcServer ? { server: txRpcServer } : {}),
     ),
@@ -748,7 +824,8 @@ export function createApp(
     sseStreams.add(closeStream);
     res.on('close', closeStream);
   });
-  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
+  const cursorSecret = resolveCursorSecret({ authSecret: deps.authSecret, logger });
+  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, cursorSecret, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
   v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.use(createContractsRouter({ segment: 'main1', ...contractRouteDeps }));
@@ -818,6 +895,7 @@ export function createApp(
   const HEX64_RE = /^[0-9a-fA-F]{64}$/;
   v1.post(
     '/tx/submit',
+    rateLimit('tx'),
     wrap(async (req, res) => {
       let status: string = 'unknown';
       try {
@@ -941,7 +1019,9 @@ export function createApp(
     '/:id/rotate-secret',
     wrap((req) => {
       webhookAuth(req);
-      const rotated = webhooks.rotateSecret(req.params.id);
+      const graceRaw = req.body?.graceSeconds ?? req.query?.graceSeconds;
+      const graceSeconds = graceRaw !== undefined ? Number(graceRaw) : undefined;
+      const rotated = webhooks.rotateSecret(req.params.id, graceSeconds);
       return { ...rotated.subscription, secret: rotated.secret };
     }),
   );
@@ -955,6 +1035,13 @@ export function createApp(
           status: webhookHistoryStatus(req.query.status),
         }),
       };
+    }),
+  );
+  webhookRouter.post(
+    '/:id/deliveries/:deliveryId/redeliver',
+    wrap((req, res) => {
+      webhookAuth(req);
+      res.status(202).json(webhooks.redeliver(req.params.id, req.params.deliveryId));
     }),
   );
   v1.use('/webhook-subscriptions', webhookRouter);
@@ -1003,7 +1090,7 @@ export function createApp(
   v1.use(createContractsRouter({ segment: 'history', ...contractRouteDeps }));
   v1.get('/audit/verify', wrap(() => store.audit.verify()));
 
-  // --- Admin dispute queue (ADMIN_READ_TOKEN) ---
+  // --- Admin dispute queue (ADMIN_READ_TOKEN or admin:read API key) ---
   const disputeNow = () => new Date(store.currentTime());
   v1.get(
     '/disputes',
@@ -1081,10 +1168,18 @@ export function createApp(
   app.get('/api/cron/reconcile-parity', reconcileParity);
   app.post('/api/cron/reconcile-parity', reconcileParity);
 
+  const deliverWebhooks = wrap(async (req) => {
+    requireCronSecret(req);
+    const result = await webhooks.processDue();
+    return { ...result, checkedAt: store.currentTime() };
+  });
+  app.get('/api/cron/deliver-webhooks', deliverWebhooks);
+  app.post('/api/cron/deliver-webhooks', deliverWebhooks);
+
   // Prometheus scrape endpoint; disabled (404) unless METRICS_TOKEN is set, checked per request.
   const escrowContracts = registry.gauge('escrow_contracts', 'Escrow contracts by status', ['status']);
-  const escrowValueEscrowed = registry.gauge('escrow_value_escrowed', 'Value currently escrowed (base units)', []);
-  const escrowValueReleased = registry.gauge('escrow_value_released', 'Value released (base units)', []);
+  const escrowValueEscrowed = registry.gauge('escrow_value_escrowed', 'Value currently escrowed (base units)', ['token']);
+  const escrowValueReleased = registry.gauge('escrow_value_released', 'Value released (base units)', ['token']);
   const escrowParityDriftContracts = registry.gauge(
     'escrow_parity_drift_contracts',
     'Number of linked contracts with API/chain parity drift in the last reconciliation run',
@@ -1115,8 +1210,6 @@ export function createApp(
     }
     const stats = store.stats();
     for (const [status, count] of Object.entries(stats.byStatus)) escrowContracts.set({ status }, count);
-    escrowValueEscrowed.set({}, stats.totalEscrowed);
-    escrowValueReleased.set({}, stats.totalReleased);
     const indexerState = eventIndexer.getState();
     indexerEventsStored.set({}, indexerState.eventsStored);
     indexerLagLedgers.set({}, indexerState.lagLedgers);
@@ -1125,6 +1218,15 @@ export function createApp(
     }
     processStartTime.set({}, Math.floor(startedAt / 1000));
     processResidentMemory.set({}, process.memoryUsage().rss);
+    if (Object.keys(stats.byToken).length === 0) {
+      escrowValueEscrowed.set({ token: 'none' }, 0);
+      escrowValueReleased.set({ token: 'none' }, 0);
+    } else {
+      for (const [t, tokenStats] of Object.entries(stats.byToken)) {
+        escrowValueEscrowed.set({ token: t }, Number(BigInt(tokenStats.totalEscrowedUnits)));
+        escrowValueReleased.set({ token: t }, Number(BigInt(tokenStats.totalReleasedUnits)));
+      }
+    }
     processUptime.set({}, process.uptime());
     nodejsHeapUsed.set({}, process.memoryUsage().heapUsed);
     res.type('text/plain; version=0.0.4').send(registry.exposition());
@@ -1150,6 +1252,11 @@ export function createApp(
       return;
     }
     if (err instanceof HttpError) {
+      if (err.headers) {
+        for (const [k, v] of Object.entries(err.headers)) {
+          res.setHeader(k, v);
+        }
+      }
       sendProblem(err);
       return;
     }

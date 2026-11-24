@@ -1,7 +1,8 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { NETWORK_PASSPHRASES, type HealthRpcClient } from '../src/health';
+import { HealthService, type HealthRpcClient } from '../src/health';
+import { NETWORK_PASSPHRASES } from '../src/config';
 
 type Rpc = HealthRpcClient & { calls: Record<string, number> };
 
@@ -180,5 +181,68 @@ describe('liveness and readiness probes', () => {
     expect(serialized).not.toContain('soroban');
     expect(serialized).not.toContain('secret-project');
     expect(res.body.checks.rpc.detail).toBe('check raised');
+  });
+
+  describe('HealthService network passphrase from config', () => {
+    const originalNetwork = process.env.STELLAR_NETWORK;
+    const originalPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+
+    afterEach(() => {
+      if (originalNetwork === undefined) delete process.env.STELLAR_NETWORK;
+      else process.env.STELLAR_NETWORK = originalNetwork;
+      if (originalPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = originalPassphrase;
+    });
+
+    it('matches futurenet passphrase when STELLAR_NETWORK=futurenet', async () => {
+      process.env.STELLAR_NETWORK = 'futurenet';
+      delete process.env.STELLAR_NETWORK_PASSPHRASE;
+
+      const rpc = fakeRpc({
+        getNetworkPassphrase: async () => 'Test SDF Future Network ; October 2022',
+      });
+      const res = await request(appWith(rpc)).get('/health/ready');
+      expect(res.status).toBe(200);
+      expect(res.body.checks.network.status).toBe('pass');
+    });
+
+    it('matches public passphrase when STELLAR_NETWORK=public', async () => {
+      process.env.STELLAR_NETWORK = 'public';
+      delete process.env.STELLAR_NETWORK_PASSPHRASE;
+
+      const rpc = fakeRpc({
+        getNetworkPassphrase: async () => 'Public Global Stellar Network ; September 2015',
+      });
+      const res = await request(appWith(rpc)).get('/health/ready');
+      expect(res.status).toBe(200);
+      expect(res.body.checks.network.status).toBe('pass');
+    });
+
+    it('honours STELLAR_NETWORK_PASSPHRASE override', async () => {
+      process.env.STELLAR_NETWORK = 'public';
+      process.env.STELLAR_NETWORK_PASSPHRASE = 'Custom Health Passphrase ; 2026';
+
+      const rpc = fakeRpc({
+        getNetworkPassphrase: async () => 'Custom Health Passphrase ; 2026',
+      });
+      const res = await request(appWith(rpc)).get('/health/ready');
+      expect(res.status).toBe(200);
+      expect(res.body.checks.network.status).toBe('pass');
+    });
+
+    it('honours explicit networkPassphrase option in HealthServiceOptions', async () => {
+      const store = new EscrowStore();
+      const rpc = fakeRpc({
+        getNetworkPassphrase: async () => 'Explicit Health Passphrase',
+      });
+      const health = new HealthService({
+        store,
+        rpc,
+        networkPassphrase: 'Explicit Health Passphrase',
+      });
+      const res = await health.ready();
+      expect(res.httpStatus).toBe(200);
+      expect(res.report.checks.network.status).toBe('pass');
+    });
   });
 });
