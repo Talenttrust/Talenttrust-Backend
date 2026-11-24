@@ -13,6 +13,7 @@
  */
 
 import { config } from './config';
+import { getRpcServer } from './stellar/server';
 import type { EscrowStore } from './store';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn';
@@ -241,7 +242,7 @@ export function createSorobanRpcClient(rpcUrl: string): HealthRpcClient {
   };
   const getServer = (): Server => {
     if (!server) {
-      server = new (load().rpc.Server)(rpcUrl, { allowHttp: !rpcUrl.startsWith('https://') });
+      server = getRpcServer(rpcUrl) as unknown as Server;
     }
     return server;
   };

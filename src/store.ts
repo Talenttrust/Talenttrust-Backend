@@ -842,7 +842,9 @@ export class EscrowStore {
     if (c.revisions.length > MAX_REVISIONS) c.revisions.shift();
     c.updatedAt = at;
     c.version += 1;
-    return toPublic(c);
+    const updated = toPublic(c);
+    this.events.emit('contract.updated', { contract: publicContract(updated), revision: c.revisions[c.revisions.length - 1] });
+    return updated;
   }
 
   getRevisions(id: number): ContractRevision[] {
@@ -1001,7 +1003,19 @@ export class EscrowStore {
     this.windowedLeaderboardCache.clear();
   }
 
+  /** Record a review and publish `reputation.updated` with the reviewee's new reputation. */
   createReview(
+    id: number,
+    input: { reviewer?: unknown; rating?: unknown; comment?: unknown },
+  ): Review {
+    const review = this.addReview(id, input);
+    const contract = publicContract(toPublic(this.getInternal(id)));
+    this.events.emit('reputation.updated', { contract, review, reputation: this.getReputationWithClient(review.reviewee) });
+    return review;
+  }
+
+  /** Validate and store a review without emitting events (`rate` publishes `reputation.issued` instead). */
+  private addReview(
     id: number,
     input: { reviewer?: unknown; rating?: unknown; comment?: unknown },
   ): Review {
@@ -1058,7 +1072,9 @@ export class EscrowStore {
       throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be later and no more than 90 days away');
     }
     c.fundingDeadline = new Date(deadline).toISOString();
-    return this.touch(c);
+    const updated = this.touch(c);
+    this.events.emit('contract.updated', { contract: publicContract(updated) });
+    return updated;
   }
 
   /** Expire every due unfunded contract; returns the ids expired by this sweep (idempotent). */
@@ -1079,7 +1095,7 @@ export class EscrowStore {
     this.requireClient(c, caller, 'issue reputation');
     assertAllowed('rate', c, { rating: ratingRaw });
     const rating = this.validateRating(ratingRaw);
-    this.createReview(id, { reviewer: c.client, rating });
+    this.addReview(id, { reviewer: c.client, rating });
     return this.getReputation(c.freelancer);
   }
 
@@ -1298,10 +1314,13 @@ export class EscrowStore {
         } else {
           inSync++;
         }
-      } catch {
+      } catch (err) {
         if (timer) clearTimeout(timer);
-        if (remaining() <= 0) timedOut = true;
-        unreachable++;
+        if (remaining() <= 0 || (err instanceof Error && err.message === 'reconcile_time_budget_exceeded')) {
+          timedOut = true;
+        } else {
+          unreachable++;
+        }
       }
     };
 
@@ -1814,14 +1833,36 @@ export class EscrowStore {
     // Sum with bigint to match contract precision; expose as decimal strings.
     let totalEscrowedBig = 0n;
     let totalReleasedBig = 0n;
+    const tokenBigInts: Record<string, { contracts: number; escrowed: bigint; released: bigint }> = {};
+
     for (const c of all) {
-      totalEscrowedBig += c.fundedAmount - c.releasedAmount;
-      totalReleasedBig += c.releasedAmount;
+      const escrowed = c.fundedAmount - c.releasedAmount;
+      const released = c.releasedAmount;
+      totalEscrowedBig += escrowed;
+      totalReleasedBig += released;
+
+      const tokenKey = c.token || 'XLM';
+      if (!tokenBigInts[tokenKey]) {
+        tokenBigInts[tokenKey] = { contracts: 0, escrowed: 0n, released: 0n };
+      }
+      tokenBigInts[tokenKey].contracts += 1;
+      tokenBigInts[tokenKey].escrowed += escrowed;
+      tokenBigInts[tokenKey].released += released;
+    }
+
+    const byToken: Record<string, { contracts: number; totalEscrowedUnits: string; totalReleasedUnits: string }> = {};
+    for (const [token, data] of Object.entries(tokenBigInts)) {
+      byToken[token] = {
+        contracts: data.contracts,
+        totalEscrowedUnits: data.escrowed.toString(),
+        totalReleasedUnits: data.released.toString(),
+      };
     }
 
     return {
       contracts: all.length,
       byStatus,
+      byToken,
       /** @deprecated lossy above 2^53; use totalEscrowedUnits */
       totalEscrowed: Number(totalEscrowedBig),
       totalEscrowedUnits: totalEscrowedBig.toString(),

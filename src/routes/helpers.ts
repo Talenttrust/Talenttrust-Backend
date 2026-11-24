@@ -14,6 +14,15 @@ import {
   type DisputeStatusFilter,
 } from '../store';
 import type { WalletAuthRequest } from '../auth/middleware';
+import type { ParsedApiKeys } from '../auth/apiKeysConfig';
+import {
+  authenticateScopedApiKey,
+  extractApiKeyFromHeaders,
+  requireScope,
+  type ScopedApiKeyOptions,
+  type ScopedApiKeyRequest,
+} from '../auth/scopedApiKeyMiddleware';
+import { SCOPES } from '../auth/scopes';
 import type { PauseGuard } from '../pauseGuard';
 import { parseFieldSpec, project } from '../utils/project';
 import { bigIntReplacer } from '../amount';
@@ -394,6 +403,33 @@ export function requireAdminRead(req: Request, _res: Response, next: NextFunctio
     return next(new HttpError(401, 'unauthorized', 'Missing or invalid admin bearer token'));
   }
   next();
+}
+
+/**
+ * Admin read access (dispute queue): accepts either the static `ADMIN_READ_TOKEN`
+ * bearer token or a scoped API key (`X-API-Key` / `Authorization: ApiKey`) with
+ * the `admin:read` scope. A presented API key is always judged as a key (401
+ * when unknown or expired, 403 `insufficient_scope` without `admin:read`);
+ * otherwise the static token applies. 404 while neither is configured.
+ */
+export function createRequireAdminRead(apiKeys: ParsedApiKeys, options: ScopedApiKeyOptions = {}) {
+  const authenticate = authenticateScopedApiKey(apiKeys, options);
+  const scope = requireScope(SCOPES.ADMIN_READ);
+  return (req: Request, res: Response, next: NextFunction) => {
+    const tokenConfigured = Boolean(process.env.ADMIN_READ_TOKEN);
+    const keysConfigured = apiKeys.keys.length > 0;
+    if (!tokenConfigured && !keysConfigured) return next(new HttpError(404, 'not_found', 'Not found'));
+    const presentedKey = extractApiKeyFromHeaders(req.headers as Record<string, string | string[] | undefined>);
+    if (keysConfigured && presentedKey) {
+      return authenticate(req as ScopedApiKeyRequest, res, (err?: unknown) =>
+        err ? next(err) : scope(req as ScopedApiKeyRequest, res, next),
+      );
+    }
+    if (tokenConfigured) return requireAdminRead(req, res, next);
+    return next(
+      new HttpError(401, 'unauthorized', 'An admin bearer token or an API key with the admin:read scope is required'),
+    );
+  };
 }
 
 export const requireCronSecret = (req: Request) => {

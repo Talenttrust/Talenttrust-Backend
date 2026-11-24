@@ -10,6 +10,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { config } from '../config';
 import { decodeEscrow, decodeReputation, DecodedEscrow, DecodedReputation } from './decode';
+import { getRpcServer } from './server';
 
 export type ChainFailure = 'not_found' | 'contract' | 'unavailable';
 
@@ -32,7 +33,7 @@ function contractError(error: unknown): { name: string; code: number } | undefin
 }
 
 export class SorobanChainReadClient implements ChainReadClient {
-  private readonly server = new rpc.Server(config.rpcUrl, { timeout: 8_000 });
+  private readonly server = getRpcServer(config.rpcUrl);
   private readonly source = Keypair.random();
 
   private async simulate(method: string, args: Array<[unknown, unknown]>): Promise<{ native: unknown; latestLedger: number }> {
