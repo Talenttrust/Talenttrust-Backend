@@ -25,6 +25,7 @@ import {
 } from '../auth/scopedApiKeyMiddleware';
 import { SCOPES } from '../auth/scopes';
 import type { PauseGuard } from '../pauseGuard';
+import type { Logger } from '../logger';
 import { parseFieldSpec, project } from '../utils/project';
 import { bigIntReplacer } from '../amount';
 import { config, explorerUrl } from '../config';
@@ -143,7 +144,36 @@ export function conditionalGet(req: Request, res: Response, etag: string): boole
 
 // --- Contract list pagination (cursor = base64url JSON + HMAC) ---
 
-const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
+const DEFAULT_CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
+let cursorSecretWarned = false;
+
+/**
+ * Resolve the HMAC secret used to sign contract-list pagination cursors.
+ * Precedence:
+ * 1. Explicit `CURSOR_SECRET` (option or env)
+ * 2. Derived from `AUTH_SECRET` (option or env) via HMAC-SHA256(AUTH_SECRET, "cursor")
+ * 3. Ephemeral random secret (logs a one-time warning when NODE_ENV=production)
+ */
+export function resolveCursorSecret(
+  opts: { cursorSecret?: string; authSecret?: string; logger?: Pick<Logger, 'warn'> } = {},
+): string {
+  const explicit = opts.cursorSecret ?? process.env.CURSOR_SECRET;
+  if (explicit) return explicit;
+
+  const authSecret = opts.authSecret ?? process.env.AUTH_SECRET;
+  if (authSecret) {
+    return createHmac('sha256', authSecret).update('cursor').digest('base64url');
+  }
+
+  if (process.env.NODE_ENV === 'production' && !cursorSecretWarned) {
+    cursorSecretWarned = true;
+    opts.logger?.warn(
+      'CURSOR_SECRET and AUTH_SECRET are unset in production; using an ephemeral cursor signing secret. Cursors will not be valid across instances.',
+    );
+  }
+
+  return randomBytes(32).toString('base64url');
+}
 
 export function parseLimit(v: unknown): number {
   if (v === undefined) return 20;
@@ -164,18 +194,18 @@ export function parseSortParam(v: unknown): string {
   return s;
 }
 
-export function serializeCursor(cursor: Cursor): string {
+export function serializeCursor(cursor: Cursor, secret: string = DEFAULT_CURSOR_SECRET): string {
   const payload = Buffer.from(JSON.stringify(cursor)).toString('base64url');
-  const sig = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  const sig = createHmac('sha256', secret).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
 
-export function parseCursorParam(cursor: unknown, sort: string): Cursor | undefined {
+export function parseCursorParam(cursor: unknown, sort: string, secret: string = DEFAULT_CURSOR_SECRET): Cursor | undefined {
   if (cursor === undefined || cursor === '') return undefined;
   const parts = String(cursor).split('.');
   if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   const [payload, sig] = parts;
-  const expected = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  const expected = createHmac('sha256', secret).update(payload).digest('base64url');
   if (!secureEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
   try {
