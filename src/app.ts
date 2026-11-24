@@ -372,6 +372,9 @@ export function createApp(
     }
   };
 
+  // Transaction submission counter, incremented from the tx relay.
+  const txSubmissionsTotal = registry.counter('tx_submissions_total', 'Total number of transaction submissions', ['status']);
+
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -894,9 +897,18 @@ export function createApp(
     '/tx/submit',
     rateLimit('tx'),
     wrap(async (req, res) => {
-      const result = await txRelay.submit(req.body?.xdr);
-      if (result.retryAfter !== undefined) res.setHeader('Retry-After', String(result.retryAfter));
-      res.status(result.httpStatus).json(result.body);
+      let status: string = 'unknown';
+      try {
+        const result = await txRelay.submit(req.body?.xdr);
+        status = result.body.status as string;
+        if (result.retryAfter !== undefined) res.setHeader('Retry-After', String(result.retryAfter));
+        res.status(result.httpStatus).json(result.body);
+      } catch (err) {
+        status = 'submission_failed';
+        throw err;
+      } finally {
+        txSubmissionsTotal.inc({ status });
+      }
     }),
   );
   v1.get('/tx', wrap((req) => ({ data: txRelay.listRecent(req.query.limit) })));
@@ -1178,6 +1190,15 @@ export function createApp(
     'Unix timestamp of the last parity reconciliation run',
     [],
   );
+  const indexerEventsStored = registry.gauge('indexer_events_stored', 'Number of events stored by the indexer', []);
+  const indexerLagLedgers = registry.gauge('indexer_lag_ledgers', 'Indexer lag in ledgers behind chain head', []);
+  const indexerLastRunTimestampSeconds = registry.gauge(
+    'indexer_last_run_timestamp_seconds',
+    'Unix timestamp of the last indexer run',
+    [],
+  );
+  const processStartTime = registry.gauge('process_start_time_seconds', 'Process start time as Unix timestamp', []);
+  const processResidentMemory = registry.gauge('process_resident_memory_bytes', 'Process resident memory in bytes', []);
   const processUptime = registry.gauge('process_uptime_seconds', 'Process uptime in seconds', []);
   const nodejsHeapUsed = registry.gauge('nodejs_heap_used_bytes', 'Node.js heap used in bytes', []);
   app.get('/metrics', (req, res, next) => {
@@ -1189,6 +1210,14 @@ export function createApp(
     }
     const stats = store.stats();
     for (const [status, count] of Object.entries(stats.byStatus)) escrowContracts.set({ status }, count);
+    const indexerState = eventIndexer.getState();
+    indexerEventsStored.set({}, indexerState.eventsStored);
+    indexerLagLedgers.set({}, indexerState.lagLedgers);
+    if (indexerState.lastRunAt) {
+      indexerLastRunTimestampSeconds.set({}, Math.floor(new Date(indexerState.lastRunAt).getTime() / 1000));
+    }
+    processStartTime.set({}, Math.floor(startedAt / 1000));
+    processResidentMemory.set({}, process.memoryUsage().rss);
     if (Object.keys(stats.byToken).length === 0) {
       escrowValueEscrowed.set({ token: 'none' }, 0);
       escrowValueReleased.set({ token: 'none' }, 0);
