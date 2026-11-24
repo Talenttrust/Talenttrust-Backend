@@ -60,6 +60,10 @@
     {
       "name": "Disputes",
       "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token or a scoped API key with the admin:read scope."
+    },
+    {
+      "name": "Disputes",
+      "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token."
     }
   ],
   "paths": {
@@ -692,7 +696,20 @@
             "description": "Updated subscription"
           },
           "400": {
-            "$ref": "#/components/responses/InvalidIdempotencyKey"
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
+            "description": "Invalid update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "401": {
             "description": "Unauthorized",
@@ -1422,7 +1439,20 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/InvalidIdempotencyKey"
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
+            "description": "Invalid template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "403": {
             "description": "Not the owner",
@@ -3755,6 +3785,14 @@
               "type": "string"
             },
             "description": "Pagination cursor"
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by event type"
           }
         ],
         "responses": {
@@ -4574,6 +4612,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive substring search on contract title (1–64 characters, trimmed)",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
           }
         ],
         "responses": {
@@ -5070,7 +5119,20 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/InvalidIdempotencyKey"
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
+            "description": "Empty patch, invalid contract id, or invalid milestones",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -5121,7 +5183,20 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/IdempotencyConflict"
+            "$ref": "#/components/responses/IdempotencyConflict",
+            "description": "Contract is funded or no longer editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -5246,7 +5321,20 @@
             "description": "Contract withdrawn"
           },
           "400": {
-            "$ref": "#/components/responses/InvalidIdempotencyKey"
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
+            "description": "Invalid contract id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "401": {
             "description": "Missing or invalid bearer token.",
@@ -5297,7 +5385,20 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/IdempotencyConflict"
+            "$ref": "#/components/responses/IdempotencyConflict",
+            "description": "Contract is funded or no longer withdrawable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "412": {
             "description": "Precondition Failed - If-Match does not match the current ETag",
@@ -7439,6 +7540,14 @@
               "minimum": 1
             },
             "description": "Rolling lookback window in days (positive integer); mutually exclusive with since"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "page.nextCursor from the previous page (same sort)"
           }
         ],
         "responses": {

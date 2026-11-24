@@ -46,7 +46,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/auth/logout` | Revoke the presented bearer token (`204`; later use of that token gets `401`) |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
-| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
+| GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?q=`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
 | GET | `/api/v1/contracts/:id/stream` | Live contract events via Server-Sent Events (`Last-Event-ID` resumes from the in-process 500-event buffer) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |

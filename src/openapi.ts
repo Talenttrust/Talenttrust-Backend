@@ -177,6 +177,10 @@ export const listQueryDocs: Record<string, ParamDoc> = {
   },
   linked: { description: 'Filter by whether contract is linked to on-chain escrow' },
   fields: { description: fieldsParam.description, schema: fieldsParam.schema },
+  q: {
+    description: 'Case-insensitive substring search on contract title (1–64 characters, trimmed)',
+    schema: { minLength: 1, maxLength: 64 },
+  },
 };
 
 const fieldsError = {
