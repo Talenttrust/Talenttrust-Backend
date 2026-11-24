@@ -85,6 +85,7 @@ import {
   PreconditionRequiredError,
   createRequireAdminRead,
   requireCronSecret,
+  resolveCursorSecret,
   rootApiInfo,
   safeEqual,
   wrap,
@@ -813,7 +814,8 @@ export function createApp(
     sseStreams.add(closeStream);
     res.on('close', closeStream);
   });
-  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
+  const cursorSecret = resolveCursorSecret({ authSecret: deps.authSecret, logger });
+  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, cursorSecret, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
   v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.use(createContractsRouter({ segment: 'main1', ...contractRouteDeps }));

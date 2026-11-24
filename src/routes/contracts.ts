@@ -60,6 +60,7 @@ export interface ContractsRouterDeps {
   maybeAttachReceipt: (req: Request, res: Response, contract: unknown) => void;
   receiptManager: () => { issueReceipt: (contract: Record<string, unknown>, origin: string) => string };
   getOrigin: (req: Request) => string;
+  cursorSecret?: string;
   // helpers/utilities can be injected for explicitness; defaults come from ./helpers
   wrapFn?: typeof wrap;
   jsonBody?: RequestHandler[];
@@ -99,7 +100,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       w((req, res) => {
         const limit = parseLimit(req.query.limit);
         const sort = parseSortParam(req.query.sort);
-        const after = parseCursorParam(req.query.cursor, sort);
+        const after = parseCursorParam(req.query.cursor, sort, deps.cursorSecret);
         const filters = parseFilters(req.query);
         const spec = parseFields(req);
         const result = store.query({ filters, sort, limit, after });
@@ -107,7 +108,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
         return {
           data: result.data.map((c) => project(publicContract(c), spec)),
-          page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
+          page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor, deps.cursorSecret) : null, hasMore: result.hasMore },
         };
       }),
     );

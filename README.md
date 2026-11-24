@@ -340,7 +340,7 @@ npm run build && npm start
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
-`CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
+`CURSOR_SECRET` (signs contract-list cursors; defaults to `HMAC-SHA256(AUTH_SECRET, "cursor")` when `AUTH_SECRET` is set, or a random per-process secret otherwise with a one-time production warning), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `SSE_MAX_CONNECTIONS` (maximum concurrent contract event streams per app process; default 100), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`, `ENABLE_DEMO_CHAIN_FIXTURE` (enables the local `DEMO_ESCROW_3` fixture for `escrowId: "3"` in `SorobanRpcChainReader`; defaults to `true` when `NODE_ENV` is `development` or `test`, and `false` in `production`),
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off),
