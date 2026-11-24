@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { InMemoryEventStore } from '../src/indexer/store';
 
 // Helper: build a store seeded with N contracts for bulk tests.
 function seededStore(n: number): EscrowStore {
@@ -32,6 +33,113 @@ describe('TalentTrust API', () => {
     expect((await request(app).get('/docs')).status).toBe(200);
     const spec = await request(app).get('/openapi.json');
     expect(spec.body.openapi).toBe('3.0.3');
+  });
+
+  it('serves a merged contract timeline with stable signed pagination and safe payloads', async () => {
+    const store = new EscrowStore();
+    const eventStore = new InMemoryEventStore();
+    const app = createApp(store, eventStore);
+    const linked = store.create({
+      title: 'Linked engagement',
+      client: 'G_TIMELINE_CLIENT',
+      freelancer: 'G_TIMELINE_FREELANCER',
+      milestones: [{ title: 'Work', amount: 100 }],
+    });
+    const unlinked = store.create({
+      title: 'Unlinked engagement',
+      client: 'G_UNLINKED_CLIENT',
+      freelancer: 'G_UNLINKED_FREELANCER',
+      milestones: [{ title: 'Work', amount: 100 }],
+    });
+
+    await store.linkEscrow(linked.id, '77', {
+      getContract: async () => ({
+        contract: {
+          client: linked.client,
+          freelancer: linked.freelancer,
+          token: linked.token,
+          totalAmount: linked.totalAmountUnits,
+          fundedAmount: linked.fundedAmountUnits,
+          releasedAmount: linked.releasedAmountUnits,
+          status: 'Created',
+          milestones: linked.milestones.map((milestone) => ({ amount: milestone.amountUnits, released: milestone.released })),
+          reputationIssued: linked.reputationIssued,
+        },
+        latestLedger: 1,
+      }),
+    });
+
+    const before = { status: 'Created', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' };
+    const after = { ...before, status: 'Disputed' };
+    store.audit.append({
+      contractId: linked.id,
+      action: 'create',
+      before: { ...before, status: 'N/A' },
+      after: before,
+      details: { title: linked.title },
+      at: '2024-01-01T00:00:00.000Z',
+    });
+    store.audit.append({
+      contractId: linked.id,
+      action: 'dispute',
+      before,
+      after,
+      details: { raisedBy: linked.client, reason: 'private dispute reason' },
+      at: '2024-01-03T00:00:00.000Z',
+    });
+    store.audit.append({
+      contractId: unlinked.id,
+      action: 'create',
+      before: { ...before, status: 'N/A' },
+      after: before,
+      details: { title: unlinked.title },
+      at: '2024-01-01T00:00:00.000Z',
+    });
+    eventStore.append([
+      {
+        id: 'timeline-event-1',
+        ledger: 100,
+        ledgerClosedAt: '2024-01-02T00:00:00.000Z',
+        txHash: 'timeline-hash-1',
+        event: { type: 'Deposit', data: { escrowId: '77', amount: '100' } },
+      },
+      {
+        id: 'timeline-event-2',
+        ledger: 101,
+        ledgerClosedAt: '2024-01-03T00:00:00.000Z',
+        txHash: 'timeline-hash-2',
+        event: { type: 'Dispute', data: { escrowId: '77', caller: linked.client } },
+      },
+    ]);
+
+    const page1 = await request(app).get(`/api/v1/contracts/${linked.id}/timeline?limit=2`).expect(200);
+    expect(page1.body.data.map((item: any) => [item.source, item.type])).toEqual([
+      ['api', 'create'],
+      ['chain', 'Deposit'],
+    ]);
+    expect(page1.body.page.hasMore).toBe(true);
+    expect(typeof page1.body.page.nextCursor).toBe('string');
+
+    const page2 = await request(app)
+      .get(`/api/v1/contracts/${linked.id}/timeline?limit=2&cursor=${encodeURIComponent(page1.body.page.nextCursor)}`)
+      .expect(200);
+    expect(page2.body.data.map((item: any) => [item.source, item.type])).toEqual([
+      ['api', 'dispute'],
+      ['chain', 'Dispute'],
+    ]);
+    expect(page2.body.page.hasMore).toBe(false);
+    expect(JSON.stringify([...page1.body.data, ...page2.body.data])).not.toContain('private dispute reason');
+
+    const cursorToken = page1.body.page.nextCursor as string;
+    const tamperedCursor = `${cursorToken.slice(0, -1)}${cursorToken.endsWith('x') ? 'y' : 'x'}`;
+    await request(app).get(`/api/v1/contracts/${linked.id}/timeline?cursor=${encodeURIComponent(tamperedCursor)}`).expect(400);
+    await request(app)
+      .get(`/api/v1/contracts/${unlinked.id}/timeline?cursor=${encodeURIComponent(cursorToken)}`)
+      .expect(400);
+
+    const unlinkedTimeline = await request(app).get(`/api/v1/contracts/${unlinked.id}/timeline`).expect(200);
+    expect(unlinkedTimeline.body.data.map((item: any) => item.source)).toEqual(['api']);
+    await request(app).get('/api/v1/contracts/999999/timeline').expect(404);
   });
 
   it('runs the escrow lifecycle', async () => {

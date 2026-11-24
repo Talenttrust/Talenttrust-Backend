@@ -83,6 +83,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
 | GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
+| GET | `/api/v1/contracts/:id/timeline` | Chronological merged API and indexed chain history (`?limit=`, `?cursor=`); linked contracts include chain events, and dispute reasons are never returned |
 | GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, truncatedBeforeSeq, maxEntries, brokenAt? }`) |
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
