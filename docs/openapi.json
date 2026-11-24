@@ -59,7 +59,7 @@
     },
     {
       "name": "Disputes",
-      "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token."
+      "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token or a scoped API key with the admin:read scope."
     }
   ],
   "paths": {
@@ -1078,6 +1078,110 @@
         }
       }
     },
+    "/api/v1/webhook-subscriptions/{id}/deliveries/{deliveryId}/redeliver": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Manually redeliver a finished webhook delivery",
+        "description": "Re-sends the original payload of a `success` or `failed` delivery as a new delivery: same `eventId` (and `X-Event-ID` header), fresh `X-Delivery-ID`, new signature and timestamp, and the normal retry policy. The new delivery records the original in `redeliveryOf`. Payloads are kept only for deliveries still in the bounded history and are never returned by the history endpoint.",
+        "security": [
+          {
+            "webhookAdmin": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Redelivery scheduled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown subscription or delivery (webhook_not_found / webhook_delivery_not_found), or webhooks are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/templates": {
       "post": {
         "tags": [
@@ -1660,6 +1764,9 @@
         "security": [
           {
             "adminToken": []
+          },
+          {
+            "apiKey": []
           }
         ],
         "description": "Returns paginated dispute views plus queue-wide summary totals. The summary always covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes past their SLA deadline, totalHeld = escrow held across open disputes), regardless of the filters. Dispute reasons are only exposed here and on /api/v1/disputes/{contractId}.",
@@ -1745,7 +1852,22 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin bearer token",
+            "description": "Missing or invalid admin bearer token or API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks the admin:read scope (insufficient_scope)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1760,7 +1882,7 @@
             }
           },
           "404": {
-            "description": "ADMIN_READ_TOKEN is not configured (admin_not_configured)",
+            "description": "Neither ADMIN_READ_TOKEN nor API_KEYS is configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1804,6 +1926,9 @@
         "security": [
           {
             "adminToken": []
+          },
+          {
+            "apiKey": []
           }
         ],
         "parameters": [
@@ -1843,7 +1968,22 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin bearer token",
+            "description": "Missing or invalid admin bearer token or API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks the admin:read scope (insufficient_scope)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1858,7 +1998,7 @@
             }
           },
           "404": {
-            "description": "Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured",
+            "description": "Contract has never had a dispute (dispute_not_found), or neither ADMIN_READ_TOKEN nor API_KEYS is configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -2592,6 +2732,72 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Revoke the presented wallet token",
+        "description": "Revokes the bearer token by its `jti` until it would have expired. Later requests with that token get 401 with `WWW-Authenticate: Bearer`; other tokens of the same wallet keep working. The revocation list is held in memory per process.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Token revoked"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
+          },
+          "401": {
+            "description": "Missing, invalid, expired or already revoked token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ]
       }
     },
     "/api/v1/auth/token": {
@@ -8287,6 +8493,10 @@
           },
           "lastError": {
             "type": "string"
+          },
+          "redeliveryOf": {
+            "type": "string",
+            "description": "Original delivery id for manual redeliveries"
           },
           "nextAttemptAt": {
             "type": "string",

@@ -44,6 +44,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
+| POST | `/api/v1/auth/logout` | Revoke the presented bearer token (`204`; later use of that token gets `401`) |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
@@ -69,7 +70,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
 | GET/POST | `/api/cron/reconcile-parity` | Authenticated parity reconciliation for all linked contracts (bounded concurrency and time budget); reports in-sync/drifted/unreachable counts and drifted contract IDs, emits `contract.drift_detected`, and updates parity metrics |
-| GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
+| GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` or a scoped API key with `admin:read` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
 | POST | `/api/v1/tx/submit` | Validate and relay a signed escrow transaction (`{ "xdr": "..." }`) |
 | GET | `/api/v1/tx` | List recent relayed transactions (`?limit=`) |
@@ -78,6 +79,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET/PATCH/DELETE | `/api/v1/webhook-subscriptions/:id` | Manage a subscription without exposing its secret |
 | POST | `/api/v1/webhook-subscriptions/:id/rotate-secret` | Rotate a subscription secret |
 | GET | `/api/v1/webhook-subscriptions/:id/deliveries` | Bounded delivery history |
+| POST | `/api/v1/webhook-subscriptions/:id/deliveries/:deliveryId/redeliver` | Re-send a finished delivery's original payload (`202`; `409` while pending) |
 | POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
 | GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
@@ -91,13 +93,33 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 Webhook management is disabled (404) when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
 requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
 "https://example.com/events", "events": ["milestone.released"], "filter": { "parties": ["G..."], "contractIds": [42] } }`; `filter` is optional, and either array may contain up to 50 entries. When both are present, both criteria must match; parties match a contract's `client` or `freelancer`, and IDs match its `id`. A filtered subscription skips events without `data.contract`. Filters are returned by GET and can be changed with PATCH; send `"filter": null` to clear one. Invalid filters return `400 invalid_filter`. The generated `whsec_`
-secret is returned only in that creation response and again when explicitly rotated. Events:
-`contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
-`dispute.resolved`, `contract.cancelled`, `reputation.issued`, `contract.drift_detected` (dispute reasons are never included). Delivery
-payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
+secret is returned only in that creation response and again when explicitly rotated.
+
+Every delivery body is the event envelope `{ id, eventId, eventType, timestamp, data }`. Events are emitted only
+after the operation succeeds, and `contract` is always the public contract view, so dispute reasons are never
+included. Subscribe to `"*"` for all of them.
+
+| Event | Emitted by | `data` |
+| --- | --- | --- |
+| `contract.created` | `POST /contracts` | `{ contract }` |
+| `contract.updated` | `PATCH /contracts/:id`, `extend-deadline`, a partial `deposit` | `{ contract, revision? }` — `revision` (`{ revision, at, changes }`) on edits only |
+| `contract.funded` | `deposit` that fully funds the contract | `{ contract }` |
+| `milestone.released` | `release` | `{ contract, milestone }` |
+| `dispute.raised` | `dispute` | `{ contract, dispute }` |
+| `dispute.resolved` | `resolve` | `{ contract, dispute }` |
+| `contract.cancelled` | `cancel` | `{ contract }` |
+| `reputation.issued` | `POST /contracts/:id/reputation` | `{ contract, reputation }` (freelancer) |
+| `reputation.updated` | `POST /contracts/:id/reviews` (either direction) | `{ contract, review, reputation }` — the reviewee's reputation, including `asClient` |
+| `contract.drift_detected` | parity reconciliation cron | drift report |
+
+Delivery payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
 `X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
 failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
-history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
+history. Each delivery has its own `X-Delivery-ID`. After fixing an endpoint, replay a finished (`success` or
+`failed`) delivery with `POST /api/v1/webhook-subscriptions/:id/deliveries/:deliveryId/redeliver`: it re-sends
+the original payload as a new delivery with the same `X-Event-ID`, a fresh `X-Delivery-ID`, a new signature and
+`redeliveryOf` set to the original id (`404` for unknown ids, `409` while the delivery is still pending).
+Payloads are kept only while the delivery is in the bounded history and are never returned by the history endpoint. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
 `http://localhost` is allowed only outside production. DNS can still change after validation,
 so production deployments should use egress controls as defense in depth.
 
@@ -128,6 +150,12 @@ cursor for stable pagination (`limit` 1–100, default 20). Each `DisputeView` i
 (`openedAt + DISPUTE_SLA_HOURS`, default 72h) and `overdue` (true only while open and strictly past the
 deadline), plus `resolvedAt`/`freelancerBps` once resolved. Dispute **reasons are confidential**: they are
 served only by these two authenticated routes and are omitted from every public contract response and receipt.
+
+Both routes accept either the static `Authorization: Bearer $ADMIN_READ_TOKEN` or a scoped API key with the
+`admin:read` scope (`X-API-Key: <key>` or `Authorization: ApiKey <key>`), so operators can use individually
+revocable keys. A presented API key is always checked as a key: unknown or expired keys get `401` and keys without
+`admin:read` get `403 insufficient_scope`. The routes return `404` while neither `ADMIN_READ_TOKEN` nor `API_KEYS`
+is configured.
 
 ## Reviews
 
@@ -201,6 +229,12 @@ Tokens are **required** on `POST /contracts`, `PATCH`/`DELETE /contracts/:id`, `
 Without `AUTH_SECRET` the challenge flow uses a random per-process secret and unauthenticated requests keep
 working as before, but a token that is sent is always verified.
 
+`POST /api/v1/auth/logout` with `Authorization: Bearer <token>` revokes that token (`204`). It is added to a
+bounded revocation list keyed by the token's `jti` until the token would have expired, and any later request with it
+gets `401 unauthorized` with `WWW-Authenticate: Bearer`. Other tokens of the same wallet keep working. The
+revocation list lives in process memory: it is lost on restart and is not shared between instances (or serverless
+invocations), so on multi-instance deployments a revoked token may still be accepted elsewhere until it expires.
+
 For authenticated calls the token subject (`sub`) is the caller's Stellar address and the store enforces the
 same party rules as the on-chain contract: `deposit`, `release`, `cancel`, `reputation` and contract
 edits/withdrawals require the caller to be the contract client (`POST /contracts` forces `client` to the
@@ -246,6 +280,8 @@ expire and behave exactly as before.
   `insufficient_scope` with `required`); the key id is stored as `dispute.resolvedBy`. With `NODE_ENV=production`
   and no `API_KEYS`, resolution fails closed (401); outside production with no keys configured it stays open for
   local development.
+- `GET /api/v1/disputes` and `GET /api/v1/disputes/:contractId` accept a key with `admin:read` as an alternative
+  to `ADMIN_READ_TOKEN` (403 `insufficient_scope` without the scope).
 - `GET /api/v1/auth/whoami` returns `{ keyId, scopes, expiresAt }` for the presented key (`expiresAt` is an ISO
   8601 UTC string, or `null` for a key that never expires).
 - `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add. Add

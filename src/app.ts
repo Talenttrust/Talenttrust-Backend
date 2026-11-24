@@ -58,6 +58,7 @@ import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
+import { TokenRevocationList } from './auth/revocation';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
 
 import { createContractsRouter } from './routes/contracts';
@@ -82,7 +83,7 @@ import {
   optionalString,
   PreconditionFailedError,
   PreconditionRequiredError,
-  requireAdminRead,
+  createRequireAdminRead,
   requireCronSecret,
   rootApiInfo,
   safeEqual,
@@ -242,6 +243,8 @@ export function createApp(
       err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
     );
   };
+  /** Dispute queue: ADMIN_READ_TOKEN bearer or a scoped API key with `admin:read`. */
+  const requireAdminRead = createRequireAdminRead(apiKeys, apiKeyAuthOptions);
   const webhooks = new WebhookManager(store.events);
   let chainReadClient: ChainReadClient | undefined = isChainReadClient(second) ? second : deps.chainReadClient;
   const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
@@ -262,7 +265,11 @@ export function createApp(
     second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
   const receiptManager = () =>
     (receiptManagerInstance ??= new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET));
-  const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required);
+  // Per-process jti revocation list fed by POST /api/v1/auth/logout.
+  const revokedTokens = new TokenRevocationList({ now: auth.now });
+  const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required, revokedTokens);
+  // Logout always needs a valid token, even in legacy (auth optional) mode.
+  const requireToken = createRequireAuth(auth.secret, auth.now, true, revokedTokens);
 
   const app = express();
   const sseStreams = new Set<() => void>();
@@ -539,6 +546,18 @@ export function createApp(
       consumeNonce(result.payload.nonce);
       const { token, expiresAt } = issueWalletToken(address, auth.secret, auth.now);
       return { token, tokenType: 'Bearer', expiresAt };
+    }),
+  );
+
+  // POST /api/v1/auth/logout  (Authorization: Bearer <token>) — revokes this token only.
+  v1.post(
+    '/auth/logout',
+    requireToken,
+    wrap((req, res) => {
+      const { jti, exp } = (req as WalletAuthRequest).auth!;
+      // verifyWalletToken accepts a token for the whole `exp` second, so keep the entry until it ends.
+      revokedTokens.revoke(jti, (exp + 1) * 1000);
+      res.status(204).end();
     }),
   );
 
@@ -950,6 +969,13 @@ export function createApp(
       };
     }),
   );
+  webhookRouter.post(
+    '/:id/deliveries/:deliveryId/redeliver',
+    wrap((req, res) => {
+      webhookAuth(req);
+      res.status(202).json(webhooks.redeliver(req.params.id, req.params.deliveryId));
+    }),
+  );
   v1.use('/webhook-subscriptions', webhookRouter);
 
   // --- Milestone templates ---
@@ -996,7 +1022,7 @@ export function createApp(
   v1.use(createContractsRouter({ segment: 'history', ...contractRouteDeps }));
   v1.get('/audit/verify', wrap(() => store.audit.verify()));
 
-  // --- Admin dispute queue (ADMIN_READ_TOKEN) ---
+  // --- Admin dispute queue (ADMIN_READ_TOKEN or admin:read API key) ---
   const disputeNow = () => new Date(store.currentTime());
   v1.get(
     '/disputes',

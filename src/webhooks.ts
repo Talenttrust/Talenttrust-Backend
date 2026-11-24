@@ -44,6 +44,8 @@ export interface WebhookDelivery {
   attempts: number;
   statusCode?: number;
   lastError?: string;
+  /** Set on manual redeliveries: the delivery whose payload was re-sent. */
+  redeliveryOf?: string;
   nextAttemptAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -302,6 +304,8 @@ export class WebhookManager {
   private readonly deliveries = new Map<string, WebhookDeliveryRecord>();
   // Per-subscription deliveries in creation order, so history never scans other subscriptions.
   private readonly deliveriesBySubscription = new Map<string, WebhookDeliveryRecord[]>();
+  // Serialized event body per delivery (kept out of the public record, trimmed with history).
+  private readonly payloads = new Map<string, string>();
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -427,6 +431,26 @@ export class WebhookManager {
     await Promise.all(matching.map((subscription) => this.deliver(subscription, event)));
   }
 
+  /**
+   * Re-send the stored payload of a finished delivery as a new delivery with the same
+   * `eventId` (and so the same `X-Event-ID`) but a fresh `X-Delivery-ID`.
+   * 404 for an unknown subscription or delivery, 409 while the original is still pending.
+   */
+  redeliver(subscriptionId: string, deliveryId: string): WebhookDelivery {
+    const subscription = this.require(subscriptionId);
+    const original = this.deliveries.get(deliveryId);
+    const body = this.payloads.get(deliveryId);
+    if (!original || original.subscriptionId !== subscriptionId || body === undefined) {
+      throw new HttpError(404, 'webhook_delivery_not_found', 'Webhook delivery not found');
+    }
+    if (original.status === 'pending') {
+      throw new HttpError(409, 'delivery_pending', 'Webhook delivery is still pending');
+    }
+    const delivery = this.recordDelivery(subscription, original.eventId, original.eventType, body, original.id);
+    void this.attempt(subscription, delivery, body);
+    return { ...delivery };
+  }
+
   private async deliver(subscription: WebhookSubscription, event: EscrowEvent): Promise<void> {
     const delivery: WebhookDeliveryRecord = {
       id: randomUUID(),
@@ -444,10 +468,23 @@ export class WebhookManager {
       createdAt: new Date(this.now()).toISOString(),
       updatedAt: new Date(this.now()).toISOString(),
     };
+    const body = JSON.stringify(event);
+    const delivery = this.recordDelivery(subscription, event.eventId, event.eventType, body);
+    await this.attempt(subscription, delivery, body);
+  }
+
+  private recordDelivery(subscription: WebhookSubscription, eventId: string, eventType: string, body: string, redeliveryOf?: string): WebhookDelivery {
+    const now = new Date(this.now()).toISOString();
+    const delivery: WebhookDelivery = { id: randomUUID(), subscriptionId: subscription.id, eventId, eventType, status: 'pending', attempts: 0, ...(redeliveryOf ? { redeliveryOf } : {}), createdAt: now, updatedAt: now };
     this.deliveries.set(delivery.id, delivery);
+    this.payloads.set(delivery.id, body);
     const perSubscription = this.deliveriesBySubscription.get(subscription.id);
     if (perSubscription) perSubscription.push(delivery);
     else this.deliveriesBySubscription.set(subscription.id, [delivery]);
+    return delivery;
+  }
+
+  private async attempt(subscription: WebhookSubscription, delivery: WebhookDelivery, body: string): Promise<void> {
 
     while (delivery.attempts < this.maxAttempts) {
       delivery.attempts += 1;
@@ -455,7 +492,6 @@ export class WebhookManager {
       let retryAfterMs: number | undefined;
       try {
         const url = await validateWebhookUrl(delivery.url);
-        const body = JSON.stringify(event);
         const timestamp = this.now();
         const signatureHeader = buildSignatureHeader(
           delivery.secret,
@@ -479,6 +515,7 @@ export class WebhookManager {
           },
           5000,
         );
+        const response = await this.httpClient(url, body, { 'Content-Type': 'application/json', 'X-Signature': `sha256=${signature}`, 'X-Timestamp': String(timestamp), 'X-Event-Type': delivery.eventType, 'X-Event-ID': delivery.eventId, 'X-Delivery-ID': delivery.id }, 5000);
         delivery.statusCode = response.statusCode;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           delivery.status = 'success';
@@ -617,6 +654,7 @@ export class WebhookManager {
       const oldestId = this.deliveries.keys().next().value as string;
       const oldest = this.deliveries.get(oldestId);
       this.deliveries.delete(oldestId);
+      this.payloads.delete(oldestId);
       if (!oldest) continue;
       const perSubscription = this.deliveriesBySubscription.get(oldest.subscriptionId);
       if (!perSubscription) continue;

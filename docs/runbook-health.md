@@ -1,404 +1,217 @@
-# Runbook: Health Subsystem
+# Runbook: Health Probes
 
-This runbook covers configuration, failure modes, alert thresholds, and
-recovery steps for all health endpoints in `Talenttrust-Backend`.
+Operational guide for the `/health`, `/health/live` and `/health/ready`
+endpoints. For the full response contract see [`docs/health.md`](health.md).
 
-**Audience:** On-call engineers, SREs, and DevOps  
-**Last updated:** see git log  
-**Related docs:** [`docs/health.md`](health.md) · [`docs/backend/bluegreen.md`](backend/bluegreen.md) · [`docs/backend/circuit-breaker.md`](backend/circuit-breaker.md)
-
----
-
-## Table of contents
-
-1. [Endpoint overview](#1-endpoint-overview)
-2. [Configuration reference](#2-configuration-reference)
-3. [Rate limiting](#3-rate-limiting)
-4. [Probe reference](#4-probe-reference)
-5. [Failure modes and recovery](#5-failure-modes-and-recovery)
-6. [Alert thresholds](#6-alert-thresholds)
-7. [Blue-green drain interaction](#7-blue-green-drain-interaction)
-8. [Debugging checklist](#8-debugging-checklist)
-9. [Source file map](#9-source-file-map)
+**Code:** `src/health.ts` (`HealthService`), `src/app.ts` (routes),
+`src/server.ts` (graceful shutdown), `src/pauseGuard.ts` (pause state),
+`src/config.ts` (environment variables).
 
 ---
 
-## 1. Endpoint overview
+## Quick reference
 
-| Endpoint | Method | Purpose | Source |
+| Endpoint | Healthy | Unhealthy | Hits the RPC? |
 |---|---|---|---|
-| `/health` | GET | Aggregate probe check — full dependency status | `src/health/router.ts` |
-| `/health` | POST | Legacy liveness ping — no probes, always 200 | `src/routes/health.ts` |
-| `/health/live` | GET | Blue-green liveness — process alive only | `src/health.ts` |
-| `/health/ready` | GET | Blue-green readiness — traffic gating | `src/health.ts` |
+| `GET /health/live` | `200 {"status":"ok"}` | No response at all (process down or hung) | No |
+| `GET /health/ready` | `200 {"status":"ready"}` (or `"degraded"`) | `503 {"status":"unready"}` | Yes, at most once per `HEALTH_CACHE_MS` |
+| `GET /health` | `200 {"status":"ok", ...}` | `503 {"status":"draining"}` during shutdown | No |
 
-All four routes are protected by the **health rate limiter** (see §3).  
-All four set `Cache-Control: no-store` on responses.
-
-### Quick status guide
-
-| HTTP status | Meaning |
-|---|---|
-| `200` | Healthy / alive / ready |
-| `400` | Bad request body or query params (validation error) |
-| `429` | Rate limit exceeded — back off and retry |
-| `503` | Not ready — dependency down or drain in progress |
+| Variable | Default | Effect |
+|---|---|---|
+| `HEALTH_CHECK_TIMEOUT_MS` | `2000` | Per-check timeout for `/health/ready` |
+| `HEALTH_CACHE_MS` | `10000` | How long a readiness report is reused |
+| `STELLAR_RPC_URL` | `https://soroban-testnet.stellar.org` | RPC for the `rpc`, `network` and `contract` checks |
+| `STELLAR_NETWORK` | `testnet` | Selects the expected passphrase |
+| `STELLAR_NETWORK_PASSPHRASE` | Derived from `STELLAR_NETWORK` | Overrides the expected passphrase |
+| `ESCROW_CONTRACT_ID` | Built-in testnet contract | Contract looked up by the `contract` check |
+| `SHUTDOWN_GRACE_MS` | `10000` | How long `/health` reports `draining` before connections are force-closed |
+| `API_PAUSED` | unset | `true` forces `paused: true, pauseSource: "env"` on `/health` |
+| `PAUSE_CHECK_CHAIN` | unset (chain check on) | `false` skips the on-chain `is_paused()` lookup |
+| `PAUSE_CHECK_TTL_MS` | `10000` | Cache lifetime of the on-chain pause state |
+| `PAUSE_FAIL_MODE` | `open` | `closed` reports paused when the pause lookup fails |
 
 ---
 
-## 2. Configuration reference
+## First look
 
-### Probe behaviour
+Set `BASE` to the instance you are checking, then run:
 
-| Variable | Default | Description |
-|---|---|---|
-| `NODE_ENV` | `development` | Set to `production` to strip `detail` fields from responses |
-| `SERVICE_NAME` | `talenttrust-backend` | Service label in all health response bodies |
-| `ACTIVE_COLOR` | `blue` | Blue-green slot label included in `/health/ready` responses |
-| `REQUIRED_ENV_VARS` | `""` | Comma-separated list of env var names the `env` probe checks |
-| `REDIS_HOST` | `localhost` | Redis hostname for the `redis` probe |
-| `REDIS_PORT` | `6379` | Redis port for the `redis` probe |
-| `REDIS_PASSWORD` | *(unset)* | Redis password for the `redis` probe (optional) |
-| `STELLAR_RPC_URL` | *(unset)* | Soroban/Horizon RPC URL for the `stellar-rpc` probe |
-| `QUEUE_PROBE_TIMEOUT_MS` | `3000` | Max ms the `queue` probe waits for queue health data |
-| `QUEUE_FAILED_THRESHOLD` | `10` | Failed jobs per queue before `queue` probe reports `degraded` |
-| `QUEUE_BACKLOG_THRESHOLD` | `100` | Waiting jobs per queue before `queue` probe reports `degraded` |
+```bash
+BASE=http://localhost:3001
 
-### Probe timeouts
-
-| Probe | Timeout | Source |
-|---|---|---|
-| `db` | 3 000 ms | Hardcoded in `src/health/probes.ts` (`DB_PROBE_TIMEOUT_MS`) |
-| `redis` | 3 000 ms | Hardcoded in `src/health/probes.ts` (`REDIS_PROBE_TIMEOUT_MS`) |
-| `stellar-rpc` | 5 000 ms | Hardcoded in `src/health/probes.ts` (AbortController) |
-| `queue` | `QUEUE_PROBE_TIMEOUT_MS` | Configurable, default 3 000 ms |
-| `/health/ready` per-probe | 3 000 ms | Hardcoded in `src/health.ts` (`READY_PROBE_TIMEOUT_MS`) |
-
-> **Note:** `/health/ready` wraps each probe in its own `withTimeout()` — the per-probe timeout (3 000 ms) is separate from the internal probe timeout. In practice they race and the lower value wins.
-
----
-
-## 3. Rate limiting
-
-All health routes are protected by a per-client sliding-window rate limiter.
-
-**Key extraction** (`src/health/rateLimitKey.ts`):  
-Priority: `X-API-Key` header → first IP in `X-Forwarded-For` → `req.ip` → socket address
-
-**Algorithm:** sliding-window counter with exponential back-off abuse guard  
-**Implementation:** `src/middleware/rateLimiter.ts`, `src/config/rateLimit.ts` (`health` tier)
-
-### Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `RL_HEALTH_MAX` | `60` | Max requests per window per client |
-| `RL_HEALTH_WINDOW_MS` | `60000` | Window duration in ms (1 minute) |
-| `RL_HEALTH_ABUSE_THRESHOLD` | `10` | Violations before hard-block is applied |
-| `RL_BLOCK_DURATION_MS` | `600000` | Initial hard-block duration (10 minutes) |
-| `RL_MAX_BLOCK_MS` | `86400000` | Maximum hard-block duration (24 hours) |
-
-### Response headers on every health request
-
-| Header | Description |
-|---|---|
-| `X-RateLimit-Limit` | Configured cap (e.g. `60`) |
-| `X-RateLimit-Remaining` | Requests left in current window |
-| `X-RateLimit-Reset` | Seconds until window resets |
-
-### 429 response body
-
-```json
-{
-  "error": {
-    "code": "rate_limited",
-    "message": "Too many requests — please try again later",
-    "requestId": "<uuid>"
-  }
-}
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/health/live"
+curl -s -w '\n%{http_code}\n' "$BASE/health/ready" | jq .
+curl -s "$BASE/health" | jq .
 ```
 
-`Retry-After: <seconds>` is also set.
+Read `checks` in the `/health/ready` body. Each failing check carries a fixed
+`detail` string; find it in the table below.
 
-### Recovery from 429
-
-1. Check if a monitoring agent or load-balancer probe is misconfigured and polling too fast.
-2. Increase `RL_HEALTH_MAX` or `RL_HEALTH_WINDOW_MS` in the environment and restart.
-3. If a client was hard-blocked (repeated violations), wait for `RL_BLOCK_DURATION_MS` to expire, or restart the service to clear in-memory state.
-
-> **Multi-replica note:** The rate limiter uses an in-process `Map` store by default. Each replica maintains its own counter. Under a load balancer, a client can issue up to `RL_HEALTH_MAX × replicas` requests per window before any single replica throttles them. If consistent cross-replica enforcement is needed, configure a shared Redis store via `RATE_LIMIT_STORE_TYPE=redis` and `REDIS_URL`.
-
----
-
-## 4. Probe reference
-
-Probes are defined in `src/health/probes.ts` and used by `GET /health` (via `src/health/router.ts`) and `GET /health/ready` (via `src/health.ts`).
-
-### `env` probe
-
-Checks that every variable listed in `REQUIRED_ENV_VARS` exists in `process.env`.  
-**Never exposes values.**
-
-| Result | Condition |
-|---|---|
-| `up` | All listed variables are present (or list is empty) |
-| `down` | One or more listed variables are missing |
-
-**Failure detail:** `Missing vars: VAR_A, VAR_B`
-
-**Recovery:** Set the missing environment variable(s) and restart the service.
-
----
-
-### `db` probe
-
-Runs `SELECT 1` against the SQLite database singleton (`src/db/database.ts`).
-
-| Result | Condition |
-|---|---|
-| `up` | Query completes in < 1 000 ms |
-| `degraded` | Query completes in 1 000 – 3 000 ms |
-| `down` | Query takes ≥ 3 000 ms, times out, or throws |
-
-**Relevant env vars:** `DB_PATH`, `DB_BUSY_TIMEOUT`
-
-**Common failures:**
-
-| Symptom | Likely cause | Recovery |
+| Check | `detail` | Go to |
 |---|---|---|
-| `detail: "db probe timeout"` | DB file locked by another process, disk I/O saturation | Check for long-running transactions; check disk health |
-| `detail: "SQLITE_CANTOPEN"` | `DB_PATH` is wrong or the file does not exist | Verify `DB_PATH`; check file permissions |
-| `detail: "SQLITE_CORRUPT"` | Database file corruption | Restore from backup; see `docs/backend/database.md` |
-| Degraded (slow) | High write contention, slow disk | Check `DB_BUSY_TIMEOUT`; consider increasing it |
+| any | `timeout` | [A check times out](#a-check-times-out) |
+| any | `check raised` | [A check raised](#a-check-raised) |
+| `rpc` | `rpc reported '<status>'` | [RPC is unhealthy](#rpc-is-unhealthy) |
+| `network` | `passphrase mismatch: ...` | [Network passphrase mismatch](#network-passphrase-mismatch) |
+| `network` | `no passphrase known for network ...` | [Network passphrase mismatch](#network-passphrase-mismatch) |
+| `contract` | `contract instance ledger entry not found` | [Contract entry not found](#contract-entry-not-found) |
+| `storage` | `store read failed` | [Store read failed](#store-read-failed) |
+
+Remember that readiness reports are cached for `HEALTH_CACHE_MS`. Check
+`checkedAt` in the body: if it is older than the moment you fixed something,
+wait out the cache (default 10 s) and probe again.
 
 ---
 
-### `redis` probe
+## Troubleshooting
 
-Opens a short-lived Redis connection, sends `PING`, then disconnects.
+### A check times out
 
-| Result | Condition |
-|---|---|
-| `up` | PING succeeds within 3 000 ms |
-| `down` | Connection refused, PING times out, or any error |
+**Symptom:** one or more checks show `"detail": "timeout"` with `latencyMs`
+close to `HEALTH_CHECK_TIMEOUT_MS`. When the RPC is unreachable, `rpc`,
+`network` and `contract` usually time out together while `storage` passes.
 
-**Relevant env vars:** `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
+1. Confirm the RPC answers from the instance's network:
+   ```bash
+   curl -s -X POST "$STELLAR_RPC_URL" \
+     -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+   ```
+2. If it answers, but slowly, compare its latency with
+   `HEALTH_CHECK_TIMEOUT_MS`. Raise the timeout only if the RPC is
+   legitimately slow, and keep the orchestrator's probe timeout above it.
+3. If it does not answer, check DNS, egress firewall rules and the RPC
+   provider's status, or point `STELLAR_RPC_URL` at another provider and
+   restart.
 
-**Common failures:**
+### A check raised
 
-| Symptom | Likely cause | Recovery |
+**Symptom:** `"detail": "check raised"`. The RPC call threw instead of
+returning, typically a connection refused, TLS error or malformed URL. The raw
+error is deliberately not exposed by the probe.
+
+1. Verify `STELLAR_RPC_URL` is a full URL (`https://...`). Plain `http://` is
+   allowed by the client but should only be used for local RPC nodes.
+2. Run the `getHealth` call from [A check times out](#a-check-times-out) step 1
+   to see the actual error.
+3. For `contract` only: an invalid `ESCROW_CONTRACT_ID` (not a valid `C...`
+   strkey) makes building the ledger key throw. Check the value.
+
+### RPC is unhealthy
+
+**Symptom:** `rpc` fails with `rpc reported '<status>'`, where `<status>` is
+whatever the RPC's `getHealth` returned instead of `healthy`.
+
+1. The RPC node itself is reporting a problem (often lagging behind the
+   network). This is on the provider's side.
+2. Switch `STELLAR_RPC_URL` to a healthy provider and restart, or wait for the
+   node to catch up.
+
+### Network passphrase mismatch
+
+**Symptom:** `network` fails with
+`passphrase mismatch: configured '<STELLAR_NETWORK>', rpc reported '<passphrase>'`.
+The RPC serves a different Stellar network than the backend is configured for.
+Transactions built by this instance would be rejected.
+
+1. Compare `STELLAR_NETWORK` with the network of `STELLAR_RPC_URL`:
+
+   | `STELLAR_NETWORK` | Expected passphrase |
+   |---|---|
+   | `testnet` (default) | `Test SDF Network ; September 2015` |
+   | `mainnet`, `public` | `Public Global Stellar Network ; September 2015` |
+   | `futurenet` | `Test SDF Future Network ; October 2022` |
+   | anything else | testnet passphrase, unless `STELLAR_NETWORK_PASSPHRASE` is set |
+
+2. Fix whichever of `STELLAR_NETWORK` or `STELLAR_RPC_URL` is wrong. For a
+   custom or local network, set `STELLAR_NETWORK_PASSPHRASE` to the exact
+   passphrase the RPC reports.
+3. Restart the instance; configuration is read at startup.
+
+The `no passphrase known for network ...` variant only occurs when
+`HealthService` is constructed without a passphrase (for example in tests).
+The app always passes `config.networkPassphrase`, so in a deployed instance
+use the mismatch steps above.
+
+### Contract entry not found
+
+**Symptom:** `contract` fails with `contract instance ledger entry not found`.
+The RPC answered, but there is no persistent contract-instance ledger entry for
+`ESCROW_CONTRACT_ID` on that network.
+
+1. Confirm `ESCROW_CONTRACT_ID` is the contract deployed on the network that
+   `STELLAR_NETWORK` / `STELLAR_RPC_URL` point at. A testnet contract ID will
+   not exist on mainnet and vice versa.
+2. Look the contract up on a block explorer for that network.
+3. On testnet, check whether the network was reset or the contract instance
+   archived; redeploy or restore it and update `ESCROW_CONTRACT_ID`.
+
+### Store read failed
+
+**Symptom:** `storage` fails with `store read failed`. `EscrowStore.list()`
+threw. The store is in memory, so this indicates a bug or a corrupted state
+(for example after loading a bad `STORE_SNAPSHOT_PATH` snapshot), not an
+external outage.
+
+1. Check the instance logs for the exception around `checkedAt`.
+2. Restart the instance. If it recurs after restart with a snapshot configured,
+   move the snapshot file aside and start again.
+3. File a bug with the logs.
+
+### Readiness stays unready after a fix
+
+Reports, including failed ones, are cached for `HEALTH_CACHE_MS`. Wait for the
+cache to expire and probe again. Environment-variable changes need a restart.
+
+### `/health` returns 503 `{"status":"draining"}`
+
+The process received `SIGTERM` or `SIGINT` and is shutting down. This is
+expected during deploys and scale-down. It will exit within `SHUTDOWN_GRACE_MS`
+(default 10 s); exit code `1` means in-flight requests had to be force-closed.
+If an instance stays draining much longer than that, it is hung: kill it.
+
+### `/health` has no `checks` field
+
+`checks` only appears after `/health/ready` has run at least once in that
+process. Call `/health/ready` (or wait for the orchestrator's readiness probe)
+and look again. `/health` never runs the checks itself.
+
+### `/health` reports `paused: true`
+
+Not a health failure. While paused, the guarded mutation routes listed in
+`GUARDED_ROUTES` (`src/pauseGuard.ts`: create, deposit, release milestone,
+dispute, cancel) answer `503 contract_paused` with `Retry-After: 60`; reads
+keep working.
+
+| `pauseSource` | Cause | Action |
 |---|---|---|
-| `detail: "connect ECONNREFUSED"` | Redis not running or wrong host/port | Verify `REDIS_HOST`/`REDIS_PORT`; start Redis |
-| `detail: "WRONGPASS"` | Wrong `REDIS_PASSWORD` | Correct the password env var |
-| `detail: "Command timed out"` | Redis overloaded or network latency | Check Redis memory and CPU; check network path |
+| `env` | `API_PAUSED=true` operator override | Unset `API_PAUSED` and restart when the pause should end |
+| `chain` | The escrow contract's `is_paused()` returned true, or the lookup failed with `PAUSE_FAIL_MODE=closed` | Check the contract's pause state; check RPC reachability if fail-closed |
+
+The value is refreshed in the background every `PAUSE_CHECK_TTL_MS`, so a
+change on chain can take that long to appear.
+
+### `/health/live` does not answer
+
+The process is down or its event loop is blocked. Check that it is running,
+inspect logs for a startup error (an invalid integer in
+`HEALTH_CHECK_TIMEOUT_MS`, `HEALTH_CACHE_MS` or another `envInt` variable
+stops the process with `Invalid <NAME>: "<value>"`), and restart it.
 
 ---
 
-### `stellar-rpc` probe
+## Escalation
 
-Sends a lightweight `GET` to `STELLAR_RPC_URL`. Aborts after 5 000 ms.
+1. Note the instance, the full `/health/ready` body and its `checkedAt`.
+2. If every instance fails `rpc`/`network`/`contract` at the same time, treat
+   it as an RPC provider or network incident.
+3. If a single instance fails, take it out of rotation and compare its
+   environment variables with a healthy instance.
 
-| Result | Condition |
-|---|---|
-| `up` | HTTP status < 500 |
-| `down` | `STELLAR_RPC_URL` not set, status ≥ 500, or request fails/times out |
+## Related
 
-**Relevant env vars:** `STELLAR_RPC_URL`
-
-**Common failures:**
-
-| Symptom | Likely cause | Recovery |
-|---|---|---|
-| `detail: "STELLAR_RPC_URL not set"` | Env var missing | Set `STELLAR_RPC_URL` and restart |
-| `detail: "HTTP 503"` | Stellar/Soroban network maintenance | Monitor Stellar network status; no action needed if temporary |
-| `detail: "fetch failed"` or `"ECONNREFUSED"` | Network partition or wrong URL | Check connectivity to the RPC host; verify URL |
-| `detail: "This operation was aborted"` | Request timed out after 5 000 ms | Check latency to RPC host; consider a closer region |
-
----
-
-### `queue` probe
-
-Calls `QueueManager.getInstance().getHealth()` and checks failed/waiting job counts.
-
-| Result | Condition |
-|---|---|
-| `up` | All queues within thresholds |
-| `degraded` | At least one queue exceeds `QUEUE_FAILED_THRESHOLD` or `QUEUE_BACKLOG_THRESHOLD` |
-| `down` | Health check times out or throws |
-
-**Relevant env vars:** `QUEUE_PROBE_TIMEOUT_MS`, `QUEUE_FAILED_THRESHOLD`, `QUEUE_BACKLOG_THRESHOLD`
-
-**Common failures:**
-
-| Symptom | Likely cause | Recovery |
-|---|---|---|
-| `detail: "contract-processing: 15 failed jobs"` | Worker crash or upstream error | Check worker logs; inspect DLQ; replay or discard failed jobs |
-| `detail: "contract-processing: 120 waiting jobs"` | Workers not consuming fast enough | Scale workers; check for blocking jobs |
-| `detail: "queue probe timeout"` | BullMQ/Redis unresponsive | Check Redis; check `QUEUE_PROBE_TIMEOUT_MS` |
-
----
-
-### `circuit-breaker` probe
-
-Queries `circuitBreakerRegistry.getAll()` — no external I/O.
-
-| Result | Condition |
-|---|---|
-| `up` | No breakers in `OPEN` state |
-| `degraded` | One or more breakers open |
-| `down` | Registry query throws |
-
-**Common failures:**
-
-| Symptom | Likely cause | Recovery |
-|---|---|---|
-| `detail: "2 breaker(s) open"` | Upstream dependency failing repeatedly | Identify the tripped breaker from service logs; fix the upstream; breaker auto-closes after `CB_TIMEOUT_MS` |
-
-See `docs/backend/circuit-breaker.md` for breaker configuration.
-
----
-
-## 5. Failure modes and recovery
-
-### `/health/ready` returns 503 — `reason: "drain-in-progress"`
-
-**Cause:** SIGTERM was received and graceful shutdown has started. `isReadinessDraining()` returns `true`.  
-**Expected?** Yes — this is intentional during deployments and restarts.  
-**Action:** No action needed. The load balancer will stop routing traffic to this instance. The 503 will clear when the process exits and a new process starts.
-
-If 503 persists unexpectedly:
-- Check if the process is stuck during shutdown (deadlocked drain).
-- Check worker logs for `http_drain_timeout` or `bullmq_worker_timeout`.
-- Force-kill the process: `kill -9 <pid>` (last resort — in-flight requests will be dropped).
-
----
-
-### `/health/ready` returns 503 — dependency check failure
-
-One or more probes in the `checks` array have `ok: false`.
-
-1. Identify the failing probe from the `checks` array (or from `GET /health` for more detail).
-2. Follow the recovery steps in §4 for the relevant probe.
-3. Once the dependency recovers, `/health/ready` will return 200 automatically on the next poll — no restart needed.
-
----
-
-### All health endpoints returning 429
-
-The rate limiter has tripped for the requesting client.
-
-1. Identify the client from logs — search for `rate_limited` at the health route.
-2. Check if a monitoring agent is polling faster than `RL_HEALTH_MAX` / `RL_HEALTH_WINDOW_MS`.
-3. If legitimate, increase `RL_HEALTH_MAX` in environment and restart.
-4. If a hard-block was applied, the client must wait for `RL_BLOCK_DURATION_MS` (default 10 min) or the service must be restarted to clear in-memory state.
-
----
-
-### `/health/live` returning non-200
-
-`/health/live` has no dependency checks. A non-200 response means:
-- The process is not running — the container/pod has crashed. Restart it.
-- A middleware (e.g. security, request limits) is rejecting requests before they reach the handler. Check application startup logs.
-
----
-
-### `GET /health` returning 503 but `/health/ready` returning 200
-
-`GET /health` runs more probes than `/health/ready` (includes `env`, `queue`, `circuit-breaker`). One of those extra probes is failing. Check the `probes` array in the response body for the failing probe and follow §4.
-
----
-
-## 6. Alert thresholds
-
-Recommended monitoring rules (adapt to your alerting platform):
-
-| Alert | Condition | Severity | Action |
-|---|---|---|---|
-| Health endpoint down | `/health/live` non-200 for > 30 s | Critical | Page on-call; restart service |
-| Not ready | `/health/ready` 503 for > 2 min (outside deployment window) | High | Check dependency probes; see §4 |
-| DB slow | `db` probe `status: "degraded"` for > 5 min | Medium | Check disk I/O, DB busy timeout |
-| Queue degraded | `queue` probe `status: "degraded"` for > 10 min | Medium | Inspect failed jobs; check workers |
-| Circuit breaker open | `circuit-breaker` probe `status: "degraded"` | Medium | Identify open breaker; fix upstream |
-| Rate limit spike | `429` rate on `/health/*` > 10 req/min | Low | Identify polling client; tune `RL_HEALTH_MAX` |
-| Stellar RPC down | `stellar-rpc` probe `status: "down"` for > 5 min | Medium | Check `STELLAR_RPC_URL`; monitor Stellar network |
-
----
-
-## 7. Blue-green drain interaction
-
-During a blue-green deployment (`npm run deploy:switch-green` or similar):
-
-1. The router is updated to point traffic at the new color.
-2. SIGTERM is sent to the old-color process.
-3. `registerShutdownHandlers()` in `src/shutdown.ts` sets `draining = true`.
-4. `isReadinessDraining()` returns `true`.
-5. `/health/ready` immediately returns `503 { reason: "drain-in-progress" }` without running any probes.
-6. The load balancer stops sending traffic to the old color.
-7. The process finishes draining HTTP connections, webhook deliveries, and BullMQ workers, then exits.
-
-**Expected log sequence during drain:**
-
-```
-shutdown_initiated
-http_drained
-webhook_deliveries_drained    (or webhook_drain_timeout + webhook_drain_flushed_to_dlq)
-shutdown_drainers_drained     (if drain handlers registered)
-bullmq_worker_closed
-connection_closed
-shutdown_complete
-```
-
-**If the process does not exit within the expected window** (`httpTimeoutMs` + `webhookDrainTimeoutMs` + `workerTimeoutMs`, each defaulting to 30 s):
-- Check for stuck webhook deliveries: look for `webhook_drain_timeout` in logs.
-- Check for stuck BullMQ jobs: look for `bullmq_worker_timeout`.
-- Force-kill as a last resort.
-
-See `docs/backend/bluegreen.md` for full deployment procedure.
-
----
-
-## 8. Debugging checklist
-
-**Service not passing readiness checks:**
-
-- [ ] Run `curl http://localhost:PORT/health` and inspect the `probes` array.
-- [ ] Run `curl http://localhost:PORT/health/ready` and inspect `checks`.
-- [ ] Check `NODE_ENV` — in `production`, `detail` fields are stripped from responses; add a non-prod replica for diagnosis.
-- [ ] Verify all required env vars with `curl http://localhost:PORT/health?verbose=true` in non-production.
-- [ ] Check Redis connectivity: `redis-cli -h $REDIS_HOST -p $REDIS_PORT ping`.
-- [ ] Check SQLite: `sqlite3 $DB_PATH "SELECT 1"`.
-- [ ] Check `STELLAR_RPC_URL` reachability: `curl $STELLAR_RPC_URL`.
-- [ ] Check queue health directly via BullMQ dashboard or `QueueManager.getHealth()`.
-
-**Getting 429 on health endpoints:**
-
-- [ ] Check `X-RateLimit-Remaining` on a successful response to see remaining headroom.
-- [ ] Check `X-RateLimit-Reset` to see when the window resets.
-- [ ] Identify the rate-limited client from application logs (`rate_limited`, `requestId`).
-- [ ] Verify `RL_HEALTH_MAX` and `RL_HEALTH_WINDOW_MS` match your polling interval.
-
-**Drain not completing:**
-
-- [ ] Check for `webhook_drain_timeout` log event.
-- [ ] Check for `bullmq_worker_timeout` log event.
-- [ ] Check for long-running HTTP connections (kept-alive load balancer probes).
-- [ ] Verify `WEBHOOK_DRAIN_TIMEOUT_MS` covers your p99 delivery latency.
-
----
-
-## 9. Source file map
-
-| File | Role |
-|---|---|
-| `src/health.ts` | `GET /health/live` and `GET /health/ready` router + rate limiter mount |
-| `src/health/probes.ts` | All probe implementations (`env`, `db`, `redis`, `stellar-rpc`, `queue`, `circuit-breaker`) |
-| `src/health/rateLimitKey.ts` | Per-client key extraction for the health rate limiter |
-| `src/health/router.ts` | `GET /health` router — aggregates all probes |
-| `src/health/checker.ts` | `runHealthCheck()` — runs probes concurrently and builds the response |
-| `src/health/validation.ts` | Zod schemas for `POST /health` body and `GET /health` query params |
-| `src/health/types.ts` | `ProbeResult` and `Probe` type definitions |
-| `src/routes/health.ts` | `GET /health` and `POST /health` legacy routes + rate limiter |
-| `src/config/rateLimit.ts` | All rate-limit tier configs including the `health` tier |
-| `src/middleware/rateLimiter.ts` | `createRateLimiter()` — sliding-window middleware factory |
-| `src/shutdown.ts` | `isReadinessDraining()`, `registerShutdownHandlers()` |
-| `src/app.ts` | Mounts all health routers at `/health` |
+- [`docs/health.md`](health.md): endpoint reference
+- [`docs/configuration.md`](configuration.md): environment variables
+- [`docs/deploy.md`](deploy.md): deployment and probe wiring
+- [`docs/observability.md`](observability.md): metrics and logging

@@ -219,7 +219,7 @@ const spec = {
     { name: 'Parties', description: 'Per-address activity statements' },
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
-    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token or a scoped API key with the admin:read scope.' },
   ],
   paths: {
     '/api/v1/tx/submit': {
@@ -437,6 +437,28 @@ const spec = {
         },
       },
     },
+    '/api/v1/webhook-subscriptions/{id}/deliveries/{deliveryId}/redeliver': {
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Manually redeliver a finished webhook delivery',
+        description:
+          'Re-sends the original payload of a `success` or `failed` delivery as a new delivery: same ' +
+          '`eventId` (and `X-Event-ID` header), fresh `X-Delivery-ID`, new signature and timestamp, and the ' +
+          'normal retry policy. The new delivery records the original in `redeliveryOf`. Payloads are kept only ' +
+          'for deliveries still in the bounded history and are never returned by the history endpoint.',
+        security: [{ webhookAdmin: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          202: { description: 'Redelivery scheduled', content: json({ $ref: '#/components/schemas/WebhookDelivery' }) },
+          401: errorResponse('Missing or invalid admin token'),
+          404: errorResponse('Unknown subscription or delivery (webhook_not_found / webhook_delivery_not_found), or webhooks are not configured'),
+          409: errorResponse('The delivery is still pending (delivery_pending)'),
+        },
+      },
+    },
     '/api/v1/templates': {
       post: {
         tags: ['Templates'],
@@ -526,7 +548,7 @@ const spec = {
       get: {
         tags: ['Disputes'],
         summary: 'List the admin dispute queue',
-        security: [{ adminToken: [] }],
+        security: [{ adminToken: [] }, { apiKey: [] }],
         description:
           'Returns paginated dispute views plus queue-wide summary totals. The summary always ' +
           'covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes ' +
@@ -547,8 +569,9 @@ const spec = {
         responses: {
           ...ok('Dispute queue page', { $ref: '#/components/schemas/DisputeQueue' }),
           400: errorResponse('Invalid status, sort, overdue, limit, or cursor'),
-          401: errorResponse('Missing or invalid admin bearer token'),
-          404: errorResponse('ADMIN_READ_TOKEN is not configured (admin_not_configured)'),
+          401: errorResponse('Missing or invalid admin bearer token or API key'),
+          403: errorResponse('The API key lacks the admin:read scope (insufficient_scope)'),
+          404: errorResponse('Neither ADMIN_READ_TOKEN nor API_KEYS is configured'),
         },
       },
     },
@@ -556,13 +579,14 @@ const spec = {
       get: {
         tags: ['Disputes'],
         summary: 'Get the dispute view for a contract',
-        security: [{ adminToken: [] }],
+        security: [{ adminToken: [] }, { apiKey: [] }],
         parameters: [{ name: 'contractId', in: 'path', required: true, schema: { type: 'integer' } }],
         responses: {
           ...ok('Dispute view', { $ref: '#/components/schemas/DisputeView' }),
           400: errorResponse('contractId must be a positive integer'),
-          401: errorResponse('Missing or invalid admin bearer token'),
-          404: errorResponse('Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured'),
+          401: errorResponse('Missing or invalid admin bearer token or API key'),
+          403: errorResponse('The API key lacks the admin:read scope (insufficient_scope)'),
+          404: errorResponse('Contract has never had a dispute (dispute_not_found), or neither ADMIN_READ_TOKEN nor API_KEYS is configured'),
         },
       },
     },
@@ -714,6 +738,21 @@ const spec = {
         responses: {
           ...ok('Challenge issued.', { $ref: '#/components/schemas/ChallengeResponse' }),
           400: errorResponse('Invalid Stellar address (invalid_address).'),
+        },
+      },
+    },
+    '/api/v1/auth/logout': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Revoke the presented wallet token',
+        description:
+          'Revokes the bearer token by its `jti` until it would have expired. Later requests with that token get ' +
+          '401 with `WWW-Authenticate: Bearer`; other tokens of the same wallet keep working. The revocation list ' +
+          'is held in memory per process.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          204: { description: 'Token revoked' },
+          401: errorResponse('Missing, invalid, expired or already revoked token'),
         },
       },
     },
@@ -1802,6 +1841,7 @@ const spec = {
       WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } }, escrowId: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } } } },
       WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean', default: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' }, previousExpiresAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, nextAttemptAt: { type: 'string', format: 'date-time', nullable: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, redeliveryOf: { type: 'string', description: 'Original delivery id for manual redeliveries' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
         required: ['id', 'client', 'freelancer', 'token', 'milestones', 'totalAmount', 'fundedAmount', 'releasedAmount', 'status', 'reputationIssued', 'source', 'latestLedger'],
