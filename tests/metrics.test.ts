@@ -2,6 +2,8 @@ import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { Histogram } from '../src/metrics';
+import { InMemoryEventStore } from '../src/indexer/store';
+import { EventIndexer } from '../src/indexer/indexer';
 
 function metricLine(body: string, name: string, labels: Record<string, string>): string | undefined {
   const labelPairs = Object.entries(labels)
@@ -58,6 +60,12 @@ describe('Prometheus metrics', () => {
     expect(res.text).toContain('# TYPE escrow_contracts gauge');
     expect(res.text).toContain('# TYPE process_uptime_seconds gauge');
     expect(res.text).toContain('# TYPE nodejs_heap_used_bytes gauge');
+    expect(res.text).toContain('# TYPE indexer_events_stored gauge');
+    expect(res.text).toContain('# TYPE indexer_lag_ledgers gauge');
+    expect(res.text).toContain('# TYPE indexer_last_run_timestamp_seconds gauge');
+    expect(res.text).toContain('# TYPE process_start_time_seconds gauge');
+    expect(res.text).toContain('# TYPE process_resident_memory_bytes gauge');
+    expect(res.text).toContain('# TYPE tx_submissions_total counter');
   });
 
   it('counts requests by route pattern, not raw path', async () => {
@@ -152,6 +160,40 @@ describe('Prometheus metrics', () => {
 
     const xlmReleased = metricValue(res.text, 'escrow_value_released', { token: 'XLM' });
     expect(xlmReleased).toBe(500);
+  });
+
+  it('populates indexer metrics from eventIndexer.getState()', async () => {
+    process.env.METRICS_TOKEN = 'test-token';
+    const eventStore = new InMemoryEventStore();
+    const eventIndexer = new EventIndexer(eventStore);
+    const app = createApp(new EscrowStore(), eventStore, eventIndexer);
+
+    const res = await request(app).get('/metrics').set('authorization', 'Bearer test-token');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('# TYPE indexer_events_stored gauge');
+    expect(res.text).toContain('# TYPE indexer_lag_ledgers gauge');
+    expect(res.text).toContain('# TYPE indexer_last_run_timestamp_seconds gauge');
+
+    const eventsStoredValue = metricValue(res.text, 'indexer_events_stored', {});
+    expect(eventsStoredValue).toBe(0);
+
+    const lagLedgersValue = metricValue(res.text, 'indexer_lag_ledgers', {});
+    expect(lagLedgersValue).toBe(0);
+  });
+
+  it('populates process_start_time_seconds and process_resident_memory_bytes', async () => {
+    process.env.METRICS_TOKEN = 'test-token';
+    const app = createApp(new EscrowStore());
+    const res = await request(app).get('/metrics').set('authorization', 'Bearer test-token');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('# TYPE process_start_time_seconds gauge');
+    expect(res.text).toContain('# TYPE process_resident_memory_bytes gauge');
+
+    const startTimeValue = metricValue(res.text, 'process_start_time_seconds', {});
+    expect(startTimeValue).toBeGreaterThan(0);
+
+    const residentMemoryValue = metricValue(res.text, 'process_resident_memory_bytes', {});
+    expect(residentMemoryValue).toBeGreaterThan(0);
   });
 });
 

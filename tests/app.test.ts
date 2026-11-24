@@ -545,3 +545,60 @@ describe('unfunded contract edits and withdrawal', () => {
   });
 });
 
+describe('SEED_DEMO_DATA switch', () => {
+  const originalSeedDemoData = process.env.SEED_DEMO_DATA;
+
+  afterEach(() => {
+    if (originalSeedDemoData === undefined) {
+      delete process.env.SEED_DEMO_DATA;
+    } else {
+      process.env.SEED_DEMO_DATA = originalSeedDemoData;
+    }
+  });
+
+  it('starts with an empty contract list and zeroed stats when SEED_DEMO_DATA=false', async () => {
+    process.env.SEED_DEMO_DATA = 'false';
+    const app = createApp();
+
+    const list = await request(app).get('/api/v1/contracts').expect(200);
+    expect(list.body.data).toEqual([]);
+
+    const stats = await request(app).get('/api/v1/stats').expect(200);
+    expect(stats.body).toEqual({
+      contracts: 0,
+      byStatus: {},
+      totalEscrowed: 0,
+      totalEscrowedUnits: '0',
+      totalReleased: 0,
+      totalReleasedUnits: '0',
+    });
+  });
+
+  it('keeps seeded demo data when SEED_DEMO_DATA is unset', async () => {
+    delete process.env.SEED_DEMO_DATA;
+    const app = createApp();
+
+    const list = await request(app).get('/api/v1/contracts').expect(200);
+    expect(list.body.data.length).toBeGreaterThan(0);
+
+    const stats = await request(app).get('/api/v1/stats').expect(200);
+    expect(stats.body.contracts).toBeGreaterThan(0);
+  });
+
+  it('never seeds injected stores implicitly', async () => {
+    delete process.env.SEED_DEMO_DATA;
+    const directStoreApp = createApp(new EscrowStore());
+    const depsStoreApp = createApp({ store: new EscrowStore() });
+
+    const directList = await request(directStoreApp).get('/api/v1/contracts').expect(200);
+    expect(directList.body.data).toEqual([]);
+    const directStats = await request(directStoreApp).get('/api/v1/stats').expect(200);
+    expect(directStats.body.contracts).toBe(0);
+
+    const depsList = await request(depsStoreApp).get('/api/v1/contracts').expect(200);
+    expect(depsList.body.data).toEqual([]);
+    const depsStats = await request(depsStoreApp).get('/api/v1/stats').expect(200);
+    expect(depsStats.body.contracts).toBe(0);
+  });
+});
+
