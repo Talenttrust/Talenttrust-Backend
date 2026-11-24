@@ -403,3 +403,37 @@ describe('API key expiry', () => {
     });
   });
 });
+
+describe('admin:read scope on the dispute queue', () => {
+  afterEach(() => { delete process.env.ADMIN_READ_TOKEN; });
+
+  it('lets an admin:read key list disputes and read a dispute', async () => {
+    const { app, id } = disputedApp(makeApiKeys({ scopes: [SCOPES.ADMIN_READ] }));
+    const list = await request(app).get('/api/v1/disputes').set('X-API-Key', SECRET).expect(200);
+    expect(list.body.data).toHaveLength(1);
+    const detail = await request(app).get(`/api/v1/disputes/${id}`).set('Authorization', `ApiKey ${SECRET}`).expect(200);
+    expect(detail.body.contractId).toBe(id);
+  });
+
+  it('returns 403 insufficient_scope for a key without admin:read', async () => {
+    const { app } = disputedApp(makeApiKeys({ scopes: [SCOPES.DISPUTES_RESOLVE] }));
+    const res = await request(app).get('/api/v1/disputes').set('X-API-Key', SECRET).expect(403);
+    expect(res.body).toMatchObject({ error: 'insufficient_scope', required: 'admin:read' });
+  });
+
+  it('rejects an expired admin:read key with 401', async () => {
+    const apiKeys = parseApiKeysConfig(
+      JSON.stringify([{ id: 'old', hash: sha256(SECRET), scopes: [SCOPES.ADMIN_READ], expiresAt: '2020-01-01T00:00:00Z' }]),
+    );
+    const { app } = disputedApp(apiKeys);
+    const res = await request(app).get('/api/v1/disputes').set('X-API-Key', SECRET).expect(401);
+    expect(res.body.message).toBe('API key expired');
+  });
+
+  it('does not let an admin:read key resolve disputes', async () => {
+    const { app, id } = disputedApp(makeApiKeys({ scopes: [SCOPES.ADMIN_READ] }));
+    const res = await request(app).post(`/api/v1/contracts/${id}/resolve`).set('X-API-Key', SECRET).send({ freelancerShare: 100 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('insufficient_scope');
+  });
+});

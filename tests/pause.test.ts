@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { PauseGuard } from '../src/pauseGuard';
+import { PauseGuard, defaultRpcReader } from '../src/pauseGuard';
 
 const contract = { client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] };
 
@@ -64,5 +64,61 @@ describe('pause guard', () => {
     await Promise.all([guard.isPaused(), guard.isPaused(), guard.isPaused()]);
     await guard.isPaused();
     expect(rpcReader).toHaveBeenCalledTimes(1);
+  });
+
+  describe('defaultRpcReader network passphrase', () => {
+    const originalNetwork = process.env.STELLAR_NETWORK;
+    const originalPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+
+    afterEach(() => {
+      if (originalNetwork === undefined) delete process.env.STELLAR_NETWORK;
+      else process.env.STELLAR_NETWORK = originalNetwork;
+      if (originalPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = originalPassphrase;
+    });
+
+    it('derives passphrase from config for futurenet and public', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const StellarSdk = require('@stellar/stellar-sdk');
+      let capturedTx: any;
+      const server = {
+        simulateTransaction: jest.fn().mockImplementation((tx) => {
+          capturedTx = tx;
+          return Promise.resolve({ result: { retval: StellarSdk.nativeToScVal(false) } });
+        }),
+      };
+
+      process.env.STELLAR_NETWORK = 'futurenet';
+      delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      await defaultRpcReader(undefined, server);
+      expect(capturedTx.networkPassphrase).toBe('Test SDF Future Network ; October 2022');
+
+      process.env.STELLAR_NETWORK = 'public';
+      await defaultRpcReader(undefined, server);
+      expect(capturedTx.networkPassphrase).toBe('Public Global Stellar Network ; September 2015');
+
+      process.env.STELLAR_NETWORK_PASSPHRASE = 'Custom Override Passphrase ; 2026';
+      await defaultRpcReader(undefined, server);
+      expect(capturedTx.networkPassphrase).toBe('Custom Override Passphrase ; 2026');
+    });
+
+    it('honours explicit networkPassphrase argument and PauseGuard option', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const StellarSdk = require('@stellar/stellar-sdk');
+      let capturedTx: any;
+      const server = {
+        simulateTransaction: jest.fn().mockImplementation((tx) => {
+          capturedTx = tx;
+          return Promise.resolve({ result: { retval: StellarSdk.nativeToScVal(false) } });
+        }),
+      };
+
+      await defaultRpcReader('Explicit Arg Passphrase', server);
+      expect(capturedTx.networkPassphrase).toBe('Explicit Arg Passphrase');
+
+      const guard = new PauseGuard({ networkPassphrase: 'Guard Option Passphrase', server });
+      await guard.isPaused();
+      expect(capturedTx.networkPassphrase).toBe('Guard Option Passphrase');
+    });
   });
 });

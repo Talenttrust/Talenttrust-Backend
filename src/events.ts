@@ -11,6 +11,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'reputation.issued',
   'reputation.updated',
   'contract.drift_detected',
+  'chain.event',
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
