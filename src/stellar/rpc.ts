@@ -2,7 +2,6 @@ import {
   Account,
   BASE_FEE,
   Contract,
-  Networks,
   Transaction,
   TransactionBuilder,
   rpc,
@@ -10,12 +9,10 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import { config } from '../config';
+import { getRpcServer } from './server';
 
 /** Well-known all-zero account, used only as a throwaway simulation source. */
 export const THROWAWAY_SOURCE_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
-
-export const networkPassphraseFor = (network: string): string =>
-  network === 'public' || network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
 export class RpcError extends Error {}
 export class RpcTimeoutError extends RpcError {}
@@ -65,6 +62,7 @@ export interface ContractReaderOptions {
   rpcUrl: string;
   contractId: string;
   network?: string;
+  networkPassphrase?: string;
   timeoutMs?: number;
   transport?: RpcTransport;
 }
@@ -82,9 +80,9 @@ export class ContractReader {
 
   constructor(options: ContractReaderOptions) {
     this.contractId = options.contractId;
-    this.networkPassphrase = networkPassphraseFor(options.network ?? 'testnet');
+    this.networkPassphrase = options.networkPassphrase ?? config.networkPassphrase;
     this.timeoutMs = options.timeoutMs ?? config.rpcTimeoutMs;
-    this.transport = options.transport ?? (new rpc.Server(options.rpcUrl) as unknown as RpcTransport);
+    this.transport = options.transport ?? (getRpcServer(options.rpcUrl) as unknown as RpcTransport);
   }
 
   async getLatestLedger(): Promise<number> {

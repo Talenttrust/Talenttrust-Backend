@@ -665,3 +665,122 @@ describe('SorobanRpcChainReader demo fixture gating', () => {
     expect(transport.simulateTransaction).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('EscrowStore.reconcileParity', () => {
+  it('reports in-sync and drifted linked contracts and continues when one chain read fails', async () => {
+    const store = new EscrowStore();
+    const fakeChain = new FakeChainReader();
+    const token = DEFAULT_TOKEN;
+
+    const inSync = store.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
+    const drifted = store.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
+    const unreachable = store.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
+
+    fakeChain.escrows.set('R1', {
+      client: 'GA', freelancer: 'GB', token,
+      totalAmount: '100', fundedAmount: '0', releasedAmount: '0', status: 'Created',
+      milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+    });
+    fakeChain.escrows.set('R2', {
+      client: 'GA', freelancer: 'GB', token,
+      totalAmount: '100', fundedAmount: '0', releasedAmount: '0', status: 'Created',
+      milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+    });
+    fakeChain.escrows.set('R3', {
+      client: 'GA', freelancer: 'GB', token,
+      totalAmount: '100', fundedAmount: '0', releasedAmount: '0', status: 'Created',
+      milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+    });
+
+    await store.linkEscrow(inSync.id, 'R1', fakeChain);
+    await store.linkEscrow(drifted.id, 'R2', fakeChain);
+    await store.linkEscrow(unreachable.id, 'R3', fakeChain);
+
+    // introduce drift and make one contract unreachable during reconciliation
+    fakeChain.escrows.set('R2', {
+      client: 'GA', freelancer: 'GB', token,
+      totalAmount: '100', fundedAmount: '100', releasedAmount: '0', status: 'Funded',
+      milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+    });
+    const originalGet = fakeChain.getContract.bind(fakeChain);
+    fakeChain.getContract = async (escrowId: string) => {
+      if (escrowId === 'R3') throw new Error('simulated rpc failure');
+      return originalGet(escrowId);
+    };
+
+    const driftEvents: any[] = [];
+    store.events.on((evt: any) => {
+      if (evt.eventType === 'contract.drift_detected') driftEvents.push(evt);
+    });
+
+    const result = await store.reconcileParity(fakeChain, { concurrency: 5, timeBudgetMs: 1000 });
+    expect(result.checked).toBe(3);
+    expect(result.inSync).toBe(1);
+    expect(result.drifted).toBe(1);
+    expect(result.unreachable).toBe(1);
+    expect(result.driftedContractIds).toEqual([drifted.id]);
+    expect(result.timedOut).toBe(false);
+    expect(driftEvents).toHaveLength(1);
+    expect(driftEvents[0].data.contractId).toBe(drifted.id);
+  });
+
+  it('enforces concurrency and time budget options', async () => {
+    const store = new EscrowStore();
+    const token = DEFAULT_TOKEN;
+    class SlowReader implements ChainReader {
+      active = 0;
+      maxActive = 0;
+      async getContract(escrowId: string): Promise<ChainReaderResult | null> {
+        this.active++;
+        this.maxActive = Math.max(this.maxActive, this.active);
+        await new Promise((r) => setTimeout(r, escrowId.startsWith('B') ? 80 : 30));
+        this.active--;
+        const c = store.list({ linked: true }).find((x) => x.chain?.escrowId === escrowId)?.chain;
+        return {
+          contract: {
+            client: 'GA', freelancer: 'GB', token,
+            totalAmount: '100', fundedAmount: '0', releasedAmount: '0', status: 'Created',
+            milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+          },
+          latestLedger: 1,
+        };
+      }
+    }
+    const reader = new SlowReader() as any;
+    // seed 6 linked contracts
+    for (let i = 1; i <= 6; i++) {
+      const c = store.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
+      (store as any).contracts.get(c.id).chain = {
+        escrowId: `C${i}`, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
+      };
+    }
+    const conc = await store.reconcileParity(reader, { concurrency: 5, timeBudgetMs: 2000 });
+    expect(conc.checked).toBe(6);
+    expect(reader.maxActive).toBeLessThanOrEqual(5);
+
+    // time budget: slow reader and tiny budget
+    const store2 = new EscrowStore();
+    class VerySlowReader implements ChainReader {
+      async getContract(): Promise<ChainReaderResult | null> {
+        await new Promise((r) => setTimeout(r, 100));
+        return {
+          contract: {
+            client: 'GA', freelancer: 'GB', token,
+            totalAmount: '100', fundedAmount: '0', releasedAmount: '0', status: 'Created',
+            milestones: [{ index: 0, amount: '100', released: false }], reputationIssued: false,
+          },
+          latestLedger: 1,
+        };
+      }
+    }
+    for (let i = 1; i <= 5; i++) {
+      const c = store2.create({ client: 'GA', freelancer: 'GB', token, milestones: [{ amount: 100 }] });
+      (store2 as any).contracts.get(c.id).chain = {
+        escrowId: `B${i}`, linkedAt: new Date().toISOString(), status: 'in_sync', drift: [], lastVerifiedAt: new Date().toISOString(),
+      };
+    }
+    const timed = await store2.reconcileParity(new VerySlowReader() as any, { concurrency: 2, timeBudgetMs: 10 });
+    expect(timed.checked).toBeLessThan(5);
+    expect(timed.timedOut).toBe(true);
+  });
+});

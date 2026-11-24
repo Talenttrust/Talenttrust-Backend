@@ -50,6 +50,26 @@ describe('webhook signatures and URL validation', () => {
 });
 
 describe('webhook delivery', () => {
+  it('pins delivery connections to the resolver results from that delivery', async () => {
+    lookupMock
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }])
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    const client = jest.fn(async (url: URL & { addresses: string[] }) => {
+      expect(url.hostname).toBe('webhooks.example.com');
+      expect(url.addresses).toEqual(['93.184.216.34']);
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      resolver: lookupMock,
+    });
+    const created = await manager.create({ url: 'https://webhooks.example.com/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 1);
+    expect(client).toHaveBeenCalledTimes(1);
+  });
+
   it('emits one event only after a successful mutation', () => {
     const events = new StoreEventEmitter();
     const seen: string[] = [];
@@ -111,6 +131,54 @@ describe('webhook delivery', () => {
     expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 6, statusCode: 503 });
   });
 
+  it('retries 429 then succeeds on attempt 2', async () => {
+    const responses = [429, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const sleeps = jest.fn(async () => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it.each([408, 425])('retries transient %i responses', async (statusCode) => {
+    const responses = [statusCode, 200];
+    const client = jest.fn(async () => ({ statusCode: responses.shift() ?? 500 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
+  it('treats 404 as a terminal single-attempt failure', async () => {
+    const client = jest.fn(async () => ({ statusCode: 404 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(created.subscription.id).every((d) => d.status !== 'pending') && client.mock.calls.length >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(client).toHaveBeenCalledTimes(1);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'failed', attempts: 1, statusCode: 404 });
+  });
+
+  it('honours a numeric Retry-After on 429 up to the 30s cap', async () => {
+    const responses = [{ statusCode: 429, headers: { 'retry-after': '120' } }, { statusCode: 200 }];
+    const client = jest.fn(async () => responses.shift() ?? { statusCode: 500 });
+    const sleeps = jest.fn(async (_ms: number) => undefined);
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client as any, sleep: sleeps, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 2);
+    expect(sleeps.mock.calls[0][0]).toBeLessThanOrEqual(30_000);
+    expect((await manager.history(created.subscription.id))[0]).toMatchObject({ status: 'success', attempts: 2 });
+  });
+
   it('supports wildcard subscriptions, bounded history, and secret rotation', async () => {
     const client = jest.fn(async () => ({ statusCode: 200 }));
     const events = new StoreEventEmitter();
@@ -124,6 +192,21 @@ describe('webhook delivery', () => {
     const rotated = manager.rotateSecret(created.subscription.id);
     expect(rotated.secret).not.toBe(created.secret);
     expect(manager.get(created.subscription.id)).not.toHaveProperty('secret');
+  });
+
+  it('filters by contract party and ID and skips events without a contract', async () => {
+    const client = jest.fn(async () => ({ statusCode: 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'], contractIds: [7] } });
+    const contract = (id: number, clientName: string, freelancer: string) => ({ contract: { id, client: clientName, freelancer } });
+    events.emit('contract.created', contract(7, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(8, 'client-a', 'freelancer'));
+    events.emit('contract.created', contract(7, 'other-client', 'other-freelancer'));
+    events.emit('contract.created', { contractId: 7 });
+    await waitFor(() => client.mock.calls.length === 1);
+    expect(manager.get(created.subscription.id).filter).toEqual({ parties: ['client-a'], contractIds: [7] });
+    expect(client).toHaveBeenCalledTimes(1);
   });
 
   it('does not block the originating mutation on a slow receiver', async () => {
@@ -216,7 +299,10 @@ describe('webhook reserved address ranges', () => {
       { address: '93.184.216.34', family: 4 },
       { address: '2606:4700:4700::1111', family: 6 },
     ]);
-    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toBeInstanceOf(URL);
+    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toMatchObject({
+      hostname: 'webhooks.example.com',
+      addresses: ['93.184.216.34', '2606:4700:4700::1111'],
+    });
   });
 
   it('fails safely for malformed IP literals', async () => {
@@ -318,16 +404,38 @@ describe('webhook management routes', () => {
 
   it('requires the configured token, returns one-time secrets, and supports CRUD/rotation/history', async () => {
     const app = createApp(new EscrowStore());
-    await request(app).get('/api/v1/webhook-subscriptions').expect(401);
+    const unauth = await request(app).get('/api/v1/webhook-subscriptions');
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers['cache-control']).toBe('no-store');
+    expect(unauth.headers['pragma']).toBe('no-cache');
     const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'] }).expect(201);
     expect(created.body.secret).toMatch(/^whsec_/);
+    expect(created.headers['cache-control']).toBe('no-store');
+    expect(created.headers['pragma']).toBe('no-cache');
     const id = created.body.id;
     const fetched = await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
     expect(fetched.body).not.toHaveProperty('secret');
+    expect(fetched.headers['cache-control']).toBe('no-store');
     await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ active: false }).expect(200);
-    await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    const rotated = await request(app).post(`/api/v1/webhook-subscriptions/${id}/rotate-secret`).set(auth).expect(200);
+    expect(rotated.headers['cache-control']).toBe('no-store');
     await request(app).get(`/api/v1/webhook-subscriptions/${id}/deliveries`).set(auth).expect(200);
     await request(app).delete(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200);
+  });
+
+  it('accepts, returns, updates, clears, and validates subscription filters', async () => {
+    const app = createApp(new EscrowStore());
+    const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter: { parties: ['client-a'] } }).expect(201);
+    const id = created.body.id;
+    expect(created.body.filter).toEqual({ parties: ['client-a'] });
+    expect((await request(app).get(`/api/v1/webhook-subscriptions/${id}`).set(auth).expect(200)).body.filter).toEqual({ parties: ['client-a'] });
+    const updated = await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: { contractIds: [7] } }).expect(200);
+    expect(updated.body.filter).toEqual({ contractIds: [7] });
+    expect((await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter: null }).expect(200)).body).not.toHaveProperty('filter');
+    for (const filter of [{ parties: [] }, { parties: Array.from({ length: 51 }, (_, i) => `p${i}`) }, { contractIds: [0] }, { contractIds: ['7'] }, { foo: ['bar'] }, {}]) {
+      await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: 'http://localhost:12345/hook', events: ['*'], filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+      await request(app).patch(`/api/v1/webhook-subscriptions/${id}`).set(auth).send({ filter }).expect(400).expect(({ body }) => expect(body.error).toBe('invalid_filter'));
+    }
   });
 
   it('returns 404 when token configuration is unset and rejects malformed requests', async () => {
@@ -380,3 +488,413 @@ describe('webhook management routes', () => {
     expect(operation.responses['400']).toBeDefined();
   });
 });
+
+describe('webhook redelivery', () => {
+  const failThenSucceed = async (firstStatus = 400) => {
+    const calls: Array<{ body: string; headers: Record<string, string> }> = [];
+    const statuses = [firstStatus];
+    const client = jest.fn(async (_url: URL, body: string, headers: Record<string, string>) => {
+      calls.push({ body, headers });
+      return { statusCode: statuses.shift() ?? 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, random: () => 0.5 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    const event = events.emit('contract.created', { contract: { id: 1 } });
+    await waitFor(() => manager.history(id)[0]?.status === 'failed');
+    return { manager, id, event, calls, secret: created.secret };
+  };
+
+  it('re-sends the original payload with the same X-Event-ID and a fresh X-Delivery-ID', async () => {
+    const { manager, id, event, calls, secret } = await failThenSucceed();
+    const original = manager.history(id)[0];
+    const redelivery = manager.redeliver(id, original.id);
+    expect(redelivery).toMatchObject({ eventId: event.eventId, eventType: 'contract.created', status: 'pending', redeliveryOf: original.id });
+    expect(redelivery.id).not.toBe(original.id);
+    await waitFor(() => manager.history(id)[0]?.status === 'success');
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body).toBe(calls[0].body);
+    expect(JSON.parse(calls[1].body)).toEqual(event);
+    expect(calls[1].headers['X-Event-ID']).toBe(event.eventId);
+    expect(calls[1].headers['X-Delivery-ID']).toBe(redelivery.id);
+    expect(calls[1].headers['X-Delivery-ID']).not.toBe(calls[0].headers['X-Delivery-ID']);
+    expect(verifyWebhookSignature(secret, calls[1].headers, calls[1].body, Number.MAX_SAFE_INTEGER)).toBe(true);
+    const history = manager.history(id);
+    expect(history.map((delivery) => delivery.status)).toEqual(['success', 'failed']);
+    for (const delivery of history) {
+      expect(delivery).not.toHaveProperty('payload');
+      expect(JSON.stringify(delivery)).not.toContain('"contract"');
+    }
+  });
+
+  it('allows redelivering a successful delivery', async () => {
+    const { manager, id, calls } = await failThenSucceed();
+    manager.redeliver(id, manager.history(id)[0].id);
+    await waitFor(() => manager.history(id)[0]?.status === 'success');
+    manager.redeliver(id, manager.history(id)[0].id);
+    await waitFor(() => calls.length === 3);
+  });
+
+  it('rejects pending deliveries with 409', async () => {
+    let release: (value: { statusCode: number }) => void = () => undefined;
+    const client = jest.fn(() => new Promise<{ statusCode: number }>((resolve) => { release = resolve; }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 1);
+    const pending = manager.history(created.subscription.id)[0];
+    expect(pending.status).toBe('pending');
+    expect(() => manager.redeliver(created.subscription.id, pending.id)).toThrow(expect.objectContaining({ status: 409, code: 'delivery_pending' }));
+    release({ statusCode: 200 });
+  });
+
+  it('returns 404 for unknown subscriptions, unknown deliveries and deliveries of another subscription', async () => {
+    const { manager, id } = await failThenSucceed();
+    const other = await manager.create({ url: 'http://localhost:12345/other', events: ['contract.cancelled'] });
+    const deliveryId = manager.history(id)[0].id;
+    expect(() => manager.redeliver('missing', deliveryId)).toThrow(expect.objectContaining({ status: 404, code: 'webhook_not_found' }));
+    expect(() => manager.redeliver(id, 'missing')).toThrow(expect.objectContaining({ status: 404, code: 'webhook_delivery_not_found' }));
+    expect(() => manager.redeliver(other.subscription.id, deliveryId)).toThrow(expect.objectContaining({ status: 404, code: 'webhook_delivery_not_found' }));
+  });
+
+  it('drops stored payloads together with trimmed history', async () => {
+    const client = jest.fn(async () => ({ statusCode: 400 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined, maxHistory: 1 });
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    const id = created.subscription.id;
+    events.emit('contract.created', {});
+    await waitFor(() => manager.history(id)[0]?.status === 'failed');
+    const first = manager.history(id)[0].id;
+    events.emit('contract.cancelled', {});
+    await waitFor(() => manager.history(id).length === 1 && manager.history(id)[0].id !== first && manager.history(id)[0].status === 'failed');
+    expect(() => manager.redeliver(id, first)).toThrow(expect.objectContaining({ status: 404 }));
+  });
+
+  describe('POST /api/v1/webhook-subscriptions/:id/deliveries/:deliveryId/redeliver', () => {
+    const token = 'test-admin-token';
+    const auth = { Authorization: `Bearer ${token}` };
+    beforeEach(() => { process.env.WEBHOOK_ADMIN_TOKEN = token; });
+    afterEach(() => { delete process.env.WEBHOOK_ADMIN_TOKEN; });
+
+    it('redelivers a failed delivery and enforces auth, 404 and the payload-free history', async () => {
+      const received: Array<{ body: string; headers: http.IncomingHttpHeaders }> = [];
+      const statuses = [400];
+      const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => { received.push({ body, headers: req.headers }); res.statusCode = statuses.shift() ?? 200; res.end(); });
+      });
+      await new Promise<void>((resolve) => server.listen(0, 'localhost', resolve));
+      try {
+        const port = (server.address() as { port: number }).port;
+        const store = new EscrowStore();
+        const app = createApp(store);
+        const created = await request(app).post('/api/v1/webhook-subscriptions').set(auth).send({ url: `http://localhost:${port}/hook`, events: ['contract.created'] }).expect(201);
+        const id = created.body.id as string;
+        store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+        let history: request.Response | undefined;
+        await waitFor(() => received.length === 1);
+        for (let i = 0; i < 50; i += 1) {
+          history = await request(app).get(`/api/v1/webhook-subscriptions/${id}/deliveries`).set(auth);
+          if (history.body.data[0]?.status === 'failed') break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        const original = history!.body.data[0];
+        expect(original.status).toBe('failed');
+        expect(original).not.toHaveProperty('payload');
+        expect(JSON.stringify(history!.body)).not.toContain('freelancer');
+
+        const path = `/api/v1/webhook-subscriptions/${id}/deliveries/${original.id}/redeliver`;
+        await request(app).post(path).expect(401);
+        await request(app).post(path).set('Authorization', 'Bearer wrong').expect(401);
+        await request(app).post(`/api/v1/webhook-subscriptions/${id}/deliveries/unknown/redeliver`).set(auth).expect(404);
+        await request(app).post(`/api/v1/webhook-subscriptions/unknown/deliveries/${original.id}/redeliver`).set(auth).expect(404);
+
+        const redelivered = await request(app).post(path).set(auth).expect(202);
+        expect(redelivered.headers['cache-control']).toBe('no-store');
+        expect(redelivered.body).toMatchObject({ eventId: original.eventId, redeliveryOf: original.id, status: 'pending' });
+        await waitFor(() => received.length === 2);
+        expect(received[1].body).toBe(received[0].body);
+        expect(received[1].headers['x-event-id']).toBe(received[0].headers['x-event-id']);
+        expect(received[1].headers['x-delivery-id']).toBe(redelivered.body.id);
+        expect(received[1].headers['x-delivery-id']).not.toBe(received[0].headers['x-delivery-id']);
+
+        delete process.env.WEBHOOK_ADMIN_TOKEN;
+        await request(app).post(path).set(auth).expect(404);
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+  });
+});
+
+describe('contract.updated and reputation.updated events', () => {
+  const setup = () => {
+    const events = new StoreEventEmitter();
+    const seen: Array<{ eventType: string; data: Record<string, unknown> }> = [];
+    events.on((value) => seen.push({ eventType: value.eventType, data: value.data }));
+    let nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+    const store = new EscrowStore({ events, clock: () => new Date(nowMs) });
+    return { store, seen, advance: (ms: number) => { nowMs += ms; } };
+  };
+
+  it('emits contract.updated exactly once per edit, with the public contract and revision', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    seen.length = 0;
+    store.edit(contract.id, { client: 'client', title: 'Renamed' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].eventType).toBe('contract.updated');
+    expect(seen[0].data.contract).toMatchObject({ id: contract.id, title: 'Renamed', revision: contract.revision + 1 });
+    expect(seen[0].data.revision).toMatchObject({ revision: contract.revision + 1, changes: [{ field: 'title', to: 'Renamed' }] });
+  });
+
+  it('emits contract.updated exactly once per deadline extension, without a revision', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    seen.length = 0;
+    const later = new Date(Date.parse(contract.fundingDeadline!) + 86_400_000).toISOString();
+    const updated = store.extendDeadline(contract.id, 'client', later);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].eventType).toBe('contract.updated');
+    expect(seen[0].data).not.toHaveProperty('revision');
+    expect(seen[0].data.contract).toMatchObject({ id: contract.id, fundingDeadline: updated.fundingDeadline });
+  });
+
+  it('does not emit contract.updated when an edit or extension fails', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    seen.length = 0;
+    expect(() => store.edit(contract.id, { client: 'intruder', title: 'x' })).toThrow();
+    expect(() => store.edit(contract.id, { client: 'client' })).toThrow();
+    expect(() => store.extendDeadline(contract.id, 'intruder', '2026-01-10T00:00:00.000Z')).toThrow();
+    expect(() => store.extendDeadline(contract.id, 'client', 'not-a-date')).toThrow();
+    store.deposit(contract.id, 1);
+    seen.length = 0;
+    expect(() => store.edit(contract.id, { client: 'client', title: 'x' })).toThrow();
+    expect(seen).toEqual([]);
+  });
+
+  it('emits reputation.updated with the reviewee reputation for a freelancer-to-client review', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    store.deposit(contract.id, 1);
+    store.release(contract.id, 0);
+    seen.length = 0;
+    expect(() => store.createReview(contract.id, { reviewer: 'intruder', rating: 5 })).toThrow();
+    expect(() => store.createReview(contract.id, { reviewer: 'freelancer', rating: 9 })).toThrow();
+    expect(seen).toEqual([]);
+    store.createReview(contract.id, { reviewer: 'freelancer', rating: 4 });
+    expect(seen.map((event) => event.eventType)).toEqual(['reputation.updated']);
+    expect(seen[0].data.review).toMatchObject({ reviewer: 'freelancer', reviewee: 'client', role: 'freelancer_to_client', rating: 4 });
+    expect(seen[0].data.reputation).toMatchObject({ address: 'client', asClient: { completedContracts: 1, averageRating: 4 } });
+    expect(seen[0].data.contract).toMatchObject({ id: contract.id });
+    expect(() => store.createReview(contract.id, { reviewer: 'freelancer', rating: 4 })).toThrow();
+    expect(seen).toHaveLength(1);
+  });
+
+  it('keeps rate() on reputation.issued only', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    store.deposit(contract.id, 1);
+    store.release(contract.id, 0);
+    seen.length = 0;
+    store.rate(contract.id, 5);
+    expect(seen.map((event) => event.eventType)).toEqual(['reputation.issued']);
+  });
+
+  it('never includes dispute reasons in contract.updated or reputation.updated payloads', () => {
+    const { store, seen } = setup();
+    const contract = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 2 }] });
+    store.deposit(contract.id, 2);
+    store.openDispute(contract.id, 'client', 'secret-dispute-reason');
+    store.resolveDispute(contract.id, 1);
+    seen.length = 0;
+    store.createReview(contract.id, { reviewer: 'freelancer', rating: 3 });
+    const other = store.create({ client: 'client', freelancer: 'freelancer', milestones: [{ amount: 1 }] });
+    store.edit(other.id, { client: 'client', title: 'Edited' });
+    expect(seen.map((event) => event.eventType)).toEqual(['reputation.updated', 'contract.created', 'contract.updated']);
+    expect(JSON.stringify(seen)).not.toContain('secret-dispute-reason');
+  });
+
+  it('delivers contract.updated and reputation.updated over HTTP routes exactly once', async () => {
+    const events = new StoreEventEmitter();
+    const seen: string[] = [];
+    events.on((value) => seen.push(value.eventType));
+    const store = new EscrowStore(events);
+    const app = createApp(store);
+    const created = await request(app).post('/api/v1/contracts').send({ client: 'GCLIENT', freelancer: 'GFREELANCER', milestones: [{ amount: 1 }] }).expect(201);
+    seen.length = 0;
+    await request(app).patch(`/api/v1/contracts/${created.body.id}`).send({ client: 'GCLIENT', title: 'New title' }).expect(200);
+    expect(seen).toEqual(['contract.updated']);
+    await request(app).patch(`/api/v1/contracts/${created.body.id}`).send({ client: 'GOTHER', title: 'Nope' }).expect(403);
+    expect(seen).toEqual(['contract.updated']);
+  });
+});
+
+describe('secret rotation grace period and dual-signing (Issue #1692)', () => {
+  it('dual-signs deliveries during rotation grace period and allows verification with old and new secret', async () => {
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody = '';
+    const client = jest.fn(async (_url: any, body: any, headers: any) => {
+      capturedHeaders = headers;
+      capturedBody = body;
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const { subscription, secret: originalSecret } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Rotate with 3600 seconds grace period
+    const { secret: newSecret, subscription: updatedSub } = manager.rotateSecret(subscription.id, 3600);
+    expect(newSecret).not.toBe(originalSecret);
+    expect(updatedSub.previousExpiresAt).toBeDefined();
+
+    // Trigger delivery
+    events.emit('contract.created', { contractId: 1 });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    const sigHeader = capturedHeaders['X-Signature'];
+    expect(sigHeader).toBeDefined();
+    // Signature header should contain both signatures separated by comma
+    expect(sigHeader.split(',')).toHaveLength(2);
+
+    // Both new and original secrets verify the payload
+    expect(verifyWebhookSignature(newSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature(originalSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature('wrong_secret', capturedHeaders, capturedBody)).toBe(false);
+  });
+
+  it('drops previous secret once grace period expires', async () => {
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody = '';
+    const client = jest.fn(async (_url: any, body: any, headers: any) => {
+      capturedHeaders = headers;
+      capturedBody = body;
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+    const { subscription, secret: originalSecret } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Rotate with 0 grace period (immediate expiry)
+    const { secret: newSecret } = manager.rotateSecret(subscription.id, 0);
+
+    events.emit('contract.created', { contractId: 1 });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    const sigHeader = capturedHeaders['X-Signature'];
+    expect(sigHeader.split(',')).toHaveLength(1);
+    expect(verifyWebhookSignature(newSecret, capturedHeaders, capturedBody)).toBe(true);
+    expect(verifyWebhookSignature(originalSecret, capturedHeaders, capturedBody)).toBe(false);
+  });
+
+  it('enforces 7-day maximum grace cap and never exposes previousSecret', async () => {
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events);
+    const { subscription } = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+
+    // Request 30 days, should cap at 7 days (604800s)
+    const now = Date.now();
+    const rotated = manager.rotateSecret(subscription.id, 30 * 86400);
+    expect(rotated.subscription).not.toHaveProperty('previousSecret');
+    expect(manager.get(subscription.id)).not.toHaveProperty('previousSecret');
+
+    const expiresAtMs = new Date(rotated.subscription.previousExpiresAt!).getTime();
+    const diffSeconds = Math.round((expiresAtMs - now) / 1000);
+    expect(diffSeconds).toBeLessThanOrEqual(604800);
+    expect(diffSeconds).toBeGreaterThanOrEqual(604790);
+  });
+});
+
+describe('on-chain event delivery and filtering (Issue #1710)', () => {
+  it('delivers chain.event to subscribers filtering by escrowId', async () => {
+    const client = jest.fn(async () => ({ statusCode: 200 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, { httpClient: client, sleep: async () => undefined });
+
+    await manager.create({
+      url: 'http://localhost:12345/hook',
+      events: ['chain.event'],
+      filter: { escrowId: ['ESCROW_TARGET_1', 'ESCROW_TARGET_2'] },
+    });
+
+    // Emit matching chain event
+    events.emit('chain.event', { escrowId: 'ESCROW_TARGET_1', event: { id: 'evt-1' } });
+    await waitFor(() => client.mock.calls.length === 1);
+
+    // Emit non-matching chain event
+    events.emit('chain.event', { escrowId: 'ESCROW_OTHER', event: { id: 'evt-2' } });
+    // Emit non-chain event
+    events.emit('contract.created', { contract: { id: 1 } });
+
+    // Brief wait to ensure no extra invocations occurred
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(client).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('persisted due queue retry runner (Issue #1716)', () => {
+  it('schedules retries and processes due deliveries with processDue', async () => {
+    let callCount = 0;
+    const client = jest.fn(async () => {
+      callCount++;
+      if (callCount <= 1) {
+        return { statusCode: 500 };
+      }
+      return { statusCode: 200 };
+    });
+
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      queueRetriesOnly: true,
+      random: () => 0.5,
+    });
+
+    const created = await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    events.emit('contract.created', {});
+
+    // Initial attempt fails and schedules nextAttemptAt
+    await waitFor(() => client.mock.calls.length === 1);
+    const history1 = await manager.history(created.subscription.id);
+    expect(history1).toHaveLength(1);
+    expect(history1[0].status).toBe('pending');
+    expect(history1[0].attempts).toBe(1);
+    expect(history1[0].nextAttemptAt).toBeDefined();
+
+    // Advance time past nextAttemptAt and process due queue
+    const futureTime = new Date(history1[0].nextAttemptAt!).getTime() + 1000;
+    const result = await manager.processDue(futureTime);
+    expect(result.processed).toBe(1);
+    expect(result.succeeded).toBe(1);
+    expect(result.failed).toBe(0);
+
+    const history2 = await manager.history(created.subscription.id);
+    expect(history2[0].status).toBe('success');
+    expect(history2[0].attempts).toBe(2);
+    expect(history2[0].nextAttemptAt).toBeNull();
+  });
+
+  it('does not process deliveries whose nextAttemptAt is in the future', async () => {
+    const client = jest.fn(async () => ({ statusCode: 500 }));
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      queueRetriesOnly: true,
+      random: () => 0.5,
+    });
+
+    await manager.create({ url: 'http://localhost:12345/hook', events: ['*'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 1);
+
+    // Call processDue at current time (before nextAttemptAt)
+    const result = await manager.processDue(Date.now() - 10_000);
+    expect(result.processed).toBe(0);
+  });
+});
+

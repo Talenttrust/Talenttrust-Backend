@@ -169,6 +169,54 @@ describe('Soroban transaction builder', () => {
       { server: mockServer() },
     )).rejects.toBeInstanceOf(TxBuildError);
   });
+
+  describe('network passphrase derivation from config', () => {
+    const originalNetwork = process.env.STELLAR_NETWORK;
+    const originalPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+
+    afterEach(() => {
+      if (originalNetwork === undefined) delete process.env.STELLAR_NETWORK;
+      else process.env.STELLAR_NETWORK = originalNetwork;
+      if (originalPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = originalPassphrase;
+    });
+
+    it('derives passphrase from config for futurenet, public, and honours override env var', async () => {
+      const server = mockServer();
+
+      process.env.STELLAR_NETWORK = 'futurenet';
+      delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      const resFuturenet = await buildEscrowTransaction(
+        { action: 'cancel_contract', source, args: { id: '1' } },
+        { server },
+      );
+      expect(resFuturenet.networkPassphrase).toBe('Test SDF Future Network ; October 2022');
+
+      process.env.STELLAR_NETWORK = 'public';
+      const resPublic = await buildEscrowTransaction(
+        { action: 'cancel_contract', source, args: { id: '1' } },
+        { server },
+      );
+      expect(resPublic.networkPassphrase).toBe('Public Global Stellar Network ; September 2015');
+
+      process.env.STELLAR_NETWORK_PASSPHRASE = 'Custom Tx Passphrase ; 2026';
+      const resOverride = await buildEscrowTransaction(
+        { action: 'cancel_contract', source, args: { id: '1' } },
+        { server },
+      );
+      expect(resOverride.networkPassphrase).toBe('Custom Tx Passphrase ; 2026');
+    });
+
+    it('honours explicit networkPassphrase option over config', async () => {
+      const server = mockServer();
+      process.env.STELLAR_NETWORK = 'futurenet';
+      const res = await buildEscrowTransaction(
+        { action: 'cancel_contract', source, args: { id: '1' } },
+        { server, networkPassphrase: 'Explicit Option Passphrase' },
+      );
+      expect(res.networkPassphrase).toBe('Explicit Option Passphrase');
+    });
+  });
 });
 
 // Optional end-to-end test that hits real Testnet RPC. Skipped by default —

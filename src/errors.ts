@@ -29,6 +29,11 @@ export const ERRORS = {
   validation_failed: { status: 400, title: 'Validation failed', detail: 'The request did not match the expected schema' },
   invalid_query: { status: 400, title: 'Invalid query', detail: 'A query parameter is invalid' },
   invalid_cursor: { status: 400, title: 'Invalid cursor', detail: 'The pagination cursor is invalid or was issued for another sort' },
+  invalid_type: {
+    status: 400,
+    title: 'Invalid event type',
+    detail: 'type must be one of: Created, Deposit, Release, Dispute, Resolved, Cancel, Reputation, Paused, Init, Unknown',
+  },
   invalid_fields: { status: 400, title: 'Invalid fields', detail: 'The ?fields= selection names an unknown field' },
   // Contracts
   invalid_id: { status: 400, title: 'Invalid ID', detail: 'id must be a positive integer' },
@@ -118,6 +123,7 @@ export const ERRORS = {
   invalid_chain_id: { status: 400, title: 'Invalid chain id', detail: 'chainId must be a positive u64' },
   chain_error: { status: 502, title: 'Chain error', detail: 'On-chain read failed' },
   chain_rate_limited: { status: 429, title: 'Chain reads rate limited', detail: 'Too many chain read requests (60 per minute per client)' },
+  rate_limited: { status: 429, title: 'Rate limited', detail: 'Too many requests. See Retry-After header.' },
   method_not_allowed: { status: 405, title: 'Method not allowed', detail: 'The path exists but does not support this HTTP method (see Allow)' },
   indexer_busy: { status: 409, title: 'Indexer busy', detail: 'The event indexer is already running' },
   insufficient_scope: { status: 403, title: 'Insufficient scope', detail: 'The API key does not have the required scope' },

@@ -11,6 +11,9 @@ import {
 } from '@stellar/stellar-sdk';
 import { config } from './config';
 import { HttpError } from './store';
+import { escrowErrors } from './stellar/escrowErrors';
+import { getRpcServer } from './stellar/server';
+import { sanitizeRpcError } from './stellar/rpc';
 
 export const ESCROW_MUTATING_FUNCTIONS = [
   'initialize',
@@ -28,24 +31,7 @@ export type EscrowMutatingFunction = (typeof ESCROW_MUTATING_FUNCTIONS)[number];
 
 const MUTATING_SET = new Set<string>(ESCROW_MUTATING_FUNCTIONS);
 
-export const ESCROW_ERRORS: Record<number, string> = {
-  1: 'AlreadyInitialized',
-  2: 'NotInitialized',
-  3: 'Unauthorized',
-  4: 'Paused',
-  5: 'ContractNotFound',
-  6: 'InvalidParties',
-  7: 'InvalidMilestones',
-  8: 'InvalidAmount',
-  9: 'OverFunded',
-  10: 'InvalidStatus',
-  11: 'MilestoneNotFound',
-  12: 'MilestoneAlreadyReleased',
-  13: 'InsufficientFunds',
-  14: 'InvalidSplit',
-  15: 'InvalidRating',
-  16: 'ReputationAlreadyIssued',
-};
+export const ESCROW_ERRORS: Record<number, string> = escrowErrors;
 
 export interface RelayedTxEntry {
   hash: string;
@@ -441,6 +427,28 @@ export interface TxRelayOptions {
   retryAfterSeconds?: number;
 }
 
+export function isConnectionOrTimeoutError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as Record<string, unknown>;
+  const code = typeof anyErr.code === 'string' ? anyErr.code : '';
+  if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+    return true;
+  }
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('econnrefused') ||
+    msg.includes('econnreset') ||
+    msg.includes('enotfound') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network error') ||
+    msg.includes('service unavailable') ||
+    msg.includes('gateway timeout') ||
+    msg.includes('unreachable')
+  );
+}
+
 export class TxRelay {
   public readonly cache: BoundedLru<string, RelayedTxEntry>;
   private rpcClient?: RpcClient;
@@ -465,9 +473,7 @@ export class TxRelay {
 
   private getRpc(): RpcClient {
     if (!this.rpcClient) {
-      this.rpcClient = new rpc.Server(config.rpcUrl, {
-        allowHttp: config.rpcUrl.startsWith('http://'),
-      });
+      this.rpcClient = getRpcServer(config.rpcUrl);
     }
     return this.rpcClient;
   }
@@ -482,7 +488,28 @@ export class TxRelay {
       contractId: this.contractId,
     });
 
-    const sendResp = await this.getRpc().sendTransaction(validated.envelope);
+    let sendResp: rpc.Api.SendTransactionResponse;
+    try {
+      sendResp = await this.getRpc().sendTransaction(validated.envelope);
+    } catch (err: unknown) {
+      if (err instanceof HttpError) throw err;
+      const sanitized = sanitizeRpcError(err);
+      if (isConnectionOrTimeoutError(err)) {
+        throw new HttpError(
+          503,
+          'chain_unavailable',
+          `Soroban RPC is unreachable: ${sanitized}`,
+          undefined,
+          { 'Retry-After': String(this.retryAfterSeconds) },
+        );
+      }
+      throw new HttpError(502, 'rpc_error', `Soroban RPC error: ${sanitized}`);
+    }
+
+    if (!sendResp || typeof sendResp !== 'object' || typeof (sendResp as { status?: unknown }).status !== 'string') {
+      throw new HttpError(502, 'rpc_error', 'Invalid response from Soroban RPC');
+    }
+
     const hash = (sendResp.hash || validated.hash).toLowerCase();
 
     const remember = () => {
@@ -510,7 +537,10 @@ export class TxRelay {
             httpStatus: 200,
             body: current as unknown as Record<string, unknown>,
           };
-        } catch {
+        } catch (err) {
+          if (err instanceof HttpError && err.status === 503) {
+            throw err;
+          }
           return {
             httpStatus: 200,
             body: { hash, status: 'PENDING' },
@@ -550,7 +580,27 @@ export class TxRelay {
   async getStatus(hash: string): Promise<TxStatusResponse> {
     const normalizedHash = hash.toLowerCase();
     const cached = this.cache.get(normalizedHash) ?? this.cache.get(hash);
-    const rpcResp = await this.getRpc().getTransaction(normalizedHash);
+    let rpcResp: rpc.Api.GetTransactionResponse;
+    try {
+      rpcResp = await this.getRpc().getTransaction(normalizedHash);
+    } catch (err: unknown) {
+      if (err instanceof HttpError) throw err;
+      const sanitized = sanitizeRpcError(err);
+      if (isConnectionOrTimeoutError(err)) {
+        throw new HttpError(
+          503,
+          'chain_unavailable',
+          `Soroban RPC is unreachable: ${sanitized}`,
+          undefined,
+          { 'Retry-After': String(this.retryAfterSeconds) },
+        );
+      }
+      throw new HttpError(502, 'rpc_error', `Soroban RPC error: ${sanitized}`);
+    }
+
+    if (!rpcResp || typeof rpcResp !== 'object' || typeof (rpcResp as { status?: unknown }).status !== 'string') {
+      throw new HttpError(502, 'rpc_error', 'Invalid response from Soroban RPC: missing transaction status');
+    }
 
     const rawStatus = rpcResp.status as string;
     let status: 'PENDING' | 'SUCCESS' | 'FAILED' | 'NOT_FOUND';

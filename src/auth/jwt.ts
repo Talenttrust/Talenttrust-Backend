@@ -58,20 +58,25 @@ export function issueWalletToken(
  * Rejects:
  *  - tokens that don't have exactly 3 dot-separated parts,
  *  - any header `alg` other than `HS256` (including `none`),
+ *  - headers with `typ` present and not equal to 'JWT',
  *  - a signature that doesn't match (constant-time compare),
  *  - expired tokens (exp < now),
- *  - tokens with a missing/empty `sub`.
+ *  - tokens with a missing/empty `sub`,
+ *  - tokens with missing, non-numeric, or non-finite `iat`,
+ *  - tokens with `iat` more than 60s in the future,
+ *  - tokens with missing/empty `jti`,
+ *  - tokens with lifetime (exp - iat) exceeding WALLET_TOKEN_TTL.
  *
  * @param token  - The compact JWT string.
  * @param secret - AUTH_SECRET used to sign.
  * @param nowFn  - Injectable clock; defaults to Date.now.
- * @returns      - `{ ok: true, address }` or `{ ok: false }`.
+ * @returns      - `{ ok: true, address, jti, exp }` or `{ ok: false }`.
  */
 export function verifyWalletToken(
   token: string,
   secret: string,
   nowFn: () => number = Date.now,
-): { ok: true; address: string } | { ok: false } {
+): { ok: true; address: string; jti: string; exp: number } | { ok: false } {
   const parts = token.split('.');
   if (parts.length !== 3) return { ok: false };
 
@@ -85,6 +90,7 @@ export function verifyWalletToken(
     return { ok: false };
   }
   if (header.alg !== 'HS256') return { ok: false }; // rejects alg: none
+  if ('typ' in header && header.typ !== 'JWT') return { ok: false }; // reject non-JWT typ
 
   // Constant-time signature verification.
   const signingInput = `${encHeader}.${encPayload}`;
@@ -110,9 +116,20 @@ export function verifyWalletToken(
   if (typeof claims.sub !== 'string' || !claims.sub) return { ok: false };
   if (typeof claims.exp !== 'number') return { ok: false };
 
-  // Enforce expiry.
+  // Validate iat: must be numeric, finite, and not more than 60s in the future.
+  if (typeof claims.iat !== 'number' || !isFinite(claims.iat)) return { ok: false };
   const nowSec = Math.floor(nowFn() / 1000);
+  const skewSec = 60;
+  if (claims.iat > nowSec + skewSec) return { ok: false };
+
+  // Validate jti: must be non-empty string.
+  if (typeof claims.jti !== 'string' || !claims.jti) return { ok: false };
+
+  // Validate lifetime: exp - iat must not exceed WALLET_TOKEN_TTL.
+  if (claims.exp - claims.iat > WALLET_TOKEN_TTL) return { ok: false };
+
+  // Enforce expiry.
   if (claims.exp < nowSec) return { ok: false };
 
-  return { ok: true, address: claims.sub };
+  return { ok: true, address: claims.sub, jti: claims.jti, exp: claims.exp };
 }

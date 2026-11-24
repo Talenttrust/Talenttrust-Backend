@@ -59,6 +59,10 @@
     },
     {
       "name": "Disputes",
+      "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token or a scoped API key with the admin:read scope."
+    },
+    {
+      "name": "Disputes",
       "description": "Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token."
     }
   ],
@@ -152,8 +156,23 @@
               }
             }
           },
+          "502": {
+            "description": "Soroban RPC returned an error or unexpected response (rpc_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Soroban RPC returned TRY_AGAIN_LATER",
+            "description": "Soroban RPC is unreachable (chain_unavailable) or returned TRY_AGAIN_LATER",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying submission",
@@ -333,8 +352,31 @@
               }
             }
           },
+          "502": {
+            "description": "Soroban RPC returned an error or unexpected response (rpc_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Too many concurrent long-poll requests",
+            "description": "Soroban RPC is unreachable (chain_unavailable) or too many concurrent long-poll requests (too_many_waits)",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -382,6 +424,9 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "filter": {
+                    "$ref": "#/components/schemas/WebhookSubscriptionFilter"
                   }
                 }
               }
@@ -621,13 +666,27 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "filter": {
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/WebhookSubscriptionFilter"
+                      }
+                    ],
+                    "nullable": true,
+                    "description": "Set the filter, or null to clear it"
+                  }
+                }
               }
             }
           }
@@ -637,6 +696,7 @@
             "description": "Updated subscription"
           },
           "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
             "description": "Invalid update",
             "content": {
               "application/json": {
@@ -684,6 +744,12 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
           "500": {
             "description": "Unexpected error (internal_error)",
             "content": {
@@ -719,11 +785,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "200": {
             "description": "Deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "401": {
             "description": "Unauthorized",
@@ -757,6 +829,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -800,6 +878,24 @@
             "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "graceSeconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800,
+                    "default": 86400,
+                    "description": "Grace period in seconds during which the previous secret remains valid (max 7 days)"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "New secret; returned only once"
@@ -980,6 +1076,110 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-subscriptions/{id}/deliveries/{deliveryId}/redeliver": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Manually redeliver a finished webhook delivery",
+        "description": "Re-sends the original payload of a `success` or `failed` delivery as a new delivery: same `eventId` (and `X-Event-ID` header), fresh `X-Delivery-ID`, new signature and timestamp, and the normal retry policy. The new delivery records the original in `redeliveryOf`. Payloads are kept only for deliveries still in the bounded history and are never returned by the history endpoint.",
+        "security": [
+          {
+            "webhookAdmin": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Redelivery scheduled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
+          },
+          "401": {
+            "description": "Missing or invalid admin token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown subscription or delivery (webhook_not_found / webhook_delivery_not_found), or webhooks are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1212,6 +1412,9 @@
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1236,6 +1439,7 @@
             }
           },
           "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
             "description": "Invalid template",
             "content": {
               "application/json": {
@@ -1283,6 +1487,12 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
           "500": {
             "description": "Unexpected error (internal_error)",
             "content": {
@@ -1315,6 +1525,9 @@
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1342,6 +1555,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
           },
           "403": {
             "description": "Not the owner",
@@ -1375,6 +1591,12 @@
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "500": {
             "description": "Unexpected error (internal_error)",
@@ -1524,6 +1746,15 @@
                     "entries": {
                       "type": "integer"
                     },
+                    "truncatedBeforeSeq": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "seq of the first evicted entry, or null when no entries were evicted"
+                    },
+                    "maxEntries": {
+                      "type": "integer",
+                      "description": "maximum number of entries retained in memory"
+                    },
                     "brokenAt": {
                       "type": "integer",
                       "description": "seq of the first entry whose hash does not verify"
@@ -1563,6 +1794,9 @@
         "security": [
           {
             "adminToken": []
+          },
+          {
+            "apiKey": []
           }
         ],
         "description": "Returns paginated dispute views plus queue-wide summary totals. The summary always covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes past their SLA deadline, totalHeld = escrow held across open disputes), regardless of the filters. Dispute reasons are only exposed here and on /api/v1/disputes/{contractId}.",
@@ -1648,7 +1882,22 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin bearer token",
+            "description": "Missing or invalid admin bearer token or API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks the admin:read scope (insufficient_scope)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1663,7 +1912,7 @@
             }
           },
           "404": {
-            "description": "ADMIN_READ_TOKEN is not configured (admin_not_configured)",
+            "description": "Neither ADMIN_READ_TOKEN nor API_KEYS is configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1707,6 +1956,9 @@
         "security": [
           {
             "adminToken": []
+          },
+          {
+            "apiKey": []
           }
         ],
         "parameters": [
@@ -1746,7 +1998,22 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin bearer token",
+            "description": "Missing or invalid admin bearer token or API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks the admin:read scope (insufficient_scope)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1761,7 +2028,7 @@
             }
           },
           "404": {
-            "description": "Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured",
+            "description": "Contract has never had a dispute (dispute_not_found), or neither ADMIN_READ_TOKEN nor API_KEYS is configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -2008,6 +2275,106 @@
                       "items": {
                         "type": "integer"
                       }
+                    },
+                    "checkedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or missing bearer secret (cron_unauthorized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cron secret is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/deliver-webhooks": {
+      "get": {
+        "tags": [
+          "Cron"
+        ],
+        "summary": "Process due webhook retries",
+        "description": "Periodic sweep (Vercel cron) that processes due webhook retry attempts. Also accepts POST. Requires `Authorization: Bearer <CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sweep result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "processed",
+                    "succeeded",
+                    "failed",
+                    "checkedAt"
+                  ],
+                  "properties": {
+                    "processed": {
+                      "type": "integer"
+                    },
+                    "succeeded": {
+                      "type": "integer"
+                    },
+                    "failed": {
+                      "type": "integer"
                     },
                     "checkedAt": {
                       "type": "string",
@@ -2395,6 +2762,72 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Revoke the presented wallet token",
+        "description": "Revokes the bearer token by its `jti` until it would have expired. Later requests with that token get 401 with `WWW-Authenticate: Bearer`; other tokens of the same wallet keep working. The revocation list is held in memory per process.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Token revoked"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey"
+          },
+          "401": {
+            "description": "Missing, invalid, expired or already revoked token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ]
       }
     },
     "/api/v1/auth/token": {
@@ -3096,7 +3529,7 @@
           "Cron"
         ],
         "summary": "Index a batch of escrow contract events (Vercel cron; also accepts POST)",
-        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.",
+        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.",
         "parameters": [
           {
             "name": "Authorization",
@@ -3133,7 +3566,22 @@
             }
           },
           "401": {
-            "description": "Unauthorized - missing or invalid CRON_SECRET",
+            "description": "Invalid or missing bearer secret (cron_unauthorized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cron secret is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -3183,6 +3631,108 @@
         }
       }
     },
+    "/api/cron/reconcile-parity": {
+      "get": {
+        "tags": [
+          "Cron"
+        ],
+        "summary": "Reconcile API/chain parity for all linked contracts (Vercel cron; also accepts POST)",
+        "description": "Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset. Checks linked contracts with bounded concurrency and a time budget, reporting in-sync/drifted/unreachable counts and drifted contract IDs. Unreachable chain reads for individual contracts do not abort the run.",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parity reconciliation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "checked": {
+                      "type": "integer"
+                    },
+                    "inSync": {
+                      "type": "integer"
+                    },
+                    "drifted": {
+                      "type": "integer"
+                    },
+                    "unreachable": {
+                      "type": "integer"
+                    },
+                    "driftedContractIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    "timedOut": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid CRON_SECRET",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found - CRON_SECRET is unset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/chain/events": {
       "get": {
         "tags": [
@@ -3202,7 +3752,19 @@
             "name": "type",
             "in": "query",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "Created",
+                "Deposit",
+                "Release",
+                "Dispute",
+                "Resolved",
+                "Cancel",
+                "Reputation",
+                "Paused",
+                "Init",
+                "Unknown"
+              ]
             },
             "description": "Filter by event type"
           },
@@ -3223,6 +3785,14 @@
               "type": "string"
             },
             "description": "Pagination cursor"
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by event type"
           }
         ],
         "responses": {
@@ -3243,6 +3813,21 @@
                       "type": "string"
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_limit, invalid_type or invalid_cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -3707,6 +4292,29 @@
                     "byStatus": {
                       "type": "object"
                     },
+                    "byToken": {
+                      "type": "object",
+                      "description": "Escrow totals grouped by token address/symbol",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "contracts": {
+                            "type": "integer"
+                          },
+                          "totalEscrowedUnits": {
+                            "type": "string"
+                          },
+                          "totalReleasedUnits": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "contracts",
+                          "totalEscrowedUnits",
+                          "totalReleasedUnits"
+                        ]
+                      }
+                    },
                     "totalEscrowed": {
                       "description": "DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.",
                       "oneOf": [
@@ -3997,6 +4605,15 @@
             }
           },
           {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Entity tag(s) from a previous response; returns 304 Not Modified when current",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -4005,15 +4622,6 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 64
-            }
-          },
-          {
-            "name": "If-None-Match",
-            "in": "header",
-            "required": false,
-            "description": "Entity tag(s) from a previous response; returns 304 Not Modified when current",
-            "schema": {
-              "type": "string"
             }
           }
         ],
@@ -4405,6 +5013,9 @@
             }
           },
           {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
             "name": "If-Match",
             "in": "header",
             "required": false,
@@ -4508,6 +5119,7 @@
             }
           },
           "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
             "description": "Empty patch, invalid contract id, or invalid milestones",
             "content": {
               "application/json": {
@@ -4571,6 +5183,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
+            "$ref": "#/components/responses/IdempotencyConflict",
             "description": "Contract is funded or no longer editable",
             "content": {
               "application/json": {
@@ -4614,6 +5227,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
           },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
@@ -4670,6 +5286,9 @@
             }
           },
           {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
             "name": "If-Match",
             "in": "header",
             "required": false,
@@ -4702,6 +5321,7 @@
             "description": "Contract withdrawn"
           },
           "400": {
+            "$ref": "#/components/responses/InvalidIdempotencyKey",
             "description": "Invalid contract id",
             "content": {
               "application/json": {
@@ -4765,6 +5385,7 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
+            "$ref": "#/components/responses/IdempotencyConflict",
             "description": "Contract is funded or no longer withdrawable",
             "content": {
               "application/json": {
@@ -4809,6 +5430,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/IdempotencyKeyReused"
+          },
           "428": {
             "description": "Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true",
             "content": {
@@ -4845,6 +5469,96 @@
             "bearerAuth": []
           }
         ]
+      }
+    },
+    "/api/v1/contracts/{id}/stream": {
+      "get": {
+        "tags": [
+          "Contracts"
+        ],
+        "summary": "Stream live contract events",
+        "description": "Opens a Server-Sent Events stream for one contract. Send `Last-Event-ID` to replay retained events; the per-process replay buffer holds up to 500 events.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Contract ID (positive integer)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resume after this event ID."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream; each message has an event type, event ID, and public JSON data.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Contract not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "Unexpected error (internal_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "SSE connection limit reached or server is draining",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/contracts/{id}/revisions": {
@@ -6767,7 +7481,7 @@
           "Reputation"
         ],
         "summary": "Ranked freelancer leaderboard (Bayesian score)",
-        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.",
+        "description": "score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.",
         "parameters": [
           {
             "name": "sort",
@@ -6800,6 +7514,32 @@
               "maximum": 100,
               "default": 20
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "page.nextCursor from the previous page (same sort and time window)"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays"
+          },
+          {
+            "name": "windowDays",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Rolling lookback window in days (positive integer); mutually exclusive with since"
           },
           {
             "name": "cursor",
@@ -6845,7 +7585,7 @@
             }
           },
           "400": {
-            "description": "invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor",
+            "description": "invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since",
             "content": {
               "application/json": {
                 "schema": {
@@ -7132,7 +7872,7 @@
         "name": "Idempotency-Key",
         "in": "header",
         "required": false,
-        "description": "1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.",
+        "description": "1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal (if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -7757,6 +8497,40 @@
           }
         }
       },
+      "WebhookSubscriptionFilter": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "parties": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "contractIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "escrowId": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
       "WebhookSubscription": {
         "type": "object",
         "required": [
@@ -7781,14 +8555,22 @@
               "type": "string"
             }
           },
+          "filter": {
+            "$ref": "#/components/schemas/WebhookSubscriptionFilter"
+          },
           "active": {
-            "type": "boolean"
+            "type": "boolean",
+            "default": true
           },
           "createdAt": {
             "type": "string",
             "format": "date-time"
           },
           "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previousExpiresAt": {
             "type": "string",
             "format": "date-time"
           }
@@ -7820,6 +8602,15 @@
           },
           "lastError": {
             "type": "string"
+          },
+          "redeliveryOf": {
+            "type": "string",
+            "description": "Original delivery id for manual redeliveries"
+          },
+          "nextAttemptAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           },
           "createdAt": {
             "type": "string",

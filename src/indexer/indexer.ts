@@ -5,9 +5,11 @@
 
 import * as sdk from '@stellar/stellar-sdk';
 import { xdr } from '@stellar/stellar-sdk';
-import { EventStore, IndexerState, IndexedEvent, RunOnceOptions, RunOnceResult } from './types';
+import { EventStore, IndexerState, IndexedEvent, RunOnceOptions, RunOnceResult, escrowIdOf } from './types';
 import { decodeEvent } from './decode';
-import { config } from '../config';
+import { config, nonNegativeIntEnv } from '../config';
+import { getRpcServer } from '../stellar/server';
+import { StoreEventEmitter } from '../events';
 
 const RPC_RETENTION_LEDGERS = 17280;
 const DEFAULT_LIMIT = 100;
@@ -48,11 +50,18 @@ export class EventIndexer {
   private latestLedger: number = 0;
   /** Highest raw.ledger seen across all processed events. -1 means no run has completed yet. */
   private lastIndexedLedger: number = -1;
+  private emitter?: StoreEventEmitter;
 
-  constructor(store: EventStore, rpcUrl?: string) {
+  constructor(store: EventStore, rpcUrl?: string, emitter?: StoreEventEmitter) {
     this.store = store;
+    this.emitter = emitter;
     // Soroban RPC client (constructing it does no I/O; tests replace it with a fake).
-    this.rpc = new sdk.rpc.Server(rpcUrl || config.rpcUrl, { allowHttp: (rpcUrl || config.rpcUrl).startsWith('http://') });
+    this.rpc = getRpcServer(rpcUrl || config.rpcUrl);
+    this.getStartLedger();
+  }
+
+  setEmitter(emitter: StoreEventEmitter): void {
+    this.emitter = emitter;
   }
 
   async runOnce(options: RunOnceOptions = {}): Promise<RunOnceResult> {
@@ -133,7 +142,16 @@ export class EventIndexer {
           decodedEvents.push(decoded);
         }
 
-        this.store.append(decodedEvents);
+        const newlyAdded = this.store.append(decodedEvents);
+        if (this.emitter && Array.isArray(newlyAdded)) {
+          for (const ev of newlyAdded) {
+            const escrowId = escrowIdOf(ev.event);
+            this.emitter.emit('chain.event', {
+              ...ev,
+              escrowId,
+            });
+          }
+        }
 
         if (response.cursor) {
           this.store.setCursor(response.cursor);
@@ -186,10 +204,10 @@ export class EventIndexer {
     };
   }
 
-  private getStartLedger(): number {
-    const envStart = process.env.INDEXER_START_LEDGER;
-    if (envStart) {
-      return Number(envStart);
+  getStartLedger(): number {
+    const envStart = nonNegativeIntEnv('INDEXER_START_LEDGER');
+    if (envStart !== undefined) {
+      return envStart;
     }
 
     if (this.latestLedger > 0) {

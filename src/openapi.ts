@@ -116,6 +116,10 @@ const errorResponses = {
     description: 'Conflict',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
   },
+  429: {
+    description: 'Rate limited (rate_limited) — see Retry-After and RateLimit-* headers',
+    content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+  },
   500: {
     description: 'Internal error',
     content: json({ $ref: '#/components/schemas/ErrorResponse' }),
@@ -223,7 +227,7 @@ const spec = {
     { name: 'Parties', description: 'Per-address activity statements' },
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
-    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
+    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token or a scoped API key with the admin:read scope.' },
   ],
   paths: {
     '/api/v1/tx/submit': {
@@ -276,8 +280,12 @@ const spec = {
               },
             }),
           },
+          502: {
+            description: 'Soroban RPC returned an error or unexpected response (rpc_error)',
+            content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+          },
           503: {
-            description: 'Soroban RPC returned TRY_AGAIN_LATER',
+            description: 'Soroban RPC is unreachable (chain_unavailable) or returned TRY_AGAIN_LATER',
             headers: {
               'Retry-After': {
                 description: 'Seconds to wait before retrying submission',
@@ -286,6 +294,7 @@ const spec = {
             },
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
+          429: errorResponse('Rate limited (tx policy, RATE_LIMIT_TX_PER_MIN) — see Retry-After'),
         },
       },
     },
@@ -349,8 +358,18 @@ const spec = {
             description: 'Invalid transaction hash format',
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
+          502: {
+            description: 'Soroban RPC returned an error or unexpected response (rpc_error)',
+            content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+          },
           503: {
-            description: 'Too many concurrent long-poll requests',
+            description: 'Soroban RPC is unreachable (chain_unavailable) or too many concurrent long-poll requests (too_many_waits)',
+            headers: {
+              'Retry-After': {
+                description: 'Seconds to wait before retrying',
+                schema: { type: 'integer' },
+              },
+            },
             content: json({ $ref: '#/components/schemas/ErrorResponse' }),
           },
         },
@@ -360,18 +379,43 @@ const spec = {
       post: {
         tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
         security: [{ webhookAdmin: [] }],
-        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
-        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL, event selection, or filter (invalid_filter)' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
       },
       get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
     },
     '/api/v1/webhook-subscriptions/{id}': {
       get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
-      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      patch: {
+        tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: { content: json({ type: 'object', properties: { filter: { allOf: [{ $ref: '#/components/schemas/WebhookSubscriptionFilter' }], nullable: true, description: 'Set the filter, or null to clear it' } } }) },
+        responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update, including invalid_filter' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
       delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
-      post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Rotate a webhook secret',
+        security: [{ webhookAdmin: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          content: json({
+            type: 'object',
+            properties: {
+              graceSeconds: {
+                type: 'integer',
+                minimum: 0,
+                maximum: 604800,
+                default: 86400,
+                description: 'Grace period in seconds during which the previous secret remains valid (max 7 days)',
+              },
+            },
+          }),
+        },
+        responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } },
+      },
     },
     '/api/v1/webhook-subscriptions/{id}/deliveries': {
       get: {
@@ -399,6 +443,28 @@ const spec = {
           400: { description: 'Invalid query: limit must be an integer from 1 to 100; status must be pending, success or failed' },
           401: { description: 'Unauthorized' },
           404: { description: 'Not found or disabled' },
+        },
+      },
+    },
+    '/api/v1/webhook-subscriptions/{id}/deliveries/{deliveryId}/redeliver': {
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Manually redeliver a finished webhook delivery',
+        description:
+          'Re-sends the original payload of a `success` or `failed` delivery as a new delivery: same ' +
+          '`eventId` (and `X-Event-ID` header), fresh `X-Delivery-ID`, new signature and timestamp, and the ' +
+          'normal retry policy. The new delivery records the original in `redeliveryOf`. Payloads are kept only ' +
+          'for deliveries still in the bounded history and are never returned by the history endpoint.',
+        security: [{ webhookAdmin: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          202: { description: 'Redelivery scheduled', content: json({ $ref: '#/components/schemas/WebhookDelivery' }) },
+          401: errorResponse('Missing or invalid admin token'),
+          404: errorResponse('Unknown subscription or delivery (webhook_not_found / webhook_delivery_not_found), or webhooks are not configured'),
+          409: errorResponse('The delivery is still pending (delivery_pending)'),
         },
       },
     },
@@ -471,6 +537,52 @@ const spec = {
         },
       },
     },
+    '/api/v1/contracts/{id}/timeline': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get the merged API and on-chain event timeline for a contract',
+        description:
+          'Returns items in chronological order. Linked contracts include indexed chain events; unlinked contracts include API audit items only. ' +
+          'Dispute reasons are never included. The opaque HMAC-signed cursor is scoped to the contract.',
+        parameters: [
+          idParam,
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor from page.nextCursor' },
+        ],
+        responses: {
+          ...ok('Chronological contract timeline', {
+            type: 'object',
+            required: ['data', 'page'],
+            properties: {
+              data: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['source', 'type', 'at', 'payload'],
+                  properties: {
+                    source: { type: 'string', enum: ['api', 'chain'] },
+                    type: { type: 'string' },
+                    at: { type: 'string', format: 'date-time' },
+                    payload: { type: 'object', description: 'Allowlisted event fields; dispute reasons are omitted' },
+                  },
+                },
+              },
+              page: {
+                type: 'object',
+                required: ['limit', 'nextCursor', 'hasMore'],
+                properties: {
+                  limit: { type: 'integer' },
+                  nextCursor: { type: 'string', nullable: true },
+                  hasMore: { type: 'boolean' },
+                },
+              },
+            },
+          }),
+          400: errorResponse('Invalid id, limit or cursor'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
     '/api/v1/audit/verify': {
       get: {
         tags: ['Audit'],
@@ -480,6 +592,8 @@ const spec = {
           properties: {
             valid: { type: 'boolean' },
             entries: { type: 'integer' },
+            truncatedBeforeSeq: { type: 'integer', nullable: true, description: 'seq of the first evicted entry, or null when no entries were evicted' },
+            maxEntries: { type: 'integer', description: 'maximum number of entries retained in memory' },
             brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
           },
         }),
@@ -489,7 +603,7 @@ const spec = {
       get: {
         tags: ['Disputes'],
         summary: 'List the admin dispute queue',
-        security: [{ adminToken: [] }],
+        security: [{ adminToken: [] }, { apiKey: [] }],
         description:
           'Returns paginated dispute views plus queue-wide summary totals. The summary always ' +
           'covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes ' +
@@ -510,8 +624,9 @@ const spec = {
         responses: {
           ...ok('Dispute queue page', { $ref: '#/components/schemas/DisputeQueue' }),
           400: errorResponse('Invalid status, sort, overdue, limit, or cursor'),
-          401: errorResponse('Missing or invalid admin bearer token'),
-          404: errorResponse('ADMIN_READ_TOKEN is not configured (admin_not_configured)'),
+          401: errorResponse('Missing or invalid admin bearer token or API key'),
+          403: errorResponse('The API key lacks the admin:read scope (insufficient_scope)'),
+          404: errorResponse('Neither ADMIN_READ_TOKEN nor API_KEYS is configured'),
         },
       },
     },
@@ -519,13 +634,14 @@ const spec = {
       get: {
         tags: ['Disputes'],
         summary: 'Get the dispute view for a contract',
-        security: [{ adminToken: [] }],
+        security: [{ adminToken: [] }, { apiKey: [] }],
         parameters: [{ name: 'contractId', in: 'path', required: true, schema: { type: 'integer' } }],
         responses: {
           ...ok('Dispute view', { $ref: '#/components/schemas/DisputeView' }),
           400: errorResponse('contractId must be a positive integer'),
-          401: errorResponse('Missing or invalid admin bearer token'),
-          404: errorResponse('Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured'),
+          401: errorResponse('Missing or invalid admin bearer token or API key'),
+          403: errorResponse('The API key lacks the admin:read scope (insufficient_scope)'),
+          404: errorResponse('Contract has never had a dispute (dispute_not_found), or neither ADMIN_READ_TOKEN nor API_KEYS is configured'),
         },
       },
     },
@@ -578,6 +694,30 @@ const spec = {
             required: ['expired', 'checkedAt'],
             properties: {
               expired: { type: 'array', items: { type: 'integer' } },
+              checkedAt: { type: 'string', format: 'date-time' },
+            },
+          }),
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
+        },
+      },
+    },
+    '/api/cron/deliver-webhooks': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Process due webhook retries',
+        description:
+          'Periodic sweep (Vercel cron) that processes due webhook retry attempts. ' +
+          'Also accepts POST. Requires `Authorization: Bearer <CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Sweep result', {
+            type: 'object',
+            required: ['processed', 'succeeded', 'failed', 'checkedAt'],
+            properties: {
+              processed: { type: 'integer' },
+              succeeded: { type: 'integer' },
+              failed: { type: 'integer' },
               checkedAt: { type: 'string', format: 'date-time' },
             },
           }),
@@ -656,6 +796,21 @@ const spec = {
         },
       },
     },
+    '/api/v1/auth/logout': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Revoke the presented wallet token',
+        description:
+          'Revokes the bearer token by its `jti` until it would have expired. Later requests with that token get ' +
+          '401 with `WWW-Authenticate: Bearer`; other tokens of the same wallet keep working. The revocation list ' +
+          'is held in memory per process.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          204: { description: 'Token revoked' },
+          401: errorResponse('Missing, invalid, expired or already revoked token'),
+        },
+      },
+    },
     '/api/v1/auth/token': {
       post: {
         tags: ['Auth'],
@@ -667,6 +822,7 @@ const spec = {
         responses: {
           ...ok('Token issued.', { $ref: '#/components/schemas/TokenResponse' }),
           401: errorResponse('invalid_challenge / challenge_expired / challenge_replayed / invalid_signature.'),
+          429: errorResponse('Rate limited (auth policy, RATE_LIMIT_AUTH_PER_MIN) — see Retry-After'),
         },
       },
     },
@@ -802,7 +958,7 @@ const spec = {
       get: {
         tags: ['Cron'],
         summary: 'Index a batch of escrow contract events (Vercel cron; also accepts POST)',
-        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.',
+        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset.',
         parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
         responses: {
           200: {
@@ -817,8 +973,36 @@ const spec = {
               },
             }),
           },
-          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
           409: { description: 'Conflict - indexer already running' },
+        },
+      },
+    },
+    '/api/cron/reconcile-parity': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Reconcile API/chain parity for all linked contracts (Vercel cron; also accepts POST)',
+        description:
+          'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 404 when CRON_SECRET is unset. Checks linked contracts with bounded concurrency and a time budget, reporting in-sync/drifted/unreachable counts and drifted contract IDs. Unreachable chain reads for individual contracts do not abort the run.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Parity reconciliation completed',
+            content: json({
+              type: 'object',
+              properties: {
+                checked: { type: 'integer' },
+                inSync: { type: 'integer' },
+                drifted: { type: 'integer' },
+                unreachable: { type: 'integer' },
+                driftedContractIds: { type: 'array', items: { type: 'integer' } },
+                timedOut: { type: 'boolean' },
+              },
+            }),
+          },
+          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          404: { description: 'Not found - CRON_SECRET is unset' },
         },
       },
     },
@@ -828,17 +1012,28 @@ const spec = {
         summary: 'List indexed contract events',
         parameters: [
           { name: 'escrowId', in: 'query', schema: { type: 'string' }, description: 'Filter by escrow ID' },
-          { name: 'type', in: 'query', schema: { type: 'string' }, description: 'Filter by event type' },
+          {
+            name: 'type',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['Created', 'Deposit', 'Release', 'Dispute', 'Resolved', 'Cancel', 'Reputation', 'Paused', 'Init', 'Unknown'],
+            },
+            description: 'Filter by event type',
+          },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 }, description: 'Max events to return (default 50)' },
           { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Pagination cursor' },
         ],
-        responses: ok('Events', {
-          type: 'object',
-          properties: {
-            data: { type: 'array', items: { $ref: '#/components/schemas/IndexedEvent' } },
-            nextCursor: { type: 'string' },
-          },
-        }),
+        responses: {
+          ...ok('Events', {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/IndexedEvent' } },
+              nextCursor: { type: 'string' },
+            },
+          }),
+          400: errorResponse('invalid_limit, invalid_type or invalid_cursor'),
+        },
       },
     },
     '/api/v1/chain/indexer': {
@@ -976,7 +1171,7 @@ const spec = {
         },
       },
     },
-    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
+    '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, byToken: { type: 'object', description: 'Escrow totals grouped by token address/symbol', additionalProperties: { type: 'object', properties: { contracts: { type: 'integer' }, totalEscrowedUnits: { type: 'string' }, totalReleasedUnits: { type: 'string' } }, required: ['contracts', 'totalEscrowedUnits', 'totalReleasedUnits'] } }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/tx/build': {
       post: {
         tags: ['Transaction'],
@@ -1005,6 +1200,7 @@ const spec = {
           422: errorResponse('Contract simulation failed (contract_error)', {
             $ref: '#/components/schemas/TxBuildErrorResponse',
           }),
+          429: errorResponse('Rate limited (tx policy, RATE_LIMIT_TX_PER_MIN) — see Retry-After'),
           503: errorResponse('Stellar RPC unavailable', {
             $ref: '#/components/schemas/TxBuildErrorResponse',
           }),
@@ -1114,6 +1310,23 @@ const spec = {
           403: errorResponse('Client does not own the contract'),
           404: errorResponse('Contract not found'),
           409: errorResponse('Contract is funded or no longer withdrawable'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/stream': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Stream live contract events',
+        description:
+          'Opens a Server-Sent Events stream for one contract. Send `Last-Event-ID` to replay retained events; the per-process replay buffer holds up to 500 events.',
+        parameters: [
+          idParam,
+          { name: 'Last-Event-ID', in: 'header', required: false, schema: { type: 'string' }, description: 'Resume after this event ID.' },
+        ],
+        responses: {
+          200: { description: 'SSE stream; each message has an event type, event ID, and public JSON data.', content: { 'text/event-stream': { schema: { type: 'string' } } } },
+          404: errorResponse('Contract not found'),
+          503: errorResponse('SSE connection limit reached or server is draining'),
         },
       },
     },
@@ -1295,12 +1508,25 @@ const spec = {
         summary: 'Ranked freelancer leaderboard (Bayesian score)',
         description:
           'score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there ' +
-          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.',
+          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address. ' +
+          'Optionally filter to a recent time window with since or windowDays (mutually exclusive) using a window-specific global mean.',
         parameters: [
           { name: 'sort', in: 'query', schema: { type: 'string', enum: ['score', 'completed', 'average'], default: 'score' } },
           { name: 'minCompleted', in: 'query', schema: { type: 'integer', minimum: 0, default: 1 } },
           { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort)' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort and time window)' },
+          {
+            name: 'since',
+            in: 'query',
+            schema: { type: 'string', format: 'date-time' },
+            description: 'ISO 8601 date/timestamp lower bound (inclusive) for reviews included in the ranking; mutually exclusive with windowDays',
+          },
+          {
+            name: 'windowDays',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1 },
+            description: 'Rolling lookback window in days (positive integer); mutually exclusive with since',
+          },
         ],
         responses: {
           ...ok('Leaderboard page', {
@@ -1313,7 +1539,7 @@ const spec = {
               },
             },
           }),
-          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor'),
+          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit, invalid_cursor or invalid_since'),
         },
       },
     },
@@ -1390,10 +1616,10 @@ const spec = {
         in: 'header',
         required: false,
         description:
-          '1-255 printable ASCII characters. Retrying a POST with the same key and body replays the stored ' +
-          'response with `Idempotent-Replayed: true` instead of applying it twice. Responses with status >= 500 ' +
+          '1-255 printable ASCII characters. Retrying a POST, PATCH, PUT or DELETE with the same key and body replays the stored ' +
+          'response with `Idempotent-Replayed: true` instead of applying it twice (empty DELETE bodies fingerprint as `{}`). Responses with status >= 500 ' +
           'are not stored. Keys are kept for 24h and scoped by method, path and authenticated principal ' +
-          '(if any). Required when the server runs with IDEMPOTENCY_REQUIRED=true.',
+          '(if any). Required on POST when the server runs with IDEMPOTENCY_REQUIRED=true.',
         schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
       },
     },
@@ -1669,8 +1895,10 @@ const spec = {
           allowed: { type: 'array', items: { type: 'string' } },
         },
       },
-      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
-      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookSubscriptionFilter: { type: 'object', minProperties: 1, additionalProperties: false, properties: { parties: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } }, contractIds: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'integer', minimum: 1 } }, escrowId: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1 } } } },
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, filter: { $ref: '#/components/schemas/WebhookSubscriptionFilter' }, active: { type: 'boolean', default: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' }, previousExpiresAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, nextAttemptAt: { type: 'string', format: 'date-time', nullable: true }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, redeliveryOf: { type: 'string', description: 'Original delivery id for manual redeliveries' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
         required: ['id', 'client', 'freelancer', 'token', 'milestones', 'totalAmount', 'fundedAmount', 'releasedAmount', 'status', 'reputationIssued', 'source', 'latestLedger'],
@@ -2388,19 +2616,21 @@ const spec = {
 
 type Operation = { parameters?: object[]; responses: Record<string, object> };
 
-/** Documents Idempotency-Key and its error statuses on every POST operation. */
+/** Documents Idempotency-Key and its error statuses on every POST, PATCH, PUT and DELETE operation. */
 function withIdempotency<T extends { paths: object }>(doc: T): T {
-  const paths = doc.paths as Record<string, { post?: Operation }>;
+  const paths = doc.paths as Record<string, Partial<Record<'post' | 'patch' | 'put' | 'delete', Operation>>>;
   for (const item of Object.values(paths)) {
-    const op = item.post;
-    if (!op) continue;
-    op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
-    op.responses = {
-      ...op.responses,
-      400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
-      409: { $ref: '#/components/responses/IdempotencyConflict' },
-      422: { $ref: '#/components/responses/IdempotencyKeyReused' },
-    };
+    for (const method of ['post', 'patch', 'put', 'delete'] as const) {
+      const op = item[method];
+      if (!op) continue;
+      op.parameters = [...(op.parameters ?? []), { $ref: '#/components/parameters/IdempotencyKey' }];
+      op.responses = {
+        ...op.responses,
+        400: { $ref: '#/components/responses/InvalidIdempotencyKey' },
+        409: { $ref: '#/components/responses/IdempotencyConflict' },
+        422: { $ref: '#/components/responses/IdempotencyKeyReused' },
+      };
+    }
   }
   return doc;
 }

@@ -1,5 +1,6 @@
 import { config } from './config';
 import { ContractReader, RpcTransport } from './stellar/rpc';
+import { getRpcServer } from './stellar/server';
 
 /**
  * On-chain escrow contract structure matching Soroban escrow contract:
@@ -101,7 +102,7 @@ export class SorobanRpcChainReader implements ChainReader {
           const reader = new ContractReader({
             rpcUrl: this.rpcUrl,
             contractId: this.contractId,
-            network: config.network,
+            networkPassphrase: this.networkPassphrase || config.networkPassphrase,
             transport: this.transport,
           });
           latestLedger = await reader.getLatestLedger();
@@ -130,12 +131,9 @@ export class SorobanRpcChainReader implements ChainReader {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const StellarSdk = require('@stellar/stellar-sdk');
       const networkPassphrase =
-        this.networkPassphrase ||
-        (config.network === 'mainnet'
-          ? StellarSdk.Networks.PUBLIC
-          : StellarSdk.Networks.TESTNET);
+        this.networkPassphrase || config.networkPassphrase;
 
-      const rpcServer = this.transport ?? new StellarSdk.rpc.Server(this.rpcUrl);
+      const rpcServer = this.transport ?? (getRpcServer(this.rpcUrl) as unknown as RpcTransport);
       const contract = new StellarSdk.Contract(this.contractId);
       const dummyAccount = new StellarSdk.Account(
         'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7',
@@ -152,7 +150,7 @@ export class SorobanRpcChainReader implements ChainReader {
         .setTimeout(30)
         .build();
 
-      const sim = await rpcServer.simulateTransaction(tx);
+      const sim: any = await rpcServer.simulateTransaction(tx);
 
       if (StellarSdk.rpc.Api.isSimulationError(sim)) {
         const errStr = String(sim.error);

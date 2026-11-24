@@ -44,9 +44,11 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
+| POST | `/api/v1/auth/logout` | Revoke the presented bearer token (`204`; later use of that token gets `401`) |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
 | GET/POST | `/api/v1/contracts` | List (`?status=a,b`, `?party=`, `?role=`, `?token=`, `?createdAfter=`, `?createdBefore=`, `?linked=true\|false`, `?q=`, `?fields=`, `?sort=`, `?limit=` 1-100 default 20, `?cursor=`) / create escrow contracts; list responses are `{ data, page: { limit, nextCursor, hasMore } }` |
 | GET | `/api/v1/contracts/:id` | Get a contract (`?fields=`) |
+| GET | `/api/v1/contracts/:id/stream` | Live contract events via Server-Sent Events (`Last-Event-ID` resumes from the in-process 500-event buffer) |
 | PATCH | `/api/v1/contracts/:id` | Edit an unfunded contract; `{ "client": "G...", "title": "...", "milestones": [{ "title": "...", "amount": 150 }] }` |
 | DELETE | `/api/v1/contracts/:id` | Withdraw an unfunded contract; `{ "client": "G..." }` |
 | GET | `/api/v1/contracts/:id/revisions` | Get contract term revision history |
@@ -67,7 +69,8 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
-| GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
+| GET/POST | `/api/cron/reconcile-parity` | Authenticated parity reconciliation for all linked contracts (bounded concurrency and time budget); reports in-sync/drifted/unreachable counts and drifted contract IDs, emits `contract.drift_detected`, and updates parity metrics |
+| GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` or a scoped API key with `admin:read` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
 | POST | `/api/v1/tx/submit` | Validate and relay a signed escrow transaction (`{ "xdr": "..." }`) |
 | GET | `/api/v1/tx` | List recent relayed transactions (`?limit=`) |
@@ -76,10 +79,12 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET/PATCH/DELETE | `/api/v1/webhook-subscriptions/:id` | Manage a subscription without exposing its secret |
 | POST | `/api/v1/webhook-subscriptions/:id/rotate-secret` | Rotate a subscription secret |
 | GET | `/api/v1/webhook-subscriptions/:id/deliveries` | Bounded delivery history |
+| POST | `/api/v1/webhook-subscriptions/:id/deliveries/:deliveryId/redeliver` | Re-send a finished delivery's original payload (`202`; `409` while pending) |
 | POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
 | GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
-| GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, brokenAt? }`) |
+| GET | `/api/v1/contracts/:id/timeline` | Chronological merged API and indexed chain history (`?limit=`, `?cursor=`); linked contracts include chain events, and dispute reasons are never returned |
+| GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, truncatedBeforeSeq, maxEntries, brokenAt? }`) |
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
@@ -88,16 +93,37 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 
 Webhook management is disabled (404) when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
 requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
-"https://example.com/events", "events": ["milestone.released"] }`; the generated `whsec_`
-secret is returned only in that creation response and again when explicitly rotated. Events:
-`contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
-`dispute.resolved`, `contract.cancelled`, `reputation.issued` (dispute reasons are never included). Delivery
-payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
+"https://example.com/events", "events": ["milestone.released"], "filter": { "parties": ["G..."], "contractIds": [42] } }`; `filter` is optional, and either array may contain up to 50 entries. When both are present, both criteria must match; parties match a contract's `client` or `freelancer`, and IDs match its `id`. A filtered subscription skips events without `data.contract`. Filters are returned by GET and can be changed with PATCH; send `"filter": null` to clear one. Invalid filters return `400 invalid_filter`. The generated `whsec_`
+secret is returned only in that creation response and again when explicitly rotated.
+
+Every delivery body is the event envelope `{ id, eventId, eventType, timestamp, data }`. Events are emitted only
+after the operation succeeds, and `contract` is always the public contract view, so dispute reasons are never
+included. Subscribe to `"*"` for all of them.
+
+| Event | Emitted by | `data` |
+| --- | --- | --- |
+| `contract.created` | `POST /contracts` | `{ contract }` |
+| `contract.updated` | `PATCH /contracts/:id`, `extend-deadline`, a partial `deposit` | `{ contract, revision? }` — `revision` (`{ revision, at, changes }`) on edits only |
+| `contract.funded` | `deposit` that fully funds the contract | `{ contract }` |
+| `milestone.released` | `release` | `{ contract, milestone }` |
+| `dispute.raised` | `dispute` | `{ contract, dispute }` |
+| `dispute.resolved` | `resolve` | `{ contract, dispute }` |
+| `contract.cancelled` | `cancel` | `{ contract }` |
+| `reputation.issued` | `POST /contracts/:id/reputation` | `{ contract, reputation }` (freelancer) |
+| `reputation.updated` | `POST /contracts/:id/reviews` (either direction) | `{ contract, review, reputation }` — the reviewee's reputation, including `asClient` |
+| `contract.drift_detected` | parity reconciliation cron | drift report |
+
+Delivery payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
 `X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
 failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
-history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
-`http://localhost` is allowed only outside production. DNS can still change after validation,
-so production deployments should use egress controls as defense in depth.
+history. Each delivery has its own `X-Delivery-ID`. After fixing an endpoint, replay a finished (`success` or
+`failed`) delivery with `POST /api/v1/webhook-subscriptions/:id/deliveries/:deliveryId/redeliver`: it re-sends
+the original payload as a new delivery with the same `X-Event-ID`, a fresh `X-Delivery-ID`, a new signature and
+`redeliveryOf` set to the original id (`404` for unknown ids, `409` while the delivery is still pending).
+Payloads are kept only while the delivery is in the bounded history and are never returned by the history endpoint. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
+`http://localhost` is allowed only outside production. Every delivery re-validates DNS and pins the
+HTTP connection to the validated addresses, preserving the original hostname for SNI and `Host`.
+Redirects are not followed, and response bodies and delivery timeouts are bounded.
 
 ## Milestone templates
 
@@ -113,8 +139,9 @@ Every successful state transition (`create`, `deposit`, `release`, `dispute`, `r
 entry with the before/after state (`status`, funded and released amounts), the authenticated actor, the request id and
 action details (e.g. the resolution split). Failed or rejected requests never create entries. Entries are hash-chained
 (`hash = sha256(prevHash + canonicalJSON(entry))`), so modification, deletion or reordering is detected by
-`GET /api/v1/audit/verify`. The log is in-memory and bounded (100,000 entries, oldest evicted first; verification then
-starts from the oldest retained entry). Dispute reasons are not recorded.
+`GET /api/v1/audit/verify`. The log is in-memory and bounded by `AUDIT_MAX_ENTRIES` (default 100,000), with the oldest entries
+evicted first. Verification reports `truncatedBeforeSeq` when eviction has occurred and starts from the oldest retained entry.
+Dispute reasons are not recorded.
 
 ## Admin dispute queue
 
@@ -125,6 +152,12 @@ cursor for stable pagination (`limit` 1–100, default 20). Each `DisputeView` i
 (`openedAt + DISPUTE_SLA_HOURS`, default 72h) and `overdue` (true only while open and strictly past the
 deadline), plus `resolvedAt`/`freelancerBps` once resolved. Dispute **reasons are confidential**: they are
 served only by these two authenticated routes and are omitted from every public contract response and receipt.
+
+Both routes accept either the static `Authorization: Bearer $ADMIN_READ_TOKEN` or a scoped API key with the
+`admin:read` scope (`X-API-Key: <key>` or `Authorization: ApiKey <key>`), so operators can use individually
+revocable keys. A presented API key is always checked as a key: unknown or expired keys get `401` and keys without
+`admin:read` get `403 insufficient_scope`. The routes return `404` while neither `ADMIN_READ_TOKEN` nor `API_KEYS`
+is configured.
 
 ## Reviews
 
@@ -165,9 +198,10 @@ are not compressed when `Cache-Control: no-transform` is present or the content 
 `text/event-stream`.
 ### Idempotency
 
-Every `POST` under `/api/v1` accepts an optional `Idempotency-Key` header (1-255 printable ASCII
-characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a request with the same key
-and body replays the stored response with `Idempotent-Replayed: true` instead of applying it again.
+Every `POST`, `PATCH`, `PUT` and `DELETE` under `/api/v1` accepts an optional `Idempotency-Key` header
+(1-255 printable ASCII characters), following `draft-ietf-httpapi-idempotency-key-header`. Retrying a
+request with the same key and body replays the stored response with `Idempotent-Replayed: true` instead
+of applying it again. `DELETE` request bodies are optional and empty bodies fingerprint as `{}`.
 
 | Situation | Result |
 | --- | --- |
@@ -175,7 +209,7 @@ and body replays the stored response with `Idempotent-Replayed: true` instead of
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_request_in_progress`, `Retry-After: 1` |
 | Malformed key | `400 invalid_idempotency_key` |
-| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` (`400 idempotency_key_required`) |
+| No key | Current behaviour, unless `IDEMPOTENCY_REQUIRED=true` on `POST` (`400 idempotency_key_required`; `PATCH`/`PUT`/`DELETE` remain optional) |
 
 Keys are scoped by method, path and authenticated principal (if `req.user.id` is set). Responses with
 status below 500 are kept for 24h (max 10,000 entries, LRU eviction); 5xx responses are not stored, so the
@@ -196,6 +230,12 @@ Tokens are **required** on `POST /contracts`, `PATCH`/`DELETE /contracts/:id`, `
 `AUTH_REQUIRED=true`); missing or invalid tokens get `401 unauthorized` with `WWW-Authenticate: Bearer`.
 Without `AUTH_SECRET` the challenge flow uses a random per-process secret and unauthenticated requests keep
 working as before, but a token that is sent is always verified.
+
+`POST /api/v1/auth/logout` with `Authorization: Bearer <token>` revokes that token (`204`). It is added to a
+bounded revocation list keyed by the token's `jti` until the token would have expired, and any later request with it
+gets `401 unauthorized` with `WWW-Authenticate: Bearer`. Other tokens of the same wallet keep working. The
+revocation list lives in process memory: it is lost on restart and is not shared between instances (or serverless
+invocations), so on multi-instance deployments a revoked token may still be accepted elsewhere until it expires.
 
 For authenticated calls the token subject (`sub`) is the caller's Stellar address and the store enforces the
 same party rules as the on-chain contract: `deposit`, `release`, `cancel`, `reputation` and contract
@@ -242,6 +282,8 @@ expire and behave exactly as before.
   `insufficient_scope` with `required`); the key id is stored as `dispute.resolvedBy`. With `NODE_ENV=production`
   and no `API_KEYS`, resolution fails closed (401); outside production with no keys configured it stays open for
   local development.
+- `GET /api/v1/disputes` and `GET /api/v1/disputes/:contractId` accept a key with `admin:read` as an alternative
+  to `ADMIN_READ_TOKEN` (403 `insufficient_scope` without the scope).
 - `GET /api/v1/auth/whoami` returns `{ keyId, scopes, expiresAt }` for the presented key (`expiresAt` is an ISO
   8601 UTC string, or `null` for a key that never expires).
 - `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add. Add
@@ -298,8 +340,10 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
+`SEED_DEMO_DATA` (seeds demo contracts into the default store on startup; default `true`, set to `false` to start empty),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
-`CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
+`CURSOR_SECRET` (signs contract-list cursors; defaults to `HMAC-SHA256(AUTH_SECRET, "cursor")` when `AUTH_SECRET` is set, or a random per-process secret otherwise with a one-time production warning), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
+`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `SSE_MAX_CONNECTIONS` (maximum concurrent contract event streams per app process; default 100), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`, `ENABLE_DEMO_CHAIN_FIXTURE` (enables the local `DEMO_ESCROW_3` fixture for `escrowId: "3"` in `SorobanRpcChainReader`; defaults to `true` when `NODE_ENV` is `development` or `test`, and `false` in `production`),
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off),
 `INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `INDEXER_MAX_RUN_MS` (maximum execution time budget per indexer run in milliseconds, default 8000), `INDEXER_MAX_PAGES` (maximum event pages fetched per run, default 5), `API_KEYS` (scoped API keys, see below), `HEALTH_CHECK_TIMEOUT_MS` (per readiness check, default 2000), `HEALTH_CACHE_MS` (readiness
@@ -308,8 +352,8 @@ result cache, default 10000), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
-`GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
-creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
+`GET`/`POST /api/cron/expire-contracts` and `/api/cron/index-events`). New contracts default to a funding deadline 14 days after
+creation; explicit deadlines must be between one hour and 90 days in the future. GET/POST /api/cron/reconcile-parity (same CRON_SECRET bearer auth) checks every linked contract against the chain with bounded concurrency (5) and a time budget, returning counts (checked, inSync, drifted, unreachable), driftedContractIds, and 	imedOut; per-contract chain failures do not abort the run. Drifted contracts emit contract.drift_detected and update gauges escrow_parity_drift_contracts and escrow_parity_last_run_timestamp_seconds. Contracts still unfunded
 (`Created`) at their deadline become `Expired` (lazily on read and by the daily Vercel cron sweep); any
 partial funding is reported as `refundableAmount`/`refundableAmountUnits`. A client can extend a deadline
 through the endpoint above.
@@ -338,7 +382,7 @@ the grace deadline, then force-closes remaining sockets and exits.
 
 ## Request bodies
 
-Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
+Routes that take a body (`POST /api/v1/contracts` and `/extend-deadline`, `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/reviews`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
 
 | Situation | Status | Error code |
 | --- | --- | --- |

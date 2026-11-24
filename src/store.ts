@@ -13,6 +13,7 @@
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditSnapshot, type AuditState } from './audit';
+import { config } from './config';
 import { StoreEventEmitter } from './events';
 import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
 
@@ -235,18 +236,13 @@ const REPUTATION_SORTS: ReputationSort[] = ['score', 'completed', 'average'];
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 /** C in the Bayesian score; REPUTATION_PRIOR_WEIGHT (default 5) unless overridden per store. */
-const parsePriorWeight = (override?: number): number => {
-  if (override !== undefined) return override;
-  const raw = process.env.REPUTATION_PRIOR_WEIGHT;
-  if (raw === undefined || raw === '') return 5;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 5;
-};
+const parsePriorWeight = (override?: number): number =>
+  override !== undefined ? override : config.reputationPriorWeight;
 
-const encodeReputationCursor = (sort: ReputationSort, address: string): string =>
-  Buffer.from(JSON.stringify({ sort, address }), 'utf8').toString('base64url');
+const encodeReputationCursor = (sort: ReputationSort, address: string, windowKey = 'all'): string =>
+  Buffer.from(JSON.stringify({ sort, address, window: windowKey }), 'utf8').toString('base64url');
 
-const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort): string => {
+const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort, expectedWindow = 'all'): string => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
@@ -254,12 +250,15 @@ const decodeReputationCursor = (cursor: string, expectedSort: ReputationSort): s
     throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
   }
   if (!parsed || typeof parsed !== 'object') throw new HttpError(400, 'invalid_cursor', 'cursor is malformed');
-  const { sort, address } = parsed as { sort?: unknown; address?: unknown };
-  if (sort !== expectedSort || typeof address !== 'string' || !address) {
+  const { sort, address, window: cursorWindow } = parsed as { sort?: unknown; address?: unknown; window?: unknown };
+  if (sort !== expectedSort || cursorWindow !== expectedWindow || typeof address !== 'string' || !address) {
     throw new HttpError(400, 'invalid_cursor', 'cursor does not match query');
   }
   return address;
 };
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+const MS_PER_DAY = 86_400_000;
 
 export type ReviewRole = 'client_to_freelancer' | 'freelancer_to_client';
 
@@ -406,6 +405,9 @@ const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
   ['resolveDispute', 'resolve'],
   ['cancel', 'cancel'],
   ['rate', 'rate'],
+  ['edit', 'edit'],
+  ['extendDeadline', 'extend_deadline'],
+  ['delete', 'withdraw'],
 ];
 
 const parseIsoMillis = (value: unknown): number | undefined => {
@@ -499,6 +501,7 @@ export class EscrowStore {
   private reputation = new Map<string, ReputationRecord>();
   private clientReputation = new Map<string, ReputationRecord>();
   private leaderboardCache: LeaderboardCache | null = null;
+  private windowedLeaderboardCache = new Map<string, LeaderboardCache>();
   private priorWeightOverride?: number;
   private readonly clock: Clock;
   /** Domain events (webhooks), emitted only after a mutation succeeds. */
@@ -610,35 +613,51 @@ export class EscrowStore {
   }
 
   private recordAudit(action: AuditAction, contractId: number, before: AuditState | undefined, args: unknown[]) {
+    // For 'withdraw' the contract has already been deleted; use the before snapshot for both states.
+    const isWithdrawn = action === 'withdraw';
     const c = this.contracts.get(contractId);
-    const after = this.auditState(contractId);
-    if (!c || !after) return;
+    const after = isWithdrawn
+      ? { status: 'Withdrawn', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' }
+      : this.auditState(contractId);
+    if (!isWithdrawn && (!c || !after)) return;
     const prev = before ?? { status: 'N/A', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' };
-    const delta = (field: 'fundedAmountUnits' | 'releasedAmountUnits') => BigInt(after[field]!) - BigInt(prev[field]!);
+    const delta = (field: 'fundedAmountUnits' | 'releasedAmountUnits') => BigInt((after as AuditState)[field]!) - BigInt(prev[field]!);
     let details: Record<string, unknown> = {};
-    if (action === 'create') details = { title: c.title, totalAmount: Number(c.totalAmount), totalAmountUnits: c.totalAmount.toString() };
+    if (action === 'create') details = { title: c!.title, totalAmount: Number(c!.totalAmount), totalAmountUnits: c!.totalAmount.toString() };
     else if (action === 'deposit') details = { amount: Number(delta('fundedAmountUnits')), amountUnits: delta('fundedAmountUnits').toString() };
     else if (action === 'release') {
       details = { index: args[1], amount: Number(delta('releasedAmountUnits')), amountUnits: delta('releasedAmountUnits').toString() };
-    } else if (action === 'dispute') details = { raisedBy: c.dispute?.raisedBy }; // reason stays confidential
+    } else if (action === 'dispute') details = { raisedBy: c!.dispute?.raisedBy }; // reason stays confidential
     else if (action === 'resolve') {
       const held = BigInt(prev.fundedAmountUnits!) - BigInt(prev.releasedAmountUnits!);
       const toFreelancer = delta('releasedAmountUnits');
       details = {
-        freelancerBps: c.dispute?.freelancerBps,
+        freelancerBps: c!.dispute?.freelancerBps,
         toFreelancer: Number(toFreelancer),
         toClient: Number(held - toFreelancer),
         toFreelancerUnits: toFreelancer.toString(),
         toClientUnits: (held - toFreelancer).toString(),
       };
     } else if (action === 'rate') details = { rating: Number(args[1]) };
+    else if (action === 'edit') {
+      // args[1] is the input object; expose only changed field names (not values)
+      const input = args[1] as { title?: unknown; milestones?: unknown } | undefined;
+      const changedFields: string[] = [];
+      if (input && Object.prototype.hasOwnProperty.call(input, 'title')) changedFields.push('title');
+      if (input && Object.prototype.hasOwnProperty.call(input, 'milestones')) changedFields.push('milestones');
+      details = { changedFields, revision: c!.revision };
+    } else if (action === 'extend_deadline') {
+      // args[2] is the new fundingDeadline ISO string
+      details = { newDeadline: c!.fundingDeadline };
+    }
+    // 'withdraw' leaves details empty — no sensitive contract data
     const ctx = this.auditContext ?? {};
     this.audit.append({
       contractId,
       action,
-      ctx: { ...ctx, actor: ctx.actor ?? (action === 'dispute' ? c.dispute?.raisedBy : undefined) },
+      ctx: { ...ctx, actor: ctx.actor ?? (action === 'dispute' ? c?.dispute?.raisedBy : undefined) },
       before: prev,
-      after,
+      after: after as AuditState,
       details,
       at: this.nowIso(),
     });
@@ -843,7 +862,9 @@ export class EscrowStore {
     if (c.revisions.length > MAX_REVISIONS) c.revisions.shift();
     c.updatedAt = at;
     c.version += 1;
-    return toPublic(c);
+    const updated = toPublic(c);
+    this.events.emit('contract.updated', { contract: publicContract(updated), revision: c.revisions[c.revisions.length - 1] });
+    return updated;
   }
 
   getRevisions(id: number): ContractRevision[] {
@@ -994,10 +1015,27 @@ export class EscrowStore {
     r.histogram[rating - 1] += 1;
     r.lastRatedAt = this.nowIso();
     map.set(address, r);
-    this.leaderboardCache = null;
+    this.invalidateLeaderboardCache();
   }
 
+  private invalidateLeaderboardCache() {
+    this.leaderboardCache = null;
+    this.windowedLeaderboardCache.clear();
+  }
+
+  /** Record a review and publish `reputation.updated` with the reviewee's new reputation. */
   createReview(
+    id: number,
+    input: { reviewer?: unknown; rating?: unknown; comment?: unknown },
+  ): Review {
+    const review = this.addReview(id, input);
+    const contract = publicContract(toPublic(this.getInternal(id)));
+    this.events.emit('reputation.updated', { contract, review, reputation: this.getReputationWithClient(review.reviewee) });
+    return review;
+  }
+
+  /** Validate and store a review without emitting events (`rate` publishes `reputation.issued` instead). */
+  private addReview(
     id: number,
     input: { reviewer?: unknown; rating?: unknown; comment?: unknown },
   ): Review {
@@ -1045,6 +1083,10 @@ export class EscrowStore {
     if (c.status === 'Expired') {
       throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
     }
+    // Completed, Resolved and Cancelled are terminal: nothing about them may change.
+    if (c.status === 'Completed' || c.status === 'Resolved' || c.status === 'Cancelled') {
+      throw new HttpError(409, 'contract_not_active', `Contract is ${c.status}`);
+    }
     if (client !== c.client) {
       throw new HttpError('forbidden', 'Only the client can extend the funding deadline');
     }
@@ -1054,7 +1096,9 @@ export class EscrowStore {
       throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be later and no more than 90 days away');
     }
     c.fundingDeadline = new Date(deadline).toISOString();
-    return this.touch(c);
+    const updated = this.touch(c);
+    this.events.emit('contract.updated', { contract: publicContract(updated) });
+    return updated;
   }
 
   /** Expire every due unfunded contract; returns the ids expired by this sweep (idempotent). */
@@ -1075,7 +1119,7 @@ export class EscrowStore {
     this.requireClient(c, caller, 'issue reputation');
     assertAllowed('rate', c, { rating: ratingRaw });
     const rating = this.validateRating(ratingRaw);
-    this.createReview(id, { reviewer: c.client, rating });
+    this.addReview(id, { reviewer: c.client, rating });
     return this.getReputation(c.freelancer);
   }
 
@@ -1232,21 +1276,114 @@ export class EscrowStore {
     return { status: parityStatus, drift, checkedAt: now, latestLedger: result.latestLedger };
   }
 
-  /** Ranked leaderboard (freelancer ratings), cached until the next rating. */
-  private getLeaderboardCache(): LeaderboardCache {
-    const C = parsePriorWeight(this.priorWeightOverride);
-    if (this.leaderboardCache && this.leaderboardCache.priorWeight === C) return this.leaderboardCache;
+  /**
+   * Reconcile parity for all linked contracts with bounded concurrency and a
+   * time budget. A chain failure for one contract is recorded and does not
+   * abort the run. Emits `contract.drift_detected` for each drifted contract.
+   */
+  async reconcileParity(
+    chainReader: import('./chain').ChainReader,
+    options: { concurrency?: number; timeBudgetMs?: number } = {},
+  ): Promise<{
+    checked: number;
+    inSync: number;
+    drifted: number;
+    unreachable: number;
+    driftedContractIds: number[];
+    timedOut: boolean;
+  }> {
+    const concurrency = Math.max(1, Math.floor(options.concurrency ?? 5));
+    const timeBudgetMs = Math.max(0, Math.floor(options.timeBudgetMs ?? 25_000));
+    const deadline = Date.now() + timeBudgetMs;
 
+    const linked = Array.from(this.contracts.values())
+      .filter((c) => !!c.chain)
+      .sort((a, b) => a.id - b.id);
+
+    let inSync = 0;
+    let drifted = 0;
+    let unreachable = 0;
+    const driftedContractIds: number[] = [];
+    let timedOut = false;
+    let cursor = 0;
+
+    const remaining = () => deadline - Date.now();
+
+    const processContract = async (c: InternalContract) => {
+      if (remaining() <= 0) {
+        timedOut = true;
+        return;
+      }
+      const budgetLeft = remaining();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const parity = await Promise.race([
+          this.checkParity(c.id, chainReader),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('reconcile_time_budget_exceeded')), Math.max(1, budgetLeft));
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
+        if (parity.status === 'drift') {
+          drifted++;
+          driftedContractIds.push(c.id);
+          this.events.emit('contract.drift_detected', {
+            contractId: c.id,
+            escrowId: c.chain?.escrowId,
+            drift: parity.drift,
+            checkedAt: parity.checkedAt,
+            latestLedger: parity.latestLedger,
+            contract: publicContract(toPublic(c)),
+          });
+        } else {
+          inSync++;
+        }
+      } catch (err) {
+        if (timer) clearTimeout(timer);
+        if (remaining() <= 0 || (err instanceof Error && err.message === 'reconcile_time_budget_exceeded')) {
+          timedOut = true;
+        } else {
+          unreachable++;
+        }
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(concurrency, linked.length) }, async () => {
+      while (true) {
+        if (remaining() <= 0) {
+          timedOut = true;
+          return;
+        }
+        const index = cursor++;
+        if (index >= linked.length) return;
+        await processContract(linked[index]);
+      }
+    });
+
+    await Promise.all(workers);
+    if (cursor < linked.length) timedOut = true;
+
+    return {
+      checked: inSync + drifted + unreachable,
+      inSync,
+      drifted,
+      unreachable,
+      driftedContractIds,
+      timedOut,
+    };
+  }
+
+  private buildLeaderboardCache(reputationMap: Map<string, ReputationRecord>, C: number): LeaderboardCache {
     let globalTotal = 0;
     let globalCompleted = 0;
-    for (const r of this.reputation.values()) {
+    for (const r of reputationMap.values()) {
       globalTotal += r.total;
       globalCompleted += r.completed;
     }
     const m = globalCompleted > 0 ? globalTotal / globalCompleted : 3;
 
     const entries: Reputation[] = [];
-    for (const [address, r] of this.reputation.entries()) {
+    for (const [address, r] of reputationMap.entries()) {
       if (r.completed < 1) continue;
       entries.push({
         address,
@@ -1273,7 +1410,7 @@ export class EscrowStore {
       entry.rank = idx + 1;
       byAddress.set(entry.address, entry);
     });
-    this.leaderboardCache = {
+    return {
       priorWeight: C,
       globalMean: m,
       bySort: {
@@ -1283,7 +1420,76 @@ export class EscrowStore {
       },
       byAddress,
     };
-    return this.leaderboardCache;
+  }
+
+  /** Ranked leaderboard (freelancer ratings), cached per window until the next rating. */
+  private getLeaderboardCache(window?: { key: string; sinceMs: number }): LeaderboardCache {
+    const C = parsePriorWeight(this.priorWeightOverride);
+    if (!window) {
+      if (this.leaderboardCache && this.leaderboardCache.priorWeight === C) return this.leaderboardCache;
+      this.leaderboardCache = this.buildLeaderboardCache(this.reputation, C);
+      return this.leaderboardCache;
+    }
+
+    const cached = this.windowedLeaderboardCache.get(window.key);
+    if (cached && cached.priorWeight === C) return cached;
+
+    const windowedMap = new Map<string, ReputationRecord>();
+    for (const review of this.reviews) {
+      if (review.role !== 'client_to_freelancer') continue;
+      if (Date.parse(review.createdAt) < window.sinceMs) continue;
+      const rec = windowedMap.get(review.reviewee) ?? {
+        completed: 0,
+        total: 0,
+        histogram: [0, 0, 0, 0, 0] as RatingHistogram,
+        lastRatedAt: null,
+      };
+      rec.completed += 1;
+      rec.total += review.rating;
+      rec.histogram[review.rating - 1] += 1;
+      if (rec.lastRatedAt === null || review.createdAt > rec.lastRatedAt) {
+        rec.lastRatedAt = review.createdAt;
+      }
+      windowedMap.set(review.reviewee, rec);
+    }
+
+    const built = this.buildLeaderboardCache(windowedMap, C);
+    this.windowedLeaderboardCache.set(window.key, built);
+    return built;
+  }
+
+  private parseReputationWindow(sinceRaw: unknown, windowDaysRaw: unknown): { key: string; sinceMs: number } | undefined {
+    const hasSince = sinceRaw !== undefined && sinceRaw !== '';
+    const hasWindowDays = windowDaysRaw !== undefined && windowDaysRaw !== '';
+    if (hasSince && hasWindowDays) {
+      throw new HttpError(400, 'invalid_since', 'since and windowDays are mutually exclusive');
+    }
+    const nowMs = this.clock().getTime();
+    if (hasSince) {
+      if (typeof sinceRaw !== 'string' || !ISO_DATE_RE.test(sinceRaw)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid ISO 8601 date');
+      }
+      const ms = Date.parse(sinceRaw);
+      if (Number.isNaN(ms)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid ISO 8601 date');
+      }
+      if (sinceRaw.length === 10 && !new Date(ms).toISOString().startsWith(sinceRaw)) {
+        throw new HttpError(400, 'invalid_since', 'since must be a valid calendar date');
+      }
+      if (ms > nowMs) {
+        throw new HttpError(400, 'invalid_since', 'since must not be in the future');
+      }
+      const canonical = new Date(ms).toISOString();
+      return { key: `since:${canonical}`, sinceMs: ms };
+    }
+    if (hasWindowDays) {
+      const n = Number(windowDaysRaw);
+      if (typeof windowDaysRaw !== 'string' || !Number.isInteger(n) || n < 1) {
+        throw new HttpError(400, 'invalid_since', 'windowDays must be a positive integer');
+      }
+      return { key: `windowDays:${n}`, sinceMs: nowMs - n * MS_PER_DAY };
+    }
+    return undefined;
   }
 
   private cloneReputation(r: Reputation): Reputation {
@@ -1306,8 +1512,10 @@ export class EscrowStore {
     };
   }
 
-  /** Paginated leaderboard: sort=score|completed|average, minCompleted (default 1), limit 1..100. */
-  listReputation(query: { sort?: unknown; minCompleted?: unknown; limit?: unknown; cursor?: unknown } = {}): ReputationPage {
+  /** Paginated leaderboard: sort=score|completed|average, minCompleted (default 1), limit 1..100, optional since/windowDays. */
+  listReputation(
+    query: { sort?: unknown; minCompleted?: unknown; limit?: unknown; cursor?: unknown; since?: unknown; windowDays?: unknown } = {},
+  ): ReputationPage {
     const sortRaw = query.sort === undefined || query.sort === '' ? 'score' : query.sort;
     if (typeof sortRaw !== 'string' || !REPUTATION_SORTS.includes(sortRaw as ReputationSort)) {
       throw new HttpError(400, 'invalid_sort', 'sort must be one of score, completed, average');
@@ -1332,13 +1540,16 @@ export class EscrowStore {
       limit = n;
     }
 
+    const window = this.parseReputationWindow(query.since, query.windowDays);
+    const windowKey = window ? window.key : 'all';
+
     let cursorAddress: string | undefined;
     if (query.cursor !== undefined && query.cursor !== '') {
       if (typeof query.cursor !== 'string') throw new HttpError(400, 'invalid_cursor', 'cursor must be a string');
-      cursorAddress = decodeReputationCursor(query.cursor, sort);
+      cursorAddress = decodeReputationCursor(query.cursor, sort, windowKey);
     }
 
-    const filtered = this.getLeaderboardCache().bySort[sort].filter((r) => r.completedContracts >= minCompleted);
+    const filtered = this.getLeaderboardCache(window).bySort[sort].filter((r) => r.completedContracts >= minCompleted);
     let startIndex = 0;
     if (cursorAddress !== undefined) {
       const idx = filtered.findIndex((r) => r.address === cursorAddress);
@@ -1349,7 +1560,11 @@ export class EscrowStore {
     const hasMore = startIndex + limit < filtered.length;
     return {
       data: slice.map((r) => this.cloneReputation(r)),
-      page: { limit, nextCursor: hasMore && slice.length ? encodeReputationCursor(sort, slice[slice.length - 1].address) : null, hasMore },
+      page: {
+        limit,
+        nextCursor: hasMore && slice.length ? encodeReputationCursor(sort, slice[slice.length - 1].address, windowKey) : null,
+        hasMore,
+      },
     };
   }
 
@@ -1642,14 +1857,36 @@ export class EscrowStore {
     // Sum with bigint to match contract precision; expose as decimal strings.
     let totalEscrowedBig = 0n;
     let totalReleasedBig = 0n;
+    const tokenBigInts: Record<string, { contracts: number; escrowed: bigint; released: bigint }> = {};
+
     for (const c of all) {
-      totalEscrowedBig += c.fundedAmount - c.releasedAmount;
-      totalReleasedBig += c.releasedAmount;
+      const escrowed = c.fundedAmount - c.releasedAmount;
+      const released = c.releasedAmount;
+      totalEscrowedBig += escrowed;
+      totalReleasedBig += released;
+
+      const tokenKey = c.token || 'XLM';
+      if (!tokenBigInts[tokenKey]) {
+        tokenBigInts[tokenKey] = { contracts: 0, escrowed: 0n, released: 0n };
+      }
+      tokenBigInts[tokenKey].contracts += 1;
+      tokenBigInts[tokenKey].escrowed += escrowed;
+      tokenBigInts[tokenKey].released += released;
+    }
+
+    const byToken: Record<string, { contracts: number; totalEscrowedUnits: string; totalReleasedUnits: string }> = {};
+    for (const [token, data] of Object.entries(tokenBigInts)) {
+      byToken[token] = {
+        contracts: data.contracts,
+        totalEscrowedUnits: data.escrowed.toString(),
+        totalReleasedUnits: data.released.toString(),
+      };
     }
 
     return {
       contracts: all.length,
       byStatus,
+      byToken,
       /** @deprecated lossy above 2^53; use totalEscrowedUnits */
       totalEscrowed: Number(totalEscrowedBig),
       totalEscrowedUnits: totalEscrowedBig.toString(),
@@ -1700,7 +1937,7 @@ export class EscrowStore {
     this.nextId = state.nextId;
     this.nextReviewId = state.nextReviewId;
     this.nextTemplateId = state.nextTemplateId;
-    this.leaderboardCache = null;
+    this.invalidateLeaderboardCache();
     this.audit.loadSnapshot(state.audit);
   }
 

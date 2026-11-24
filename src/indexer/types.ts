@@ -10,6 +10,21 @@ export interface EventMetadata {
   txHash: string;
 }
 
+export const EVENT_TYPES = [
+  'Created',
+  'Deposit',
+  'Release',
+  'Dispute',
+  'Resolved',
+  'Cancel',
+  'Reputation',
+  'Paused',
+  'Init',
+  'Unknown',
+] as const;
+
+export type EventType = (typeof EVENT_TYPES)[number];
+
 export type EscrowEvent =
   | { type: 'Created'; data: CreatedEvent }
   | { type: 'Deposit'; data: DepositEvent }
@@ -99,7 +114,7 @@ export function escrowIdOf(event: EscrowEvent): string | undefined {
 export interface EventStore {
   getCursor(): string | null;
   setCursor(cursor: string): void;
-  append(events: IndexedEvent[]): void;
+  append(events: IndexedEvent[]): IndexedEvent[];
   query(filter: {
     escrowId?: string;
     type?: string;

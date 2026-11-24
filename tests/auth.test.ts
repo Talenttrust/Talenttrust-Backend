@@ -5,6 +5,7 @@ import { EscrowStore, HttpError } from '../src/store';
 import { authHeader } from './helpers/auth';
 import { buildChallenge, verifyChallenge, consumeNonce, resetNonces, CHALLENGE_TTL_SECONDS } from '../src/auth/challenge';
 import { issueWalletToken, verifyWalletToken, WALLET_TOKEN_TTL } from '../src/auth/jwt';
+import { TokenRevocationList } from '../src/auth/revocation';
 import { randomBytes } from 'crypto';
 
 const AUTH_SECRET = 'test-secret-must-be-at-least-32-bytes-long!!!';
@@ -46,6 +47,8 @@ describe('wallet-signature auth', () => {
       expect(res.body.address).toBe(kp.publicKey());
       expect(res.body.challenge).toMatch(/^talenttrust-auth:/);
       expect(res.body.expiresAt).toBeDefined();
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['pragma']).toBe('no-cache');
     });
 
     it('returns 400 for an invalid address', async () => {
@@ -53,6 +56,7 @@ describe('wallet-signature auth', () => {
       const res = await request(app).get('/api/v1/auth/challenge?address=not-a-stellar-address');
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('invalid_address');
+      expect(res.headers['cache-control']).toBe('no-store');
     });
 
     it('returns 400 when address is missing', async () => {
@@ -77,6 +81,26 @@ describe('wallet-signature auth', () => {
       // Verify the token works on a protected route
       const contractsRes = await request(app).get('/api/v1/contracts');
       expect(contractsRes.status).toBe(200);
+    });
+
+    it('marks the token response no-store on success and error', async () => {
+      const { app } = makeApp();
+      const kp = Keypair.random();
+      const challengeRes = await request(app).get(`/api/v1/auth/challenge?address=${kp.publicKey()}`);
+      const { challenge } = challengeRes.body;
+      const sig = Buffer.from(kp.sign(Buffer.from(challenge, 'utf-8'))).toString('base64');
+
+      const ok = await request(app)
+        .post('/api/v1/auth/token')
+        .send({ address: kp.publicKey(), challenge, signature: sig });
+      expect(ok.status).toBe(200);
+      expect(ok.headers['cache-control']).toBe('no-store');
+      expect(ok.headers['pragma']).toBe('no-cache');
+
+      const bad = await request(app).post('/api/v1/auth/token').send({ address: kp.publicKey() });
+      expect(bad.status).toBe(400);
+      expect(bad.headers['cache-control']).toBe('no-store');
+      expect(bad.headers['pragma']).toBe('no-cache');
     });
 
     it('returns 401 invalid_challenge for a tampered challenge', async () => {
@@ -711,5 +735,220 @@ describe('wallet-signature auth', () => {
       const token = `${signingInput}.${sig}`;
       expect(verifyWalletToken(token, AUTH_SECRET).ok).toBe(false);
     });
+
+    it('verifyWalletToken rejects a token without iat', () => {
+      const now = 1_000_000;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', exp: now + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now).ok).toBe(false);
+    });
+
+    it('verifyWalletToken rejects a token without jti', () => {
+      const now = 1_000_000;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat: now, exp: now + 3600 })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken rejects a token with empty jti', () => {
+      const now = 1_000_000;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat: now, exp: now + 3600, jti: '' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken rejects a token with iat more than 60s in the future', () => {
+      const now = 1_000_000;
+      const iat = now + 61; // 61 seconds in the future
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat, exp: iat + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken accepts a token with iat exactly 60s in the future (clock skew)', () => {
+      const now = 1_000_000;
+      const iat = now + 60; // exactly 60 seconds in the future
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat, exp: iat + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(true);
+    });
+
+    it('verifyWalletToken rejects a token with lifetime exceeding WALLET_TOKEN_TTL', () => {
+      const now = 1_000_000;
+      const iat = now;
+      const exp = iat + WALLET_TOKEN_TTL + 1; // 1 second over limit
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat, exp, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken accepts a token with lifetime exactly WALLET_TOKEN_TTL', () => {
+      const now = 1_000_000;
+      const iat = now;
+      const exp = iat + WALLET_TOKEN_TTL;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat, exp, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(true);
+    });
+
+    it('verifyWalletToken rejects a token with non-numeric iat', () => {
+      const now = 1_000_000;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat: 'not-a-number', exp: now + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken rejects a token with non-finite iat', () => {
+      const now = 1_000_000;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat: Infinity, exp: now + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken rejects a token with typ header that is not JWT', () => {
+      const now = 1_000_000;
+      const iat = now;
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWS' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'GTEST', iat, exp: iat + 3600, jti: 'x' })).toString('base64url');
+      const signingInput = `${header}.${payload}`;
+      const sig = require('crypto').createHmac('sha256', AUTH_SECRET).update(signingInput).digest('base64url');
+      const token = `${signingInput}.${sig}`;
+      expect(verifyWalletToken(token, AUTH_SECRET, () => now * 1000).ok).toBe(false);
+    });
+
+    it('verifyWalletToken accepts a freshly issued token', () => {
+      const addr = Keypair.random().publicKey();
+      const { token } = issueWalletToken(addr, AUTH_SECRET);
+      const result = verifyWalletToken(token, AUTH_SECRET);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.address).toBe(addr);
+    });
+  });
+});
+
+describe('POST /api/v1/auth/logout (wallet token revocation)', () => {
+  const create = (app: ReturnType<typeof createApp>, authorization: string) =>
+    request(app)
+      .post('/api/v1/contracts')
+      .set('Authorization', authorization)
+      .send({ freelancer: Keypair.random().publicKey(), milestones: [{ amount: 100 }] });
+
+  it('revokes the presented token: later use gets 401 with WWW-Authenticate', async () => {
+    const { app } = makeApp();
+    const { Authorization } = await authHeader(Keypair.random(), app);
+    expect((await create(app, Authorization)).status).toBe(201);
+
+    const logout = await request(app).post('/api/v1/auth/logout').set('Authorization', Authorization);
+    expect(logout.status).toBe(204);
+    expect(logout.headers['cache-control']).toBe('no-store');
+
+    const after = await create(app, Authorization);
+    expect(after.status).toBe(401);
+    expect(after.body.error).toBe('unauthorized');
+    expect(after.headers['www-authenticate']).toBe('Bearer');
+
+    const again = await request(app).post('/api/v1/auth/logout').set('Authorization', Authorization);
+    expect(again.status).toBe(401);
+    expect(again.headers['www-authenticate']).toBe('Bearer');
+  });
+
+  it('keeps other tokens of the same wallet working', async () => {
+    const { app } = makeApp();
+    const kp = Keypair.random();
+    const first = await authHeader(kp, app);
+    const second = await authHeader(kp, app);
+    expect(first.Authorization).not.toBe(second.Authorization);
+    await request(app).post('/api/v1/auth/logout').set(first).expect(204);
+    expect((await create(app, first.Authorization)).status).toBe(401);
+    expect((await create(app, second.Authorization)).status).toBe(201);
+  });
+
+  it('requires a valid token, even when wallet auth is optional', async () => {
+    const legacy = createApp({ store: new EscrowStore(), authSecret: AUTH_SECRET, authRequired: false });
+    const missing = await request(legacy).post('/api/v1/auth/logout');
+    expect(missing.status).toBe(401);
+    expect(missing.headers['www-authenticate']).toBe('Bearer');
+    expect((await request(legacy).post('/api/v1/auth/logout').set('Authorization', 'Bearer not.a.jwt')).status).toBe(401);
+  });
+
+  it('keeps the token revoked for its whole remaining lifetime', async () => {
+    let nowMs = Date.now();
+    const now = () => nowMs;
+    const { app } = makeApp(now);
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET, now);
+    const claims = verifyWalletToken(token, AUTH_SECRET, now);
+    if (!claims.ok) throw new Error('expected a valid token');
+    await request(app).post('/api/v1/auth/logout').set('Authorization', `Bearer ${token}`).expect(204);
+    // Last instant at which the JWT itself would still be accepted.
+    nowMs = claims.exp * 1000 + 999;
+    expect(verifyWalletToken(token, AUTH_SECRET, now).ok).toBe(true);
+    expect((await create(app, `Bearer ${token}`)).status).toBe(401);
+  });
+
+  it('lets revocation entries expire with the token', () => {
+    let nowMs = Date.now();
+    const now = () => nowMs;
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET, now);
+    const claims = verifyWalletToken(token, AUTH_SECRET, now);
+    if (!claims.ok) throw new Error('expected a valid token');
+    const list = new TokenRevocationList({ now });
+    list.revoke(claims.jti, (claims.exp + 1) * 1000);
+    expect(list.isRevoked(claims.jti)).toBe(true);
+    expect(list.size).toBe(1);
+    nowMs = (claims.exp + 1) * 1000;
+    expect(verifyWalletToken(token, AUTH_SECRET, now).ok).toBe(false);
+    expect(list.isRevoked(claims.jti)).toBe(false);
+    expect(list.size).toBe(0);
+  });
+});
+
+describe('TokenRevocationList', () => {
+  it('skips already-expired tokens and evicts the oldest entry beyond capacity', () => {
+    let nowMs = 1_000;
+    const list = new TokenRevocationList({ capacity: 2, now: () => nowMs });
+    list.revoke('expired', 1_000);
+    expect(list.isRevoked('expired')).toBe(false);
+    list.revoke('a', 10_000);
+    list.revoke('b', 10_000);
+    list.revoke('c', 10_000);
+    expect(list.isRevoked('a')).toBe(false);
+    expect(list.isRevoked('b')).toBe(true);
+    expect(list.isRevoked('c')).toBe(true);
+    expect(list.size).toBe(2);
+    nowMs = 10_000;
+    expect(list.size).toBe(0);
+  });
+
+  it('exposes jti and exp from verifyWalletToken', () => {
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET);
+    const result = verifyWalletToken(token, AUTH_SECRET);
+    expect(result).toMatchObject({ ok: true, jti: expect.any(String), exp: expect.any(Number) });
   });
 });

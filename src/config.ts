@@ -8,55 +8,93 @@ function resolveBodyLimit(raw: string | undefined): string {
   }
   return value;
 }
-const slaRaw = Number(process.env.DISPUTE_SLA_HOURS);
-
-const network = process.env.STELLAR_NETWORK || 'testnet';
-
 /** Stellar network passphrases by STELLAR_NETWORK name. */
-const NETWORK_PASSPHRASES: Record<string, string> = {
+export const NETWORK_PASSPHRASES: Record<string, string> = {
   testnet: 'Test SDF Network ; September 2015',
   mainnet: 'Public Global Stellar Network ; September 2015',
   public: 'Public Global Stellar Network ; September 2015',
   futurenet: 'Test SDF Future Network ; October 2022',
+  local: 'Local Stellar Network ; September 2015',
 };
 
-function positiveIntEnv(name: string, fallback: number): number {
+export interface EnvIntOptions {
+  default: number;
+  min?: number;
+  max?: number;
+  allowZero?: boolean;
+}
+
+/** Parse and validate an integer environment variable, failing fast on invalid values. */
+export function envInt(name: string, opts: EnvIntOptions): number {
   const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`Invalid ${name}: "${raw}". Must be a positive integer.`);
+  if (raw === undefined || raw === '') return opts.default;
+  const trimmed = raw.trim();
+  if (trimmed === '' || !/^-?\d+$/.test(trimmed)) {
+    throw new Error(`Invalid ${name}: "${raw}"`);
+  }
+  const value = Number(trimmed);
+  const min = opts.min ?? (opts.allowZero ? 0 : 1);
+  if (!Number.isSafeInteger(value) || value < min || (opts.max !== undefined && value > opts.max)) {
+    throw new Error(`Invalid ${name}: "${raw}"`);
   }
   return value;
 }
 
-const intEnv = (value: string | undefined, fallback: number) => {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-};
+export function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number): number;
+export function parseNonNegativeInt(name: string, raw: string | undefined, fallback?: number): number | undefined;
+export function parseNonNegativeInt(name: string, raw: string | undefined, fallback?: number): number | undefined {
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || raw.trim() === '') {
+    throw new Error(`Invalid ${name}: "${raw}". Must be a non-negative integer.`);
+  }
+  return value;
+}
+
+export function nonNegativeIntEnv(name: string, fallback: number): number;
+export function nonNegativeIntEnv(name: string, fallback?: number): number | undefined;
+export function nonNegativeIntEnv(name: string, fallback?: number): number | undefined {
+  return parseNonNegativeInt(name, process.env[name], fallback);
+}
+
 
 export const config = {
-  network,
-  networkPassphrase:
-    process.env.STELLAR_NETWORK_PASSPHRASE ||
-    NETWORK_PASSPHRASES[network.toLowerCase()] ||
-    NETWORK_PASSPHRASES.testnet,
+  get network(): string {
+    return process.env.STELLAR_NETWORK || 'testnet';
+  },
+  set network(value: string) {
+    process.env.STELLAR_NETWORK = value;
+  },
+  get networkPassphrase(): string {
+    if (process.env.STELLAR_NETWORK_PASSPHRASE) {
+      return process.env.STELLAR_NETWORK_PASSPHRASE;
+    }
+    const net = (process.env.STELLAR_NETWORK || 'testnet').toLowerCase();
+    return NETWORK_PASSPHRASES[net] || NETWORK_PASSPHRASES.testnet;
+  },
+  set networkPassphrase(value: string) {
+    process.env.STELLAR_NETWORK_PASSPHRASE = value;
+  },
   contractId:
     process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
-  txTimeoutSeconds: Math.max(1, Number.parseInt(process.env.TX_TIMEOUT_SECONDS || '300', 10) || 300),
+  txTimeoutSeconds: envInt('TX_TIMEOUT_SECONDS', { default: 300 }),
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
-  disputeSlaHours: Number.isFinite(slaRaw) && slaRaw > 0 ? slaRaw : 72,
+  disputeSlaHours: envInt('DISPUTE_SLA_HOURS', { default: 72 }),
   version: '1.0.0',
   /** Per-call Soroban RPC timeout. */
-  rpcTimeoutMs: intEnv(process.env.RPC_TIMEOUT_MS, 4000),
+  rpcTimeoutMs: envInt('RPC_TIMEOUT_MS', { default: 4000 }),
   /** How long a successful /api/v1/chain on-chain snapshot stays cached. */
-  chainStatusTtlMs: intEnv(process.env.CHAIN_STATUS_TTL_MS, 15000),
+  chainStatusTtlMs: envInt('CHAIN_STATUS_TTL_MS', { default: 15000 }),
   /** Minimum interval between cache-bypassing ?refresh=true fetches. */
-  chainRefreshMinIntervalMs: intEnv(process.env.CHAIN_REFRESH_MIN_INTERVAL_MS, 5000),
+  chainRefreshMinIntervalMs: envInt('CHAIN_REFRESH_MIN_INTERVAL_MS', { default: 5000 }),
+  /** Cache TTL for /api/v1/chain/contracts and /api/v1/chain/reputation read-through endpoints (0 = disabled). */
+  chainReadTtlMs: envInt('CHAIN_READ_TTL_MS', { default: 5000, allowZero: true }),
+  /** Bayesian prior weight C for freelancer reputation ranking (0 = unweighted average). */
+  reputationPriorWeight: envInt('REPUTATION_PRIOR_WEIGHT', { default: 5, allowZero: true }),
   requireIfMatch: process.env.REQUIRE_IF_MATCH === 'true',
   apiPaused: process.env.API_PAUSED === 'true',
-  pauseCheckTtlMs: Number(process.env.PAUSE_CHECK_TTL_MS) || 10000,
+  pauseCheckTtlMs: envInt('PAUSE_CHECK_TTL_MS', { default: 10000 }),
   pauseFailMode: (process.env.PAUSE_FAIL_MODE === 'closed' ? 'closed' : 'open') as 'open' | 'closed',
   /** Set PAUSE_CHECK_CHAIN=false to skip the on-chain is_paused probe (tests, offline dev). */
   pauseCheckChain: process.env.PAUSE_CHECK_CHAIN !== 'false',
@@ -64,13 +102,17 @@ export const config = {
   /** Extra comma-separated CORS origins (added to FRONTEND_URL and local dev origins). */
   corsOrigins: process.env.CORS_ORIGINS || '',
   /** Poll interval for the long-running server's event indexer (0 = disabled; serverless uses the cron). */
-  indexerIntervalMs: process.env.INDEXER_INTERVAL_MS ? Number(process.env.INDEXER_INTERVAL_MS) : 0,
+  indexerIntervalMs: nonNegativeIntEnv('INDEXER_INTERVAL_MS', 0),
+  /** Retry interval for background webhook delivery runner (0 = disabled; serverless uses the cron). */
+  webhookRetryIntervalMs: nonNegativeIntEnv('WEBHOOK_RETRY_INTERVAL_MS', 0),
   /** Per-check timeout for /health/ready. */
-  healthCheckTimeoutMs: positiveIntEnv('HEALTH_CHECK_TIMEOUT_MS', 2000),
+  healthCheckTimeoutMs: envInt('HEALTH_CHECK_TIMEOUT_MS', { default: 2000 }),
   /** How long /health/ready reuses the last result (single-flight in between). */
-  healthCacheMs: positiveIntEnv('HEALTH_CACHE_MS', 10000),
+  healthCacheMs: envInt('HEALTH_CACHE_MS', { default: 10000 }),
   /** Max relayed transactions remembered for GET /api/v1/tx. */
-  txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
+  txCacheMax: envInt('TX_CACHE_MAX', { default: 200 }),
+  /** Maximum audit entries retained in memory before oldest entries are evicted. */
+  auditMaxEntries: envInt('AUDIT_MAX_ENTRIES', { default: 100_000 }),
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

@@ -2,7 +2,8 @@
  * In-memory event store with bounded size, deduplication, and indexed queries.
  */
 
-import { EventStore, IndexedEvent, escrowIdOf } from './types';
+import { EventStore, IndexedEvent, escrowIdOf, EVENT_TYPES } from './types';
+import { HttpError } from '../amount-error';
 
 const MAX_EVENTS = 10_000;
 
@@ -66,13 +67,15 @@ export class InMemoryEventStore implements EventStore {
     this.cursor = cursor;
   }
 
-  append(events: IndexedEvent[]): void {
+  append(events: IndexedEvent[]): IndexedEvent[] {
     let reindexFrom = this.events.length;
+    const newlyAdded: IndexedEvent[] = [];
 
     for (const event of events) {
       if (this.idToIndex.has(event.id)) {
         continue;
       }
+      newlyAdded.push(event);
 
       const idx = insertSorted(this.events, event);
       if (idx < this.events.length - 1) {
@@ -150,6 +153,8 @@ export class InMemoryEventStore implements EventStore {
         this.idToIndex.set(this.events[i].id, i);
       }
     }
+
+    return newlyAdded;
   }
 
   query(filter: {
@@ -158,6 +163,10 @@ export class InMemoryEventStore implements EventStore {
     limit?: number;
     cursor?: string;
   }): { data: IndexedEvent[]; nextCursor?: string } {
+    if (filter.type !== undefined && !EVENT_TYPES.includes(filter.type as any)) {
+      throw new HttpError(400, 'invalid_type', `type must be one of: ${EVENT_TYPES.join(', ')}`);
+    }
+
     const limit = filter.limit ?? 50;
     if (limit <= 0) {
       return { data: [], nextCursor: undefined };
@@ -187,23 +196,27 @@ export class InMemoryEventStore implements EventStore {
 
     let startIdx = source.length - 1;
 
-    if (filter.cursor) {
+    if (filter.cursor !== undefined) {
       const globalPos = this.idToIndex.get(filter.cursor);
-      if (globalPos !== undefined) {
-        if (source === this.events) {
-          startIdx = globalPos - 1;
-        } else {
-          const cursorEvent = this.events[globalPos];
-          const matchesFilter =
-            (!filter.escrowId || escrowIdOf(cursorEvent.event) === filter.escrowId) &&
-            (!filter.type || cursorEvent.event.type === filter.type);
-          if (matchesFilter) {
-            const pos = binarySearch(source, cursorEvent);
-            if (pos !== -1) {
-              startIdx = pos - 1;
-            }
-          }
+      if (globalPos === undefined) {
+        throw new HttpError(400, 'invalid_cursor', 'cursor not found in filtered set');
+      }
+
+      if (source === this.events) {
+        startIdx = globalPos - 1;
+      } else {
+        const cursorEvent = this.events[globalPos];
+        const matchesFilter =
+          (!filter.escrowId || escrowIdOf(cursorEvent.event) === filter.escrowId) &&
+          (!filter.type || cursorEvent.event.type === filter.type);
+        if (!matchesFilter) {
+          throw new HttpError(400, 'invalid_cursor', 'cursor not found in filtered set');
         }
+        const pos = binarySearch(source, cursorEvent);
+        if (pos === -1) {
+          throw new HttpError(400, 'invalid_cursor', 'cursor not found in filtered set');
+        }
+        startIdx = pos - 1;
       }
     }
 
