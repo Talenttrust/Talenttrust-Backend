@@ -1,6 +1,8 @@
 import express, { type Request, type RequestHandler, type Response, type Router } from 'express';
 import { HttpError, publicContract } from '../store';
 import type { EscrowStore } from '../store';
+import type { AuditAction, AuditEntry } from '../audit';
+import type { EventStore, IndexedEvent } from '../indexer/types';
 import type { ChainReader } from '../chain';
 import { validate } from '../validation/middleware';
 import {
@@ -39,6 +41,7 @@ export interface ContractsRouterDeps {
   v1?: Router;
   segment?: ContractsRouteSegment;
   store: EscrowStore;
+  eventStore: EventStore;
   chainReader: ChainReader;
   requireAuth: RequestHandler;
   requireNotPaused: RequestHandler;
@@ -52,10 +55,129 @@ export interface ContractsRouterDeps {
   validateFn?: typeof validate;
 }
 
+type TimelineSource = 'api' | 'chain';
+
+interface TimelinePosition {
+  at: string;
+  source: TimelineSource;
+  id: number | string;
+}
+
+interface TimelineRecord extends TimelinePosition {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+const auditDetailFields: Record<AuditAction, readonly string[]> = {
+  create: ['title', 'totalAmount', 'totalAmountUnits'],
+  deposit: ['amount', 'amountUnits'],
+  release: ['index', 'amount', 'amountUnits'],
+  dispute: ['raisedBy'],
+  resolve: ['freelancerBps', 'toFreelancer', 'toClient', 'toFreelancerUnits', 'toClientUnits'],
+  cancel: [],
+  rate: ['rating'],
+};
+
+function safeFields(source: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const field of fields) {
+    const value = source[field];
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      safe[field] = value;
+    }
+  }
+  return safe;
+}
+
+function auditTimelineRecord(entry: AuditEntry): TimelineRecord {
+  return {
+    source: 'api',
+    type: entry.action,
+    at: entry.at,
+    id: entry.seq,
+    payload: {
+      seq: entry.seq,
+      actor: entry.actor,
+      requestId: entry.requestId,
+      before: safeFields(entry.before as unknown as Record<string, unknown>, [
+        'status',
+        'fundedAmountUnits',
+        'releasedAmountUnits',
+      ]),
+      after: safeFields(entry.after as unknown as Record<string, unknown>, [
+        'status',
+        'fundedAmountUnits',
+        'releasedAmountUnits',
+      ]),
+      details: safeFields(entry.details, auditDetailFields[entry.action]),
+    },
+  };
+}
+
+function chainTimelineRecord(event: IndexedEvent): TimelineRecord {
+  const eventData = event.event.data as unknown as Record<string, unknown>;
+  const fields: Record<string, readonly string[]> = {
+    Created: ['escrowId', 'client', 'freelancer', 'total'],
+    Deposit: ['escrowId', 'amount'],
+    Release: ['escrowId', 'index', 'amount'],
+    Dispute: ['escrowId', 'caller'],
+    Resolved: ['escrowId', 'toFreelancer', 'toClient'],
+    Cancel: ['escrowId', 'refund'],
+    Reputation: ['escrowId', 'freelancer', 'rating'],
+    Paused: ['paused'],
+    Init: ['admin'],
+    Unknown: [],
+  };
+
+  return {
+    source: 'chain',
+    type: event.event.type,
+    at: event.ledgerClosedAt,
+    id: event.id,
+    payload: {
+      id: event.id,
+      ledger: event.ledger,
+      txHash: event.txHash,
+      ...safeFields(eventData, fields[event.event.type]),
+    },
+  };
+}
+
+function compareTimeline(a: TimelinePosition, b: TimelinePosition): number {
+  const aTime = Date.parse(a.at);
+  const bTime = Date.parse(b.at);
+  const timeOrder = Number.isFinite(aTime) && Number.isFinite(bTime) ? aTime - bTime : a.at.localeCompare(b.at);
+  if (timeOrder !== 0) return timeOrder;
+  if (a.source !== b.source) return a.source === 'api' ? -1 : 1;
+  if (typeof a.id === 'number' && typeof b.id === 'number') return a.id - b.id;
+  return String(a.id).localeCompare(String(b.id));
+}
+
+function parseTimelinePosition(value: string): TimelinePosition {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    typeof (parsed as TimelinePosition).at !== 'string' ||
+    !Number.isFinite(Date.parse((parsed as TimelinePosition).at)) ||
+    ((parsed as TimelinePosition).source !== 'api' && (parsed as TimelinePosition).source !== 'chain') ||
+    !['string', 'number'].includes(typeof (parsed as TimelinePosition).id) ||
+    (typeof (parsed as TimelinePosition).id === 'number' && !Number.isSafeInteger((parsed as TimelinePosition).id))
+  ) {
+    throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  }
+  return parsed as TimelinePosition;
+}
+
 export function createContractsRouter(deps: ContractsRouterDeps): Router {
   const router = deps.v1 ?? express.Router();
   const segment = deps.segment ?? 'all';
-  const { store, chainReader, requireAuth, requireNotPaused, requireResolveKey } = deps;
+  const { store, eventStore, chainReader, requireAuth, requireNotPaused, requireResolveKey } = deps;
   const w = deps.wrapFn ?? wrap;
   const jb = deps.jsonBody ?? jsonObjectBody;
   const v = deps.validateFn ?? validate;
@@ -293,6 +415,52 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
           throw new HttpError(400, 'invalid_cursor', 'cursor must be a non-negative integer');
         }
         return store.audit.getContractHistory(contractId, limit, cursor);
+      }),
+    );
+
+    router.get(
+      '/contracts/:id/timeline',
+      w((req) => {
+        const contractId = id(req);
+        const contract = store.get(contractId);
+        const limit = parseLimit(req.query.limit);
+        const cursor = parseCursorParam(req.query.cursor, 'timeline');
+        const after = cursor ? parseTimelinePosition(cursor.lastValue) : undefined;
+        if (cursor && cursor.lastId !== contractId) {
+          throw new HttpError(400, 'invalid_cursor', 'cursor does not match contract');
+        }
+
+        const records = store.audit.getContractHistory(contractId).data.map(auditTimelineRecord);
+        if (contract.chain?.escrowId) {
+          let eventCursor: string | undefined;
+          while (true) {
+            const page = eventStore.query({ escrowId: contract.chain.escrowId, limit: 100, cursor: eventCursor });
+            records.push(...page.data.map(chainTimelineRecord));
+            if (page.data.length < 100) break;
+            eventCursor = page.data[page.data.length - 1].id;
+          }
+        }
+
+        records.sort(compareTimeline);
+        const remaining = after ? records.filter((record) => compareTimeline(record, after) > 0) : records;
+        const pageRecords = remaining.slice(0, limit + 1);
+        const hasMore = pageRecords.length > limit;
+        const data = (hasMore ? pageRecords.slice(0, limit) : pageRecords).map(({ source, type, at, payload }) => ({
+          source,
+          type,
+          at,
+          payload,
+        }));
+        const last = hasMore ? pageRecords[limit - 1] : undefined;
+        const nextCursor = last
+          ? serializeCursor({
+              sort: 'timeline',
+              lastValue: JSON.stringify({ at: last.at, source: last.source, id: last.id }),
+              lastId: contractId,
+            })
+          : null;
+
+        return { data, page: { limit, nextCursor, hasMore } };
       }),
     );
   };

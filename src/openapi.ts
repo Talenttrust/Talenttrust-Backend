@@ -472,6 +472,52 @@ const spec = {
         },
       },
     },
+    '/api/v1/contracts/{id}/timeline': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Get the merged API and on-chain event timeline for a contract',
+        description:
+          'Returns items in chronological order. Linked contracts include indexed chain events; unlinked contracts include API audit items only. ' +
+          'Dispute reasons are never included. The opaque HMAC-signed cursor is scoped to the contract.',
+        parameters: [
+          idParam,
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor from page.nextCursor' },
+        ],
+        responses: {
+          ...ok('Chronological contract timeline', {
+            type: 'object',
+            required: ['data', 'page'],
+            properties: {
+              data: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['source', 'type', 'at', 'payload'],
+                  properties: {
+                    source: { type: 'string', enum: ['api', 'chain'] },
+                    type: { type: 'string' },
+                    at: { type: 'string', format: 'date-time' },
+                    payload: { type: 'object', description: 'Allowlisted event fields; dispute reasons are omitted' },
+                  },
+                },
+              },
+              page: {
+                type: 'object',
+                required: ['limit', 'nextCursor', 'hasMore'],
+                properties: {
+                  limit: { type: 'integer' },
+                  nextCursor: { type: 'string', nullable: true },
+                  hasMore: { type: 'boolean' },
+                },
+              },
+            },
+          }),
+          400: errorResponse('Invalid id, limit or cursor'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
     '/api/v1/audit/verify': {
       get: {
         tags: ['Audit'],
