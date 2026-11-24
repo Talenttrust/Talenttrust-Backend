@@ -1,6 +1,8 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
+import { createHash } from 'crypto';
+import { parseApiKeysConfig } from '../src/auth/apiKeysConfig';
 
 const TOKEN = 'adm1n-t0ken-f0r-t3sts';
 const HOUR = 3_600_000;
@@ -386,5 +388,77 @@ describe('Admin dispute queue', () => {
       const adminDetail = await admin(request(app).get(`/api/v1/disputes/${id}`)).expect(200);
       expect(adminDetail.body.reason).toBe('mutation reason');
     });
+  });
+});
+
+describe('Admin dispute queue with scoped API keys (admin:read)', () => {
+  const READ_KEY = 'tt__admin-read-key';
+  const RESOLVE_KEY = 'tt__resolve-only-key';
+  const STATIC = 'static-admin-read-token';
+  const keys = parseApiKeysConfig(
+    JSON.stringify([
+      { id: 'ops-read', hash: `sha256:${createHash('sha256').update(READ_KEY).digest('hex')}`, scopes: ['admin:read'] },
+      { id: 'ops-resolve', hash: `sha256:${createHash('sha256').update(RESOLVE_KEY).digest('hex')}`, scopes: ['disputes:resolve'] },
+    ]),
+  );
+  const disputedStore = () => {
+    const store = new EscrowStore();
+    const c = store.create({ client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    store.deposit(c.id, 100);
+    store.openDispute(c.id, 'GA', 'confidential reason');
+    return { store, id: c.id };
+  };
+
+  afterEach(() => { delete process.env.ADMIN_READ_TOKEN; });
+
+  it('lists and reads disputes with an admin:read key (X-API-Key or Authorization: ApiKey)', async () => {
+    const { store, id } = disputedStore();
+    const app = createApp({ store, apiKeys: keys });
+    const list = await request(app).get('/api/v1/disputes').set('X-API-Key', READ_KEY).expect(200);
+    expect(list.body.data.map((d: { contractId: number }) => d.contractId)).toEqual([id]);
+    expect(list.headers['cache-control']).toBe('no-store');
+    await request(app).get(`/api/v1/disputes/${id}`).set('Authorization', `ApiKey ${READ_KEY}`).expect(200);
+  });
+
+  it('rejects a key lacking admin:read with 403 insufficient_scope', async () => {
+    const { store } = disputedStore();
+    const app = createApp({ store, apiKeys: keys });
+    const res = await request(app).get('/api/v1/disputes').set('X-API-Key', RESOLVE_KEY).expect(403);
+    expect(res.body.error).toBe('insufficient_scope');
+    expect(res.body.required).toBe('admin:read');
+  });
+
+  it('rejects unknown keys and missing credentials with 401', async () => {
+    const { store } = disputedStore();
+    const app = createApp({ store, apiKeys: keys });
+    expect((await request(app).get('/api/v1/disputes').set('X-API-Key', 'tt__nope')).status).toBe(401);
+    expect((await request(app).get('/api/v1/disputes')).status).toBe(401);
+    expect((await request(app).get('/api/v1/disputes').set('Authorization', `Bearer ${STATIC}`)).status).toBe(401);
+  });
+
+  it('keeps the static ADMIN_READ_TOKEN working alongside API keys', async () => {
+    process.env.ADMIN_READ_TOKEN = STATIC;
+    const { store } = disputedStore();
+    const app = createApp({ store, apiKeys: keys });
+    await request(app).get('/api/v1/disputes').set('Authorization', `Bearer ${STATIC}`).expect(200);
+    await request(app).get('/api/v1/disputes').set('X-API-Key', READ_KEY).expect(200);
+    expect((await request(app).get('/api/v1/disputes').set('Authorization', 'Bearer wrong')).status).toBe(401);
+    // A presented key is judged as a key, even when the static token is configured.
+    expect((await request(app).get('/api/v1/disputes').set('X-API-Key', RESOLVE_KEY)).status).toBe(403);
+  });
+
+  it('keeps the static token working when no API keys are configured, and ignores stray keys', async () => {
+    process.env.ADMIN_READ_TOKEN = STATIC;
+    const { store } = disputedStore();
+    const app = createApp({ store, apiKeys: parseApiKeysConfig(undefined) });
+    await request(app).get('/api/v1/disputes').set('Authorization', `Bearer ${STATIC}`).expect(200);
+    expect((await request(app).get('/api/v1/disputes').set('X-API-Key', READ_KEY)).status).toBe(401);
+  });
+
+  it('returns 404 when neither ADMIN_READ_TOKEN nor any API key is configured', async () => {
+    const { store, id } = disputedStore();
+    const app = createApp({ store, apiKeys: parseApiKeysConfig(undefined) });
+    expect((await request(app).get('/api/v1/disputes').set('X-API-Key', READ_KEY)).status).toBe(404);
+    expect((await request(app).get(`/api/v1/disputes/${id}`)).status).toBe(404);
   });
 });

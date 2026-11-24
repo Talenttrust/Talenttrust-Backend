@@ -472,7 +472,7 @@ describe('OpenAPI', () => {
       }
     }
     const counts = Object.fromEntries(methods.map((m) => [m, ops.filter(([, method]) => method === m).length]));
-    expect(counts).toEqual({ post: 17, patch: 2, put: 1, delete: 3 });
+    expect(counts).toEqual({ post: 19, patch: 2, put: 1, delete: 3 });
     for (const [path, , op] of ops) {
       expect(op.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
       expect(Object.keys(op.responses)).toEqual(expect.arrayContaining(['400', '409', '422']));

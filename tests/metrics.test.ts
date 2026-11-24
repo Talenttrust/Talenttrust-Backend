@@ -110,6 +110,49 @@ describe('Prometheus metrics', () => {
     expect(res1.status).toBe(200);
     expect(res1.text).toContain(':id');
   });
+
+  it('labels escrow_value_escrowed and escrow_value_released by token', async () => {
+    process.env.METRICS_TOKEN = 'test-token';
+    const store = new EscrowStore();
+    const app = createApp(store);
+
+    const c1 = store.create({
+      client: 'GA_CLIENT',
+      freelancer: 'GB_FREELANCER',
+      token: 'USDC',
+      milestones: [{ title: 'M1', amount: '1000' }],
+    });
+    store.deposit(c1.id, '1000', 'GA_CLIENT');
+
+    const c2 = store.create({
+      client: 'GA_CLIENT',
+      freelancer: 'GB_FREELANCER',
+      token: 'XLM',
+      milestones: [{ title: 'M1', amount: '500' }],
+    });
+    store.deposit(c2.id, '500', 'GA_CLIENT');
+    store.release(c2.id, 0, 'GA_CLIENT');
+
+    const stats = store.stats();
+    expect(stats.byToken.USDC).toBeDefined();
+    expect(stats.byToken.USDC.contracts).toBe(1);
+    expect(stats.byToken.USDC.totalEscrowedUnits).toBe('1000');
+    expect(stats.byToken.USDC.totalReleasedUnits).toBe('0');
+
+    expect(stats.byToken.XLM).toBeDefined();
+    expect(stats.byToken.XLM.contracts).toBe(1);
+    expect(stats.byToken.XLM.totalEscrowedUnits).toBe('0');
+    expect(stats.byToken.XLM.totalReleasedUnits).toBe('500');
+
+    const res = await request(app).get('/metrics').set('authorization', 'Bearer test-token');
+    expect(res.status).toBe(200);
+
+    const usdcEscrowed = metricValue(res.text, 'escrow_value_escrowed', { token: 'USDC' });
+    expect(usdcEscrowed).toBe(1000);
+
+    const xlmReleased = metricValue(res.text, 'escrow_value_released', { token: 'XLM' });
+    expect(xlmReleased).toBe(500);
+  });
 });
 
 describe('Histogram', () => {

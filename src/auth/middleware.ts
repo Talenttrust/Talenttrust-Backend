@@ -10,10 +10,15 @@
 import type { Request, Response, NextFunction } from 'express';
 import { HttpError } from '../amount-error';
 import { verifyWalletToken } from './jwt';
+import type { TokenRevocationList } from './revocation';
 
 /** Augmented Express request with the authenticated wallet address. */
 export interface WalletAuth {
   address: string;
+  /** Unique token id (used to revoke the token on logout). */
+  jti: string;
+  /** Token expiry (epoch seconds). */
+  exp: number;
 }
 export interface WalletAuthRequest extends Request {
   auth?: WalletAuth;
@@ -27,8 +32,15 @@ export interface WalletAuthRequest extends Request {
  * @param required - When false, requests without an Authorization header pass
  *                   through unauthenticated (legacy mode); a header that is
  *                   present is still verified and rejected when invalid.
+ * @param revocations - Optional revocation list; tokens whose `jti` is revoked
+ *                   (POST /api/v1/auth/logout) are rejected with 401.
  */
-export function createRequireAuth(secret: string, nowFn: () => number = Date.now, required = true) {
+export function createRequireAuth(
+  secret: string,
+  nowFn: () => number = Date.now,
+  required = true,
+  revocations?: TokenRevocationList,
+) {
   return function requireAuth(req: WalletAuthRequest, res: Response, next: NextFunction): void {
     const header = req.headers.authorization;
     if (!header && !required) return next();
@@ -40,8 +52,9 @@ export function createRequireAuth(secret: string, nowFn: () => number = Date.now
 
     const result = verifyWalletToken(header.slice(7).trim(), secret, nowFn);
     if (!result.ok) return fail('Invalid or expired token.');
+    if (revocations?.isRevoked(result.jti)) return fail('Token has been revoked.');
 
-    req.auth = { address: result.address };
+    req.auth = { address: result.address, jti: result.jti, exp: result.exp };
     next();
   };
 }

@@ -435,4 +435,46 @@ describe('Parity reconciliation cron endpoint', () => {
     expect(budgetRes.body.checked).toBeLessThan(6);
     expect(budgetRes.body.timedOut).toBe(true);
   });
+
+  describe('/api/cron/deliver-webhooks', () => {
+    it('returns 401 without authorization header or with wrong secret', async () => {
+      process.env.CRON_SECRET = 'cron-secret';
+      const app = createApp();
+
+      const noAuth = await request(app).get('/api/cron/deliver-webhooks');
+      expect(noAuth.status).toBe(401);
+      expect(noAuth.body.error).toBe('cron_unauthorized');
+
+      const wrongAuth = await request(app)
+        .post('/api/cron/deliver-webhooks')
+        .set('Authorization', 'Bearer wrong-secret');
+      expect(wrongAuth.status).toBe(401);
+      expect(wrongAuth.body.error).toBe('cron_unauthorized');
+      delete process.env.CRON_SECRET;
+    });
+
+    it('returns 200 with correct secret on GET and POST', async () => {
+      process.env.CRON_SECRET = 'cron-secret';
+      process.env.WEBHOOK_ADMIN_TOKEN = 'test-token';
+      const app = createApp();
+
+      const getRes = await request(app)
+        .get('/api/cron/deliver-webhooks')
+        .set('Authorization', 'Bearer cron-secret');
+      expect(getRes.status).toBe(200);
+      expect(getRes.body).toHaveProperty('processed');
+      expect(getRes.body).toHaveProperty('succeeded');
+      expect(getRes.body).toHaveProperty('failed');
+      expect(getRes.body).toHaveProperty('checkedAt');
+
+      const postRes = await request(app)
+        .post('/api/cron/deliver-webhooks')
+        .set('Authorization', 'Bearer cron-secret');
+      expect(postRes.status).toBe(200);
+      expect(postRes.body.processed).toBe(0);
+
+      delete process.env.CRON_SECRET;
+      delete process.env.WEBHOOK_ADMIN_TOKEN;
+    });
+  });
 });

@@ -1,469 +1,298 @@
 # Health API Reference
 
-The TalentTrust Backend exposes three health endpoints, all mounted under `/health`.
-Together they serve load-balancer readiness checks, blue-green deployment orchestration,
-and integration-level dependency diagnostics.
+The TalentTrust Backend exposes three read-only health endpoints. They are
+registered directly on the Express app in `src/app.ts`; the readiness logic
+lives in `HealthService` in `src/health.ts`.
 
-| Endpoint | Purpose | Source |
-|---|---|---|
-| `GET /health` | Aggregate dependency-probe check | `src/health/router.ts` |
-| `POST /health` | Legacy liveness ping | `src/routes/health.ts` |
-| `GET /health/live` | Blue-green liveness probe | `src/health.ts` |
-| `GET /health/ready` | Blue-green readiness probe | `src/health.ts` |
+| Endpoint | Purpose | Touches dependencies? | Source |
+|---|---|---|---|
+| `GET /health` | Service summary: version, uptime, pause state, last readiness checks | No (reads cached state only) | `src/app.ts` |
+| `GET /health/live` | Liveness probe: "is the process up?" | No | `HealthService.live()` in `src/health.ts` |
+| `GET /health/ready` | Readiness probe: "can this instance serve traffic?" | Yes: Soroban RPC + store (cached) | `HealthService.ready()` in `src/health.ts` |
 
----
+All three are `GET` only. There is no `POST /health` route; any other method
+on these paths gets `405 Method Not Allowed` from the app's generic handler
+(`src/methods.ts`).
+The endpoints are not authenticated and have no dedicated rate limiter.
+Readiness is protected from probe storms by its result cache instead (see
+[Caching and single-flight](#caching-and-single-flight)).
 
-## GET /health
-
-Full dependency-probe check. Runs all registered probes concurrently and returns
-an aggregated health verdict. The HTTP status code reflects overall health so
-load balancers can act on it without parsing the body.
-
-**Handler**: `src/health/router.ts` → `buildHealthRouter()`  
-**Checker**: `src/health/checker.ts` → `runHealthCheck()`  
-**Probes**: `src/health/probes.ts`
-
-### Response headers
-
-| Header | Value |
-|---|---|
-| `Cache-Control` | `no-store` (always set) |
-| `Content-Type` | `application/json` |
-
-### HTTP status codes
-
-| Status | Condition |
-|---|---|
-| `200 OK` | All probes returned `status: "up"` or `ok: true` |
-| `503 Service Unavailable` | One or more probes returned `status: "degraded"` or `status: "down"` |
-
-### Response body
-
-```ts
-{
-  status:        "ok" | "degraded";  // aggregate verdict
-  service:       string;             // always "talenttrust-backend"
-  timestamp:     string;             // ISO-8601 time of the check
-  uptimeSeconds: number;             // process.uptime() in whole seconds
-  probes:        ProbeResult[];      // one entry per registered probe
-}
-```
-
-Each `ProbeResult`:
-
-```ts
-{
-  name:      string;                         // probe identifier
-  ok?:       boolean;                        // true when status is "up"
-  status?:   "up" | "degraded" | "down";    // canonical health status
-  detail?:   string;                         // error text or latency note (non-production only)
-  latencyMs: number;                         // probe round-trip in milliseconds
-}
-```
-
-> **Production security**: when `NODE_ENV=production` the `detail` field is
-> stripped from every probe before the response is sent, preventing internal
-> topology leakage to unauthenticated callers. `name`, `ok`, and `latencyMs`
-> are always present.
-
-### Example — healthy (200)
-
-```bash
-curl http://localhost:3001/health
-```
-
-```json
-{
-  "status": "ok",
-  "service": "talenttrust-backend",
-  "timestamp": "2026-07-24T12:49:31.799Z",
-  "uptimeSeconds": 3721,
-  "probes": [
-    { "name": "env",            "ok": true,  "status": "up",   "latencyMs": 0  },
-    { "name": "db",             "ok": true,  "status": "up",   "latencyMs": 3  },
-    { "name": "redis",          "ok": true,  "status": "up",   "latencyMs": 11 },
-    { "name": "stellar-rpc",    "ok": true,  "status": "up",   "latencyMs": 87 },
-    { "name": "queue",          "ok": true,  "status": "up",   "latencyMs": 5  },
-    { "name": "circuit-breaker","ok": true,  "status": "up",   "latencyMs": 0  }
-  ]
-}
-```
-
-### Example — degraded (503)
-
-```json
-{
-  "status": "degraded",
-  "service": "talenttrust-backend",
-  "timestamp": "2026-07-24T12:49:31.799Z",
-  "uptimeSeconds": 3721,
-  "probes": [
-    { "name": "env",            "ok": true,  "status": "up",       "latencyMs": 0    },
-    { "name": "db",             "ok": false, "status": "down",     "latencyMs": 5001, "detail": "db probe timeout" },
-    { "name": "redis",          "ok": true,  "status": "up",       "latencyMs": 9    },
-    { "name": "stellar-rpc",    "ok": true,  "status": "up",       "latencyMs": 90   },
-    { "name": "queue",          "ok": false, "status": "degraded", "latencyMs": 12,   "detail": "contract-processing: 15 failed jobs" },
-    { "name": "circuit-breaker","ok": true,  "status": "up",       "latencyMs": 0    }
-  ]
-}
-```
-
----
-
-## POST /health
-
-Legacy liveness endpoint included for backwards compatibility with older clients
-and monitoring scripts that use POST. Returns the same static payload regardless
-of dependency state — it does **not** run probes.
-
-**Handler**: `src/routes/health.ts`
-
-### HTTP status codes
-
-| Status | Condition |
-|---|---|
-| `200 OK` | Always |
-
-### Response body
-
-```json
-{
-  "status": "ok",
-  "service": "talenttrust-backend"
-}
-```
-
-### Example
-
-```bash
-curl -X POST http://localhost:3001/health
-```
-
-```json
-{ "status": "ok", "service": "talenttrust-backend" }
-```
+The machine-readable contract for these routes is in `src/openapi.ts` (schemas
+`Health`, `Liveness`, `Readiness` and `HealthCheck`), served at
+`GET /openapi.json`.
 
 ---
 
 ## GET /health/live
 
-Lightweight liveness probe for blue-green deployments. Only checks that the
-process is running — no dependency probes are executed. Use this as a container
-or load-balancer liveness check that should almost never fail.
-
-**Handler**: `src/health.ts` → `healthRouter`
-
-### HTTP status codes
+Liveness probe. `HealthService.live()` returns a constant and never calls the
+RPC, the store or any other dependency, so a slow or broken dependency can
+never make an orchestrator restart a healthy process.
 
 | Status | Condition |
 |---|---|
-| `200 OK` | Always (process is alive) |
-
-### Response headers
-
-| Header | Value |
-|---|---|
-| `Cache-Control` | `no-store` |
-
-### Response body
-
-```ts
-{
-  status:  "ok";
-  service: string;   // SERVICE_NAME env var, defaults to "talenttrust-backend"
-  probe:   "live";
-}
-```
-
-### Example
-
-```bash
-curl http://localhost:3001/health/live
-```
+| `200 OK` | The process is up and the Express app is handling requests |
 
 ```json
-{
-  "status": "ok",
-  "service": "talenttrust-backend",
-  "probe": "live"
-}
+{ "status": "ok" }
 ```
+
+Schema (`Liveness`): exactly one property, `status`, always `"ok"`.
 
 ---
 
 ## GET /health/ready
 
-Readiness probe for blue-green deployments. Runs three dependency probes
-(db, stellar-rpc, redis) concurrently with a 3-second per-probe timeout and
-returns a traffic-gating verdict. Use this probe to control whether a slot
-should receive traffic during a deployment or drain.
+Readiness probe. `HealthService.ready()` runs four checks **in parallel**, each
+with its own timeout, and maps the aggregate result to an HTTP status.
 
-**Handler**: `src/health.ts` → `healthRouter`  
-**Probes run**: `dbProbe`, `stellarRpcProbe`, `redisProbe` (from `src/health/probes.ts`)
+### The four checks
+
+| Key | What it does | `pass` when | `fail` detail (fixed strings) |
+|---|---|---|---|
+| `rpc` | Calls Soroban RPC `getHealth` | RPC reports `status: "healthy"` | `rpc reported '<status>'` |
+| `network` | Calls RPC `getNetwork` and compares the passphrase with the configured one | Passphrases match exactly | `passphrase mismatch: configured '<STELLAR_NETWORK>', rpc reported '<passphrase>'`, or `no passphrase known for network '<name>' (set STELLAR_NETWORK_PASSPHRASE)` |
+| `contract` | Calls RPC `getLedgerEntries` for the escrow contract's persistent instance ledger entry (`ESCROW_CONTRACT_ID`) | The ledger entry exists | `contract instance ledger entry not found` |
+| `storage` | Calls `store.list()` on the in-memory `EscrowStore` | The call does not throw | `store read failed` |
+
+Every check also has two generic failure details:
+
+| Detail | Meaning |
+|---|---|
+| `timeout` | The check did not settle within `HEALTH_CHECK_TIMEOUT_MS` |
+| `check raised` | The check threw (for example a network error talking to the RPC) |
+
+Failure details are fixed strings by design. They never contain the RPC URL,
+anything derived from it, or raw error messages, so a misconfigured
+`STELLAR_RPC_URL` (which may embed a credential) cannot leak through a public
+probe. This is covered by `tests/health.test.ts`.
+
+The RPC client (`createSorobanRpcClient` in `src/health.ts`) loads
+`@stellar/stellar-sdk` lazily: no RPC traffic happens until the first
+`/health/ready` request.
+
+### Status mapping
+
+| `status` | HTTP | Condition |
+|---|---|---|
+| `ready` | `200 OK` | Every check is `pass` |
+| `degraded` | `200 OK` | No check is `fail`, at least one is `warn` |
+| `unready` | `503 Service Unavailable` | At least one check is `fail` |
+
+All four checks are critical, so any single `fail` makes the instance
+`unready`. The `warn` status and the `degraded` verdict are part of the
+response contract, but none of the four current checks emits `warn`, so in
+practice the probe answers `ready` (200) or `unready` (503). Treat `degraded`
+as "serving, but look at it".
+
+### Response body
+
+Both 200 and 503 return the same `ReadinessReport` shape:
+
+```ts
+interface ReadinessReport {
+  status: 'ready' | 'degraded' | 'unready';
+  checks: Record<'rpc' | 'network' | 'contract' | 'storage', CheckResult>;
+  checkedAt: string; // ISO-8601 time the checks ran (not the time of this request)
+}
+
+interface CheckResult {
+  status: 'pass' | 'fail' | 'warn';
+  latencyMs: number; // wall time of this check, >= 0
+  detail?: string;   // present on failure only
+}
+```
+
+Ready example:
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "rpc":      { "status": "pass", "latencyMs": 84 },
+    "network":  { "status": "pass", "latencyMs": 79 },
+    "contract": { "status": "pass", "latencyMs": 112 },
+    "storage":  { "status": "pass", "latencyMs": 0 }
+  },
+  "checkedAt": "2026-11-23T10:15:02.418Z"
+}
+```
+
+Unready example (HTTP 503):
+
+```json
+{
+  "status": "unready",
+  "checks": {
+    "rpc":      { "status": "fail", "latencyMs": 2001, "detail": "timeout" },
+    "network":  { "status": "fail", "latencyMs": 2001, "detail": "timeout" },
+    "contract": { "status": "fail", "latencyMs": 2001, "detail": "timeout" },
+    "storage":  { "status": "pass", "latencyMs": 0 }
+  },
+  "checkedAt": "2026-11-23T10:15:02.418Z"
+}
+```
+
+### Timeouts
+
+Each check is raced against `HEALTH_CHECK_TIMEOUT_MS` (default `2000`). Because
+checks run in parallel, a fully stuck RPC makes `/health/ready` answer in
+roughly one timeout, not four. A timed-out check is reported as
+`{ "status": "fail", "detail": "timeout" }`.
+
+### Caching and single-flight
+
+A completed report is cached for `HEALTH_CACHE_MS` (default `10000`):
+
+- While the cache is fresh, every `/health/ready` request is answered from it
+  without touching the RPC. `checkedAt` shows when the cached run happened.
+- When the cache is stale, the first request starts a new run. Requests that
+  arrive while that run is in flight wait for the **same** run instead of
+  starting their own (single-flight), so N concurrent probes cost one set of
+  RPC calls.
+- Failed reports are cached too. After fixing a dependency, readiness can stay
+  `unready` for up to `HEALTH_CACHE_MS`.
+
+The cache is per process. Each instance or serverless invocation keeps its own.
+
+### Configuration
+
+| Variable | Default | Used for |
+|---|---|---|
+| `HEALTH_CHECK_TIMEOUT_MS` | `2000` | Per-check timeout (`config.healthCheckTimeoutMs`) |
+| `HEALTH_CACHE_MS` | `10000` | Readiness result cache lifetime (`config.healthCacheMs`) |
+| `STELLAR_RPC_URL` | `https://soroban-testnet.stellar.org` | RPC used by the `rpc`, `network` and `contract` checks |
+| `STELLAR_NETWORK` | `testnet` | Network name; picks the expected passphrase |
+| `STELLAR_NETWORK_PASSPHRASE` | Derived from `STELLAR_NETWORK` | Explicit expected passphrase for the `network` check |
+| `ESCROW_CONTRACT_ID` | Built-in testnet contract | Contract whose instance entry the `contract` check looks up |
+
+`HEALTH_CHECK_TIMEOUT_MS` and `HEALTH_CACHE_MS` are parsed by `envInt` in
+`src/config.ts`. They must be positive integers; anything else (including `0`)
+stops the process at startup with `Invalid <NAME>: "<value>"`.
+
+`src/config.ts` resolves the expected passphrase as `STELLAR_NETWORK_PASSPHRASE`,
+then the known passphrase for `STELLAR_NETWORK` (`testnet`, `mainnet`, `public`,
+`futurenet`), then the **testnet** passphrase. An unrecognised
+`STELLAR_NETWORK` therefore expects the testnet passphrase, and the `network`
+check fails against any non-testnet RPC until `STELLAR_NETWORK_PASSPHRASE` is
+set.
+
+---
+
+## GET /health
+
+Service summary for dashboards and humans. It does **not** run the readiness
+checks and never makes an RPC call on the request path, so it stays fast when
+dependencies are down. Do not use it as a readiness probe: it answers 200 even
+when `/health/ready` would answer 503.
 
 ### HTTP status codes
 
 | Status | Condition |
 |---|---|
-| `200 OK` | All three dependency probes returned `ok: true` |
-| `503 Service Unavailable` | Any probe failed, timed out, or drain is in progress |
+| `200 OK` | Normal operation |
+| `503 Service Unavailable` | The server is draining during graceful shutdown |
 
-### Response headers
+### 200 response body
 
-| Header | Value |
+```ts
+{
+  status:        'ok';
+  version:       string;            // config.version
+  uptimeSeconds: number;            // whole seconds since createApp()
+  storage:       string;            // currently always "in-memory"
+  paused:        boolean;           // last known pause state
+  pauseSource:   'chain' | 'env' | 'none';
+  timestamp:     string;            // ISO-8601 time of this response
+  checks?:       Record<string, CheckResult>; // last readiness run, see below
+}
+```
+
+| Field | Notes |
 |---|---|
-| `Cache-Control` | `no-store` |
+| `paused` / `pauseSource` | From `PauseGuard.peek()` in `src/pauseGuard.ts`. Non-blocking: returns the cached state and, if the cache is older than `PAUSE_CHECK_TTL_MS`, refreshes it in the background. `env` means the `API_PAUSED=true` override; `chain` means the contract's `is_paused()` returned true (or the RPC failed with `PAUSE_FAIL_MODE=closed`); `none` means not paused. With `PAUSE_CHECK_CHAIN=false` only the env override is consulted. |
+| `checks` | The `checks` map of the most recent `/health/ready` run (`HealthService.lastReport()`). **Absent until `/health/ready` has run at least once** in this process. It does not trigger a run and may be stale. |
 
-### Response body — ready (200)
-
-```ts
-{
-  status:      "ready";
-  service:     string;          // SERVICE_NAME env var
-  probe:       "ready";
-  activeColor: "blue" | "green"; // ACTIVE_COLOR env var, defaults to "blue"
-  checks:      CheckSnapshot[]; // one entry per probe (db, stellar-rpc, queue)
-}
-```
-
-Each `CheckSnapshot`:
-
-```ts
-{
-  name:      string;   // "db" | "stellar-rpc" | "queue"
-  ok:        boolean;
-  latencyMs: number;
-  detail?:   string;   // error message (non-production only)
-}
-```
-
-> **Note**: the `checks` array labels the redis probe as `"queue"` in the
-> current implementation (`src/health.ts`). This is a known naming quirk —
-> it reflects a past mapping of the redis probe to the queue slot.
-
-### Response body — not ready (503, dependency failure)
-
-```ts
-{
-  status:      "not-ready";
-  service:     string;
-  probe:       "ready";
-  activeColor: string;
-  checks:      CheckSnapshot[];
-}
-```
-
-### Response body — not ready (503, drain in progress)
-
-```ts
-{
-  status:      "not-ready";
-  service:     string;
-  probe:       "ready";
-  reason:      "drain-in-progress";
-  activeColor: string;
-}
-```
-
-> When `isReadinessDraining()` returns `true` (set during graceful shutdown),
-> the probe immediately returns 503 with `reason: "drain-in-progress"` without
-> running any dependency probes. This is how the service signals to the load
-> balancer that it should stop sending new requests.
-
-### Example — ready (200)
-
-```bash
-curl http://localhost:3001/health/ready
-```
+Example:
 
 ```json
 {
-  "status": "ready",
-  "service": "talenttrust-backend",
-  "probe": "ready",
-  "activeColor": "blue",
-  "checks": [
-    { "name": "db",          "ok": true, "latencyMs": 3  },
-    { "name": "stellar-rpc", "ok": true, "latencyMs": 90 },
-    { "name": "queue",       "ok": true, "latencyMs": 11 }
-  ]
+  "status": "ok",
+  "version": "1.0.0",
+  "uptimeSeconds": 3721,
+  "storage": "in-memory",
+  "paused": false,
+  "pauseSource": "none",
+  "timestamp": "2026-11-23T10:15:04.002Z",
+  "checks": {
+    "rpc":      { "status": "pass", "latencyMs": 84 },
+    "network":  { "status": "pass", "latencyMs": 79 },
+    "contract": { "status": "pass", "latencyMs": 112 },
+    "storage":  { "status": "pass", "latencyMs": 0 }
+  }
 }
 ```
 
-### Example — not ready, db down (503)
+### Draining (503)
 
-```json
-{
-  "status": "not-ready",
-  "service": "talenttrust-backend",
-  "probe": "ready",
-  "activeColor": "blue",
-  "checks": [
-    { "name": "db",          "ok": false, "latencyMs": 3001, "detail": "db probe timeout" },
-    { "name": "stellar-rpc", "ok": true,  "latencyMs": 88   },
-    { "name": "queue",       "ok": true,  "latencyMs": 12   }
-  ]
-}
+On `SIGTERM` or `SIGINT`, `startServer()` in `src/server.ts` sets the app's
+`draining` flag, stops accepting connections and waits up to
+`SHUTDOWN_GRACE_MS` (default `10000`) for in-flight requests. While draining,
+`GET /health` answers:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Connection: close
+Content-Type: application/json
+
+{ "status": "draining" }
 ```
 
-### Example — drain in progress (503)
+Only `/health` reports draining. `/health/live` and `/health/ready` keep their
+normal behaviour for as long as the process accepts requests.
 
-```json
-{
-  "status": "not-ready",
-  "service": "talenttrust-backend",
-  "probe": "ready",
-  "reason": "drain-in-progress",
-  "activeColor": "blue"
-}
+---
+
+## Choosing a probe
+
+| Consumer | Endpoint | Why |
+|---|---|---|
+| Kubernetes `livenessProbe` | `/health/live` | Never fails because of a dependency, so no restart loops when the RPC is down |
+| Kubernetes `readinessProbe` / load balancer target health | `/health/ready` | 503 takes the instance out of rotation when RPC, network, contract or store is broken |
+| Uptime monitor, status page, on-call quick look | `/health` | Cheap; shows version, uptime, pause state and the last readiness result; 503 while draining |
+
+Example Kubernetes configuration:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health/live, port: 3001 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /health/ready, port: 3001 }
+  periodSeconds: 10
+  timeoutSeconds: 5   # keep above HEALTH_CHECK_TIMEOUT_MS
 ```
 
----
-
-## Probes reference
-
-All probes are defined in `src/health/probes.ts`.
-
-### `env`
-
-Verifies that every variable listed in `REQUIRED_ENV_VARS` exists in the
-process environment. Does **not** expose values — only checks for presence.
-
-| State | Condition |
-|---|---|
-| `up` | All listed vars are set (or list is empty) |
-| `down` | One or more listed vars are missing |
-
-**Configuration:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `REQUIRED_ENV_VARS` | `""` | Comma-separated list of env var names that must exist |
-
-### `db`
-
-Verifies SQLite connectivity by running a hardcoded `SELECT 1` query through
-the shared `getDb()` singleton. No user input is involved.
-
-| State | Condition |
-|---|---|
-| `up` | Query completes in < 1 000 ms |
-| `degraded` | Query completes between 1 000 ms and 3 000 ms |
-| `down` | Query takes ≥ 3 000 ms, times out, or throws |
-
-**Configuration:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `DB_PATH` | `talenttrust.db` | Path to the SQLite file |
-| `DB_BUSY_TIMEOUT` | `5000` | SQLite busy timeout in ms |
-
-### `redis`
-
-Tests Redis reachability by opening a short-lived connection and sending a
-`PING` command. Disconnects immediately after.
-
-| State | Condition |
-|---|---|
-| `up` | PING succeeds within 3 000 ms |
-| `down` | Connection fails, PING times out, or any error occurs |
-
-**Configuration:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `REDIS_HOST` | `localhost` | Redis hostname |
-| `REDIS_PORT` | `6379` | Redis port |
-| `REDIS_PASSWORD` | *(unset)* | Redis password (optional) |
-
-### `stellar-rpc`
-
-Checks reachability of the Stellar/Soroban RPC endpoint with a lightweight
-`GET` request. Aborts after 5 seconds.
-
-| State | Condition |
-|---|---|
-| `up` | HTTP response status < 500 |
-| `down` | `STELLAR_RPC_URL` is not set, response status ≥ 500, or request fails/times out |
-
-**Configuration:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `STELLAR_RPC_URL` | *(unset)* | Soroban/Horizon RPC base URL to probe |
-
-### `queue`
-
-Checks BullMQ job-queue health via `QueueManager.getHealth()`. Reports
-`degraded` when failed-job or waiting-backlog counts exceed configurable
-thresholds; reports `down` on timeout or internal error.
-
-| State | Condition |
-|---|---|
-| `up` | No queue exceeds the failed or backlog thresholds |
-| `degraded` | At least one queue has too many failed or waiting jobs |
-| `down` | Health check times out or throws |
-
-**Configuration:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `QUEUE_PROBE_TIMEOUT_MS` | `3000` | Max time (ms) to wait for queue health data |
-| `QUEUE_FAILED_THRESHOLD` | `10` | Max failed jobs per queue before `degraded` |
-| `QUEUE_BACKLOG_THRESHOLD` | `100` | Max waiting jobs per queue before `degraded` |
-
-### `circuit-breaker`
-
-Reports the count of circuit breakers currently in the `OPEN` state by
-querying `circuitBreakerRegistry.getAll()`. No external I/O is performed.
-
-| State | Condition |
-|---|---|
-| `up` | No breakers are open |
-| `degraded` | One or more breakers are open |
-| `down` | Registry query throws |
+Keep the probe's own timeout above `HEALTH_CHECK_TIMEOUT_MS` so the
+orchestrator receives the 503 body instead of timing out itself.
 
 ---
 
-## Security notes
+## Source and tests
 
-- `Cache-Control: no-store` is set on all responses to prevent stale health
-  data from being served by caches or proxies.
-- `detail` fields are stripped from `GET /health` and `GET /health/ready`
-  responses when `NODE_ENV=production`, preventing internal error messages,
-  hostnames, and latency thresholds from reaching unauthenticated callers.
-- The `env` probe checks variable existence only — it never includes values.
-- The `db` probe runs a hardcoded `SELECT 1` with no user input, making SQL
-  injection impossible.
-- The `stellar-rpc` probe performs outbound HTTP; the target URL is controlled
-  by `STELLAR_RPC_URL` which is validated at startup by the config schema.
+| Path | Contents |
+|---|---|
+| `src/health.ts` | `HealthService`, `CheckResult`, `ReadinessReport`, `createSorobanRpcClient` |
+| `src/app.ts` | Route handlers for `/health`, `/health/live`, `/health/ready` |
+| `src/server.ts` | Graceful shutdown and the `draining` flag |
+| `src/pauseGuard.ts` | `PauseGuard.peek()` used for `paused` / `pauseSource` |
+| `src/config.ts` | `HEALTH_CHECK_TIMEOUT_MS`, `HEALTH_CACHE_MS`, network and contract settings |
+| `src/openapi.ts` | OpenAPI schemas for all three endpoints |
+| `tests/health.test.ts` | Probe behaviour: status mapping, timeouts, single-flight, caching, no URL leaks |
+| `tests/health-docs.test.ts` | Keeps this page and the runbook in sync with the source tree |
 
----
+## Related
 
-## Configuration summary
-
-| Variable | Default | Relevant probes |
-|---|---|---|
-| `NODE_ENV` | `development` | All — strips `detail` in `production` |
-| `REQUIRED_ENV_VARS` | `""` | `env` |
-| `DB_PATH` | `talenttrust.db` | `db` |
-| `DB_BUSY_TIMEOUT` | `5000` | `db` |
-| `REDIS_HOST` | `localhost` | `redis` |
-| `REDIS_PORT` | `6379` | `redis` |
-| `REDIS_PASSWORD` | *(unset)* | `redis` |
-| `STELLAR_RPC_URL` | *(unset)* | `stellar-rpc` |
-| `QUEUE_PROBE_TIMEOUT_MS` | `3000` | `queue` |
-| `QUEUE_FAILED_THRESHOLD` | `10` | `queue` |
-| `QUEUE_BACKLOG_THRESHOLD` | `100` | `queue` |
-| `SERVICE_NAME` | `talenttrust-backend` | `GET /health/live`, `GET /health/ready` |
-| `ACTIVE_COLOR` | `blue` | `GET /health/ready` |
-
----
-
-## Related documentation
-
-- [`docs/backend/health.md`](backend/health.md) — earlier overview (env and stellar-rpc probes)
-- [`docs/backend/circuit-breaker.md`](backend/circuit-breaker.md) — circuit breaker states and configuration
-- [`docs/backend/bluegreen.md`](backend/bluegreen.md) — blue-green deployment and drain signalling
-- [`docs/backend/database.md`](backend/database.md) — SQLite schema and configuration
-- [`docs/backend/queue-system.md`](backend/queue-system.md) — BullMQ queue configuration
+- [`docs/runbook-health.md`](runbook-health.md): troubleshooting failed probes
+- [`docs/configuration.md`](configuration.md): all environment variables
+- [`docs/observability.md`](observability.md): metrics and logging

@@ -67,13 +67,15 @@ export class InMemoryEventStore implements EventStore {
     this.cursor = cursor;
   }
 
-  append(events: IndexedEvent[]): void {
+  append(events: IndexedEvent[]): IndexedEvent[] {
     let reindexFrom = this.events.length;
+    const newlyAdded: IndexedEvent[] = [];
 
     for (const event of events) {
       if (this.idToIndex.has(event.id)) {
         continue;
       }
+      newlyAdded.push(event);
 
       const idx = insertSorted(this.events, event);
       if (idx < this.events.length - 1) {
@@ -151,6 +153,8 @@ export class InMemoryEventStore implements EventStore {
         this.idToIndex.set(this.events[i].id, i);
       }
     }
+
+    return newlyAdded;
   }
 
   query(filter: {
