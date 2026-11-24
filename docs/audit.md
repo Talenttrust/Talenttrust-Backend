@@ -66,18 +66,35 @@ The audit API provides immutable, tamper-evident logging of all sensitive state 
 
 ## Audit Actions
 
-Defined in [`src/audit/types.ts:13-32`](../src/audit/types.ts#L13-L32):
+Defined in [`src/audit.ts`](../src/audit.ts) as the `AuditAction` union type:
 
-| Action | Category | Typical Severity |
-|--------|----------|-----------------|
-| `CONTRACT_CREATED` | Contract lifecycle | INFO |
-| `CONTRACT_UPDATED` | Contract lifecycle | INFO |
-| `CONTRACT_CANCELLED` | Contract lifecycle | INFO |
-| `CONTRACT_COMPLETED` | Contract lifecycle | INFO |
-| `PAYMENT_INITIATED` | Payment | CRITICAL |
-| `PAYMENT_RELEASED` | Payment | CRITICAL |
-| `PAYMENT_DISPUTED` | Payment | CRITICAL |
-| `REPUTATION_UPDATED` | Reputation | INFO |
+| Action | Triggered by | `details` fields |
+|--------|-------------|-----------------|
+| `create` | `POST /contracts` | `title`, `totalAmount`, `totalAmountUnits` |
+| `deposit` | `POST /contracts/:id/deposit` | `amount`, `amountUnits` |
+| `release` | `POST /contracts/:id/milestones/:index/release` | `index`, `amount`, `amountUnits` |
+| `dispute` | `POST /contracts/:id/dispute` | `raisedBy` (reason omitted) |
+| `resolve` | `POST /contracts/:id/resolve` | `freelancerBps`, `toFreelancer`, `toClient`, `toFreelancerUnits`, `toClientUnits` |
+| `cancel` | `POST /contracts/:id/cancel` | _(empty)_ |
+| `rate` | `POST /contracts/:id/reputation` | `rating` |
+| `edit` | `PATCH /contracts/:id` | `changedFields` (array of field names: `"title"` and/or `"milestones"`), `revision` |
+| `extend_deadline` | `POST /contracts/:id/extend-deadline` | `newDeadline` (ISO-8601 string) |
+| `withdraw` | `DELETE /contracts/:id` | _(empty)_ |
+
+Only operations that **succeed** append an entry. A failed request (4xx/5xx) leaves the audit chain unchanged.
+
+### `edit` details
+
+The `changedFields` array lists the names of fields that were included in the PATCH body (`"title"`, `"milestones"`, or both). No field values are recorded to avoid leaking contract terms in the audit log.
+
+### `extend_deadline` details
+
+`newDeadline` is the ISO-8601 timestamp the deadline was extended to. The previous deadline is visible in the `before` state snapshot if needed.
+
+### `withdraw` details
+
+After a successful `DELETE /contracts/:id` the contract record is removed from the store. The `after` state snapshot carries `status: "Withdrawn"` with zeroed amounts so the entry remains self-describing without reference to the deleted record.
+
 | `USER_CREATED` | User management | INFO |
 | `USER_UPDATED` | User management | INFO |
 | `USER_DELETED` | User management | WARNING |
@@ -91,6 +108,36 @@ Defined in [`src/audit/types.ts:13-32`](../src/audit/types.ts#L13-L32):
 | `DEPLOYMENT_ROLLED_BACK` | Deployment | WARNING |
 
 > **Note:** `DEPLOYMENT_PROMOTED` and `DEPLOYMENT_ROLLED_BACK` are defined in the type system but are not included in the query filter's `VALID_ACTIONS` set ([`router.ts:30-38`](../src/audit/router.ts#L30-L38)). They cannot be used as `action` query parameter values.
+
+---
+
+## Contract History Endpoint
+
+```
+GET /api/v1/contracts/:id/history
+```
+
+Returns audit entries for a single contract, paginated by cursor.
+
+**Handler:** `src/routes/contracts.ts` (`addHistory`)
+
+### Behaviour for Withdrawn Contracts
+
+When `DELETE /contracts/:id` succeeds, the contract record is removed but the audit entries (including the terminal `withdraw` entry) are retained in the ring buffer. `GET /contracts/:id/history` returns those entries even though the contract no longer exists, allowing a full post-mortem audit trail.
+
+| Scenario | HTTP Status | Body |
+|----------|-------------|------|
+| Contract exists, has entries | `200` | `{ data: [...], nextCursor? }` |
+| Contract exists, no entries yet | `200` | `{ data: [] }` |
+| Contract withdrawn, entries exist | `200` | `{ data: [...] }` (includes `withdraw` entry) |
+| Contract never existed (no entries) | `404` | error |
+
+### Query Parameters
+
+| Param | Type | Default | Constraints |
+|-------|------|---------|-------------|
+| `limit` | integer | — | 1–100 |
+| `cursor` | integer | — | ≥ 0, the `seq` of the last entry from the previous page |
 
 ---
 

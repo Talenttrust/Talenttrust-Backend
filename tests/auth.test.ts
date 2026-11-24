@@ -5,6 +5,7 @@ import { EscrowStore, HttpError } from '../src/store';
 import { authHeader } from './helpers/auth';
 import { buildChallenge, verifyChallenge, consumeNonce, resetNonces, CHALLENGE_TTL_SECONDS } from '../src/auth/challenge';
 import { issueWalletToken, verifyWalletToken, WALLET_TOKEN_TTL } from '../src/auth/jwt';
+import { TokenRevocationList } from '../src/auth/revocation';
 import { randomBytes } from 'crypto';
 
 const AUTH_SECRET = 'test-secret-must-be-at-least-32-bytes-long!!!';
@@ -849,5 +850,105 @@ describe('wallet-signature auth', () => {
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.address).toBe(addr);
     });
+  });
+});
+
+describe('POST /api/v1/auth/logout (wallet token revocation)', () => {
+  const create = (app: ReturnType<typeof createApp>, authorization: string) =>
+    request(app)
+      .post('/api/v1/contracts')
+      .set('Authorization', authorization)
+      .send({ freelancer: Keypair.random().publicKey(), milestones: [{ amount: 100 }] });
+
+  it('revokes the presented token: later use gets 401 with WWW-Authenticate', async () => {
+    const { app } = makeApp();
+    const { Authorization } = await authHeader(Keypair.random(), app);
+    expect((await create(app, Authorization)).status).toBe(201);
+
+    const logout = await request(app).post('/api/v1/auth/logout').set('Authorization', Authorization);
+    expect(logout.status).toBe(204);
+    expect(logout.headers['cache-control']).toBe('no-store');
+
+    const after = await create(app, Authorization);
+    expect(after.status).toBe(401);
+    expect(after.body.error).toBe('unauthorized');
+    expect(after.headers['www-authenticate']).toBe('Bearer');
+
+    const again = await request(app).post('/api/v1/auth/logout').set('Authorization', Authorization);
+    expect(again.status).toBe(401);
+    expect(again.headers['www-authenticate']).toBe('Bearer');
+  });
+
+  it('keeps other tokens of the same wallet working', async () => {
+    const { app } = makeApp();
+    const kp = Keypair.random();
+    const first = await authHeader(kp, app);
+    const second = await authHeader(kp, app);
+    expect(first.Authorization).not.toBe(second.Authorization);
+    await request(app).post('/api/v1/auth/logout').set(first).expect(204);
+    expect((await create(app, first.Authorization)).status).toBe(401);
+    expect((await create(app, second.Authorization)).status).toBe(201);
+  });
+
+  it('requires a valid token, even when wallet auth is optional', async () => {
+    const legacy = createApp({ store: new EscrowStore(), authSecret: AUTH_SECRET, authRequired: false });
+    const missing = await request(legacy).post('/api/v1/auth/logout');
+    expect(missing.status).toBe(401);
+    expect(missing.headers['www-authenticate']).toBe('Bearer');
+    expect((await request(legacy).post('/api/v1/auth/logout').set('Authorization', 'Bearer not.a.jwt')).status).toBe(401);
+  });
+
+  it('keeps the token revoked for its whole remaining lifetime', async () => {
+    let nowMs = Date.now();
+    const now = () => nowMs;
+    const { app } = makeApp(now);
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET, now);
+    const claims = verifyWalletToken(token, AUTH_SECRET, now);
+    if (!claims.ok) throw new Error('expected a valid token');
+    await request(app).post('/api/v1/auth/logout').set('Authorization', `Bearer ${token}`).expect(204);
+    // Last instant at which the JWT itself would still be accepted.
+    nowMs = claims.exp * 1000 + 999;
+    expect(verifyWalletToken(token, AUTH_SECRET, now).ok).toBe(true);
+    expect((await create(app, `Bearer ${token}`)).status).toBe(401);
+  });
+
+  it('lets revocation entries expire with the token', () => {
+    let nowMs = Date.now();
+    const now = () => nowMs;
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET, now);
+    const claims = verifyWalletToken(token, AUTH_SECRET, now);
+    if (!claims.ok) throw new Error('expected a valid token');
+    const list = new TokenRevocationList({ now });
+    list.revoke(claims.jti, (claims.exp + 1) * 1000);
+    expect(list.isRevoked(claims.jti)).toBe(true);
+    expect(list.size).toBe(1);
+    nowMs = (claims.exp + 1) * 1000;
+    expect(verifyWalletToken(token, AUTH_SECRET, now).ok).toBe(false);
+    expect(list.isRevoked(claims.jti)).toBe(false);
+    expect(list.size).toBe(0);
+  });
+});
+
+describe('TokenRevocationList', () => {
+  it('skips already-expired tokens and evicts the oldest entry beyond capacity', () => {
+    let nowMs = 1_000;
+    const list = new TokenRevocationList({ capacity: 2, now: () => nowMs });
+    list.revoke('expired', 1_000);
+    expect(list.isRevoked('expired')).toBe(false);
+    list.revoke('a', 10_000);
+    list.revoke('b', 10_000);
+    list.revoke('c', 10_000);
+    expect(list.isRevoked('a')).toBe(false);
+    expect(list.isRevoked('b')).toBe(true);
+    expect(list.isRevoked('c')).toBe(true);
+    expect(list.size).toBe(2);
+    nowMs = 10_000;
+    expect(list.size).toBe(0);
+  });
+
+  it('exposes jti and exp from verifyWalletToken', () => {
+    const { token } = issueWalletToken(Keypair.random().publicKey(), AUTH_SECRET);
+    const result = verifyWalletToken(token, AUTH_SECRET);
+    expect(result).toMatchObject({ ok: true, jti: expect.any(String), exp: expect.any(Number) });
   });
 });

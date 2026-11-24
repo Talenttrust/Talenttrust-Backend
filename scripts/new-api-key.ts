@@ -21,17 +21,16 @@
 import * as crypto from 'crypto';
 import { VALID_SCOPES } from '../src/auth/scopes';
 
-const BASE62_CHARS =
+export const BASE62_CHARS =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
 /**
- * Generate a random base62 string of the given length.
+ * Generate a random base62 string of the given length without modulo bias.
  */
-function randomBase62(length: number): string {
-  const bytes = crypto.randomBytes(length);
+export function randomBase62(length: number): string {
   let result = '';
   for (let i = 0; i < length; i++) {
-    result += BASE62_CHARS[bytes[i] % 62];
+    result += BASE62_CHARS[crypto.randomInt(0, 62)];
   }
   return result;
 }

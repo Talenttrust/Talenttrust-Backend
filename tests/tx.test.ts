@@ -784,4 +784,83 @@ describe('Transaction relay & status tracking (/api/v1/tx)', () => {
       expect(res.body.components.schemas.ContractError).toBeDefined();
     });
   });
+
+  describe('Soroban RPC unreachable / error handling (503 and 502 mapping)', () => {
+    it('returns 503 chain_unavailable with Retry-After header when submit encounters connection error', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:8000')),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc, retryAfterSeconds: 5 });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(503);
+
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body.error).toBe('chain_unavailable');
+      expect(res.body.status).toBe(503);
+    });
+
+    it('returns 503 chain_unavailable with Retry-After header when getStatus encounters timeout', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn(),
+        getTransaction: jest.fn().mockRejectedValue(new Error('fetch failed: request timed out after 4000ms')),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc, retryAfterSeconds: 5 });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const fakeHash = 'a'.repeat(64);
+      const res = await request(app)
+        .get(`/api/v1/tx/${fakeHash}`)
+        .expect(503);
+
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body.error).toBe('chain_unavailable');
+      expect(res.body.status).toBe(503);
+    });
+
+    it('returns 502 rpc_error when RPC returns malformed payload or general failure', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockResolvedValue({} as any),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(502);
+
+      expect(res.body.error).toBe('rpc_error');
+      expect(res.body.status).toBe(502);
+    });
+
+    it('sanitizes raw RPC URLs and secrets in error responses', async () => {
+      const mockRpc: RpcClient = {
+        sendTransaction: jest.fn().mockRejectedValue(new Error('Failed connecting to https://secret-rpc-provider.org/v1/secret-key-12345: connect ECONNREFUSED')),
+        getTransaction: jest.fn(),
+      };
+      const relay = new TxRelay({ rpcClient: mockRpc });
+      const store = new EscrowStore();
+      const app = createApp(store, relay);
+
+      const { xdr: validXdr } = buildSignedEscrowTx();
+      const res = await request(app)
+        .post('/api/v1/tx/submit')
+        .send({ xdr: validXdr })
+        .expect(503);
+
+      expect(res.body.detail).not.toContain('https://secret-rpc-provider.org');
+      expect(res.body.detail).toContain('[redacted-url]');
+    });
+  });
 });
