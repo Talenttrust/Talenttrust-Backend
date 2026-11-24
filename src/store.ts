@@ -1082,6 +1082,10 @@ export class EscrowStore {
     if (c.status === 'Expired') {
       throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
     }
+    // Completed, Resolved and Cancelled are terminal: nothing about them may change.
+    if (c.status === 'Completed' || c.status === 'Resolved' || c.status === 'Cancelled') {
+      throw new HttpError(409, 'contract_not_active', `Contract is ${c.status}`);
+    }
     if (client !== c.client) {
       throw new HttpError('forbidden', 'Only the client can extend the funding deadline');
     }
