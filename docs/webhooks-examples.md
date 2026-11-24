@@ -1,286 +1,223 @@
 # Webhooks API Examples
 
-Ready-to-run cURL examples for all webhook endpoints in the TalentTrust Backend.
+Ready-to-run `curl` examples for `/api/v1/webhook-subscriptions` (default local server port `3001` from `src/server.ts`) and a signature verification example.
 
-## Authentication
+Set `WEBHOOK_ADMIN_TOKEN` on the server and export it in your shell before running these commands:
 
-All endpoints require JWT authentication with the `admin` role:
-
-```
-Authorization: Bearer demo-admin-token
+```bash
+export WEBHOOK_ADMIN_TOKEN="your-admin-token"
 ```
 
----
+## 1. Create a Subscription
 
-## 1. Create Webhook Subscription
-
-**Endpoint**: `POST /api/v1/webhook-subscriptions`
-
-**Request Body**:
-```json
-{
-  "consumerId": "00000000-0000-0000-0000-000000000001",
-  "url": "https://webhook.site/your-unique-id",
-  "eventType": "contract.created",
-  "secret": "my-shared-secret-key"
-}
-```
-
-**cURL**:
 ```bash
 curl -X POST http://localhost:3001/api/v1/webhook-subscriptions \
-  -H "Authorization: Bearer demo-admin-token" \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "consumerId": "00000000-0000-0000-0000-000000000001",
-    "url": "https://webhook.site/your-unique-id",
-    "eventType": "contract.created",
-    "secret": "my-shared-secret-key"
+    "url": "https://hooks.example.com/talenttrust",
+    "events": ["contract.created", "milestone.released"],
+    "filter": {
+      "contractIds": [1]
+    }
   }'
 ```
 
-**Response (201 Created)**:
+**Response (`201 Created`):**
+
 ```json
 {
-  "status": "success",
-  "data": {
-    "id": "87654321-4321-4321-4321-987654321def",
-    "consumerId": "00000000-0000-0000-0000-000000000001",
-    "url": "https://webhook.site/your-unique-id",
-    "eventType": "contract.created",
-    "active": true,
-    "createdAt": "2026-07-26T10:00:00.000Z",
-    "updatedAt": "2026-07-26T10:00:00.000Z"
-  }
+  "id": "87654321-4321-4321-4321-987654321def",
+  "url": "https://hooks.example.com/talenttrust",
+  "events": ["contract.created", "milestone.released"],
+  "filter": {
+    "contractIds": [1]
+  },
+  "active": true,
+  "createdAt": "2026-07-26T10:00:00.000Z",
+  "updatedAt": "2026-07-26T10:00:00.000Z",
+  "secret": "whsec_..."
 }
 ```
 
-**Error (400 - Invalid URL)**:
-```json
-{
-  "error": {
-    "code": "invalid_url",
-    "message": "Provided URL is invalid or resolved to a private/reserved address.",
-    "requestId": "550e8400-e29b-41d4-a716-446655440000"
-  }
-}
-```
+Save `secret` immediately — it is not returned by `GET` or `PATCH`.
 
----
+## 2. List Subscriptions
 
-## 2. List Webhook Subscriptions
-
-**Endpoint**: `GET /api/v1/webhook-subscriptions`
-
-**Query Params**:
-- `consumerId` (optional) - Filter by consumer UUID
-- `eventType` (optional) - Filter by event type
-- `active` (optional) - Filter by active status (`true`/`false`)
-- `cursor` (optional) - Pagination cursor
-- `limit` (optional) - Results per page (default: 20, max: 100)
-
-**cURL**:
 ```bash
-curl -X GET "http://localhost:3001/api/v1/webhook-subscriptions?eventType=contract.created&limit=10" \
-  -H "Authorization: Bearer demo-admin-token"
+curl http://localhost:3001/api/v1/webhook-subscriptions \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN"
 ```
 
-**Response (200 OK)**:
+**Response (`200 OK`):**
+
 ```json
 {
-  "status": "success",
-  "data": {
-    "data": [
-      {
-        "id": "87654321-4321-4321-4321-987654321def",
-        "consumerId": "00000000-0000-0000-0000-000000000001",
-        "url": "https://webhook.site/your-unique-id",
-        "eventType": "contract.created",
-        "active": true,
-        "createdAt": "2026-07-26T10:00:00.000Z",
-        "updatedAt": "2026-07-26T10:00:00.000Z"
-      }
-    ],
-    "nextCursor": null,
-    "hasNextPage": false,
-    "limit": 10
-  }
+  "data": [
+    {
+      "id": "87654321-4321-4321-4321-987654321def",
+      "url": "https://hooks.example.com/talenttrust",
+      "events": ["contract.created", "milestone.released"],
+      "filter": {
+        "contractIds": [1]
+      },
+      "active": true,
+      "createdAt": "2026-07-26T10:00:00.000Z",
+      "updatedAt": "2026-07-26T10:00:00.000Z"
+    }
+  ]
 }
 ```
 
----
+## 3. Get a Subscription
 
-## 3. Get Single Webhook Subscription
-
-**Endpoint**: `GET /api/v1/webhook-subscriptions/:id`
-
-**cURL**:
 ```bash
-curl -X GET http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def \
-  -H "Authorization: Bearer demo-admin-token"
+curl http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN"
 ```
 
-**Response (200 OK)**:
+**Response (`200 OK`):**
+
 ```json
 {
-  "status": "success",
-  "data": {
-    "id": "87654321-4321-4321-4321-987654321def",
-    "consumerId": "00000000-0000-0000-0000-000000000001",
-    "url": "https://webhook.site/your-unique-id",
-    "eventType": "contract.created",
-    "active": true,
-    "createdAt": "2026-07-26T10:00:00.000Z",
-    "updatedAt": "2026-07-26T10:00:00.000Z"
-  }
+  "id": "87654321-4321-4321-4321-987654321def",
+  "url": "https://hooks.example.com/talenttrust",
+  "events": ["contract.created", "milestone.released"],
+  "filter": {
+    "contractIds": [1]
+  },
+  "active": true,
+  "createdAt": "2026-07-26T10:00:00.000Z",
+  "updatedAt": "2026-07-26T10:00:00.000Z"
 }
 ```
 
-**Error (404 Not Found)**:
-```json
-{
-  "error": {
-    "code": "not_found",
-    "message": "Webhook subscription not found.",
-    "requestId": "550e8400-e29b-41d4-a716-446655440000"
-  }
-}
-```
+## 4. Update a Subscription
 
----
+Pause a subscription and clear its filter (`"filter": null`):
 
-## 4. Update Webhook Subscription
-
-**Endpoint**: `PATCH /api/v1/webhook-subscriptions/:id`
-
-**Request Body** (all fields optional):
-```json
-{
-  "active": false,
-  "eventType": "contract.updated"
-}
-```
-
-**cURL**:
 ```bash
 curl -X PATCH http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def \
-  -H "Authorization: Bearer demo-admin-token" \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "active": false,
-    "eventType": "contract.updated"
+    "events": ["*"],
+    "filter": null
   }'
 ```
 
-**Response (200 OK)**:
+**Response (`200 OK`):**
+
 ```json
 {
-  "status": "success",
-  "data": {
-    "id": "87654321-4321-4321-4321-987654321def",
-    "consumerId": "00000000-0000-0000-0000-000000000001",
-    "url": "https://webhook.site/your-unique-id",
-    "eventType": "contract.updated",
-    "active": false,
-    "createdAt": "2026-07-26T10:00:00.000Z",
-    "updatedAt": "2026-07-26T10:30:00.000Z"
-  }
+  "id": "87654321-4321-4321-4321-987654321def",
+  "url": "https://hooks.example.com/talenttrust",
+  "events": ["*"],
+  "active": false,
+  "createdAt": "2026-07-26T10:00:00.000Z",
+  "updatedAt": "2026-07-26T10:30:00.000Z"
 }
 ```
 
----
+## 5. Rotate Signing Secret
 
-## 5. Delete Webhook Subscription
+```bash
+curl -X POST http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def/rotate-secret \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN"
+```
 
-**Endpoint**: `DELETE /api/v1/webhook-subscriptions/:id`
+**Response (`200 OK`):**
 
-**cURL**:
+```json
+{
+  "id": "87654321-4321-4321-4321-987654321def",
+  "url": "https://hooks.example.com/talenttrust",
+  "events": ["*"],
+  "active": false,
+  "createdAt": "2026-07-26T10:00:00.000Z",
+  "updatedAt": "2026-07-26T10:35:00.000Z",
+  "secret": "whsec_new_secret..."
+}
+```
+
+## 6. Inspect Delivery History
+
+```bash
+curl "http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def/deliveries?status=failed&limit=20" \
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN"
+```
+
+**Response (`200 OK`):**
+
+```json
+{
+  "data": [
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "subscriptionId": "87654321-4321-4321-4321-987654321def",
+      "eventId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+      "eventType": "contract.created",
+      "status": "failed",
+      "attempts": 6,
+      "statusCode": 503,
+      "lastError": "HTTP 503",
+      "createdAt": "2026-07-26T10:05:00.000Z",
+      "updatedAt": "2026-07-26T10:05:31.000Z"
+    }
+  ]
+}
+```
+
+## 7. Delete a Subscription
+
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/webhook-subscriptions/87654321-4321-4321-4321-987654321def \
-  -H "Authorization: Bearer demo-admin-token"
+  -H "Authorization: Bearer $WEBHOOK_ADMIN_TOKEN"
 ```
 
-**Response (200 OK)**:
+**Response (`200 OK`):**
+
 ```json
 {
-  "status": "success",
-  "data": {
-    "id": "87654321-4321-4321-4321-987654321def",
-    "deleted": true
-  }
+  "id": "87654321-4321-4321-4321-987654321def",
+  "deleted": true
 }
 ```
 
----
+## Error Response Example (`application/problem+json`)
 
-## 6. Admin: Replay All DLQ Entries
+Example `400` when a private IP or invalid URL is submitted:
 
-**Endpoint**: `POST /api/v1/admin/webhooks/dlq/replay-all`
-
-**Request Body** (optional):
 ```json
 {
-  "concurrency": 10
+  "type": "https://talenttrust-backend.vercel.app/errors/invalid_url",
+  "title": "invalid_url",
+  "status": 400,
+  "detail": "Webhook URL resolves to a private address",
+  "error": "invalid_url",
+  "message": "Webhook URL resolves to a private address",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-**cURL**:
-```bash
-curl -X POST http://localhost:3001/api/v1/admin/webhooks/dlq/replay-all \
-  -H "Authorization: Bearer demo-admin-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "concurrency": 10
-  }'
+## Verifying Inbound Signatures (Node.js)
+
+Pass the raw request body string (before JSON parsing) to `verifyWebhookSignature` from `src/webhooks.ts`:
+
+```ts
+import { verifyWebhookSignature } from './src/webhooks';
+
+const isValid = verifyWebhookSignature(
+  subscriptionSecret, // `secret` returned on create or rotate-secret
+  req.headers,
+  rawBody,
+  300, // tolerance in seconds (default: 300)
+);
 ```
-
-**Response (200 OK)**:
-```json
-{
-  "status": "success",
-  "data": {
-    "attempted": 42,
-    "succeeded": 40,
-    "failed": 2,
-    "deduped": 0
-  }
-}
-```
-
----
-
-## Webhook Delivery Headers
-
-When a `secret` is configured, delivered webhooks include:
-
-| Header             | Description                            |
-|--------------------|----------------------------------------|
-| `X-Signature`      | HMAC-SHA256 signature (`sha256=<hex>`) |
-| `X-Timestamp`      | Unix timestamp (milliseconds)          |
-| `X-Correlation-Id` | Correlation ID for tracing             |
-
----
-
-## Error Codes
-
-| Code               | Status | Description                               |
-|--------------------|--------|-------------------------------------------|
-| `validation_error` | 400    | Request validation failed                 |
-| `invalid_url`      | 400    | URL resolved to private/reserved address  |
-| `unauthorized`     | 401    | Missing or invalid authentication         |
-| `forbidden`        | 403    | Insufficient permissions (requires admin) |
-| `not_found`        | 404    | Resource not found                        |
-| `internal_error`   | 500    | Unexpected server error                   |
-
----
 
 ## Related Documentation
 
-- [Webhooks API](webhooks.md)
-- [Webhook Signature Verification](webhook-signature-verification.md)
-- [Webhook DLQ](WEBHOOK-DLQ.md)
-- [Webhook Subscriptions](WEBHOOK_SUBSCRIPTIONS.md)
-- [Runbook](runbook-webhooks.md)
-```
-
----
+- [Webhooks API Reference](webhooks.md)
+- [Webhooks Request & Delivery Lifecycle](webhooks-flow.md)
+- [Webhooks Operations Runbook](runbook-webhooks.md)

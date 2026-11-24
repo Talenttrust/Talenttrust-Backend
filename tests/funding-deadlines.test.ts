@@ -145,6 +145,30 @@ describe('funding deadlines and expiry', () => {
       expect(response.body.error).toBe('invalid_deadline');
     });
 
+    // Regression (found by tests/state-machine.fuzz.test.ts): terminal contracts
+    // accepted an extension, bumping version/updatedAt and moving the deadline.
+    it.each(['Completed', 'Resolved', 'Cancelled'] as const)('rejects extending a %s contract and leaves it unchanged', async (status) => {
+      const c = store.create({ client: 'client', freelancer: 'freelancer', milestones: [100] });
+      if (status === 'Completed') {
+        store.deposit(c.id, 100);
+        store.release(c.id, 0);
+      } else if (status === 'Resolved') {
+        store.openDispute(c.id, 'client', 'late');
+        store.resolveDispute(c.id, 5000);
+      } else {
+        store.cancel(c.id);
+      }
+      const before = store.get(c.id);
+      expect(before.status).toBe(status);
+
+      const response = await request(app)
+        .post(`/api/v1/contracts/${c.id}/extend-deadline`)
+        .send({ client: 'client', fundingDeadline: new Date(START + 30 * DAY).toISOString() });
+      expect(response.status).toBe(409);
+      expect(response.body.error).toBe('contract_not_active');
+      expect(store.get(c.id)).toEqual(before);
+    });
+
     it('returns contract_expired when extending after lazy expiry', async () => {
       const id = (await create()).body.id;
       now = START + 14 * DAY;

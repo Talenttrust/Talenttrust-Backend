@@ -35,6 +35,20 @@ import type { ScopedApiKeyRequest } from '../auth/scopedApiKeyMiddleware';
 
 export type ContractsRouteSegment = 'actions' | 'main1' | 'main2' | 'history' | 'all';
 
+/** POST routes that require a JSON object body (shared with the lenient JSON parser in src/app.ts). */
+export const CONTRACT_OBJECT_BODY_ROUTES = [
+  '/contracts',
+  '/contracts/:id/extend-deadline',
+  '/contracts/:id/deposit',
+  '/contracts/:id/dispute',
+  '/contracts/:id/resolve',
+  '/contracts/:id/reputation',
+  '/contracts/:id/reviews',
+  '/contracts/:id/link',
+] as const;
+
+export type ContractObjectBodyRoute = (typeof CONTRACT_OBJECT_BODY_ROUTES)[number];
+
 export interface ContractsRouterDeps {
   v1?: Router;
   segment?: ContractsRouteSegment;
@@ -46,6 +60,7 @@ export interface ContractsRouterDeps {
   maybeAttachReceipt: (req: Request, res: Response, contract: unknown) => void;
   receiptManager: () => { issueReceipt: (contract: Record<string, unknown>, origin: string) => string };
   getOrigin: (req: Request) => string;
+  cursorSecret?: string;
   // helpers/utilities can be injected for explicitness; defaults come from ./helpers
   wrapFn?: typeof wrap;
   jsonBody?: RequestHandler[];
@@ -58,6 +73,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
   const { store, chainReader, requireAuth, requireNotPaused, requireResolveKey } = deps;
   const w = deps.wrapFn ?? wrap;
   const jb = deps.jsonBody ?? jsonObjectBody;
+  const postObjectBody = (path: ContractObjectBodyRoute, ...handlers: RequestHandler[]) =>
+    router.post(path, ...jb, ...handlers);
   const v = deps.validateFn ?? validate;
   const { audited, checkPreconditions, setEtag, clientOf } = createContractRouteHelpers({ store });
   const maybeAttachReceipt = deps.maybeAttachReceipt;
@@ -83,7 +100,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       w((req, res) => {
         const limit = parseLimit(req.query.limit);
         const sort = parseSortParam(req.query.sort);
-        const after = parseCursorParam(req.query.cursor, sort);
+        const after = parseCursorParam(req.query.cursor, sort, deps.cursorSecret);
         const filters = parseFilters(req.query);
         const spec = parseFields(req);
         const result = store.query({ filters, sort, limit, after });
@@ -91,13 +108,12 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
         return {
           data: result.data.map((c) => project(publicContract(c), spec)),
-          page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
+          page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor, deps.cursorSecret) : null, hasMore: result.hasMore },
         };
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts',
-      ...jb,
       requireNotPaused,
       requireAuth,
       (req, _res, next) => {
@@ -142,7 +158,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
+        const updated = audited(req, () => store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) }));
         setEtag(res, updated);
         return publicContract(updated);
       }),
@@ -152,24 +168,23 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        store.delete(id(req), clientOf(req));
+        audited(req, () => store.delete(id(req), clientOf(req)));
         res.status(204).end();
       }),
     );
     router.get('/contracts/:id/revisions', w((req) => store.getRevisions(id(req))));
-    router.post(
+    postObjectBody(
       '/contracts/:id/extend-deadline',
       requireAuth,
       checkPreconditions,
       w((req, res) => {
-        const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
+        const updated = audited(req, () => store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline));
         setEtag(res, updated);
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/deposit',
-      ...jb,
       requireNotPaused,
       requireAuth,
       v({ params: IdParam, body: DepositBody }),
@@ -194,9 +209,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/dispute',
-      ...jb,
       requireNotPaused,
       requireAuth,
       v({ params: IdParam, body: DisputeBody }),
@@ -210,9 +224,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/resolve',
-      ...jb,
       requireResolveKey,
       v({ params: IdParam, body: ResolveBody }),
       checkPreconditions,
@@ -237,9 +250,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         return publicContract(updated);
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/reputation',
-      ...jb,
       requireAuth,
       v({ params: IdParam, body: RateBody }),
       checkPreconditions,
@@ -255,7 +267,7 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
   };
 
   const addMain2 = () => {
-    router.post(
+    postObjectBody(
       '/contracts/:id/reviews',
       requireAuth,
       w((req, res) => {
@@ -267,9 +279,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         res.status(201).json(store.createReview(id(req), caller === undefined ? body : { ...body, reviewer: caller }));
       }),
     );
-    router.post(
+    postObjectBody(
       '/contracts/:id/link',
-      ...jb,
       w(async (req) => publicContract(await store.linkEscrow(id(req), req.body?.escrowId, chainReader))),
     );
     router.get(
@@ -283,7 +294,8 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
       '/contracts/:id/history',
       w((req) => {
         const contractId = id(req);
-        store.get(contractId); // 404 for unknown contracts
+        // For a withdrawn contract the record is gone; we still serve history if entries exist.
+        // Only throw 404 when neither the contract nor any audit entries are present.
         const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
         const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
         if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
@@ -292,7 +304,12 @@ export function createContractsRouter(deps: ContractsRouterDeps): Router {
         if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
           throw new HttpError(400, 'invalid_cursor', 'cursor must be a non-negative integer');
         }
-        return store.audit.getContractHistory(contractId, limit, cursor);
+        const result = store.audit.getContractHistory(contractId, limit, cursor);
+        if (result.data.length === 0) {
+          // No audit entries — verify the contract exists (throws 404 for truly unknown ids)
+          store.get(contractId);
+        }
+        return result;
       }),
     );
   };
