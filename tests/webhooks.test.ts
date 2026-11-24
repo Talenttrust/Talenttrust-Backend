@@ -50,6 +50,26 @@ describe('webhook signatures and URL validation', () => {
 });
 
 describe('webhook delivery', () => {
+  it('pins delivery connections to the resolver results from that delivery', async () => {
+    lookupMock
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }])
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    const client = jest.fn(async (url: URL & { addresses: string[] }) => {
+      expect(url.hostname).toBe('webhooks.example.com');
+      expect(url.addresses).toEqual(['93.184.216.34']);
+      return { statusCode: 200 };
+    });
+    const events = new StoreEventEmitter();
+    const manager = new WebhookManager(events, {
+      httpClient: client,
+      resolver: lookupMock,
+    });
+    const created = await manager.create({ url: 'https://webhooks.example.com/hook', events: ['contract.created'] });
+    events.emit('contract.created', {});
+    await waitFor(() => client.mock.calls.length === 1);
+    expect(client).toHaveBeenCalledTimes(1);
+  });
+
   it('emits one event only after a successful mutation', () => {
     const events = new StoreEventEmitter();
     const seen: string[] = [];
@@ -279,7 +299,10 @@ describe('webhook reserved address ranges', () => {
       { address: '93.184.216.34', family: 4 },
       { address: '2606:4700:4700::1111', family: 6 },
     ]);
-    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toBeInstanceOf(URL);
+    await expect(validateWebhookUrl('https://webhooks.example.com/hook', false)).resolves.toMatchObject({
+      hostname: 'webhooks.example.com',
+      addresses: ['93.184.216.34', '2606:4700:4700::1111'],
+    });
   });
 
   it('fails safely for malformed IP literals', async () => {

@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { lookup } from 'dns/promises';
+import type { LookupFunction } from 'net';
 import { isIP } from 'net';
 import { EscrowEvent, StoreEventEmitter, WebhookEventType, WEBHOOK_EVENT_TYPES } from './events';
 import { HttpError } from './store';
@@ -64,7 +65,10 @@ export interface HttpClientResponse {
   retryAfterMs?: number;
 }
 
-export type WebhookHttpClient = (url: URL, body: string, headers: Record<string, string>, timeoutMs: number) => Promise<HttpClientResponse>;
+export type WebhookHttpClient = (url: ValidatedWebhookUrl, body: string, headers: Record<string, string>, timeoutMs: number) => Promise<HttpClientResponse>;
+
+export type ValidatedWebhookUrl = URL & { addresses: string[] };
+export type WebhookResolver = (hostname: string, options: { all: true; verbatim: true }) => Promise<Array<{ address: string; family: number }>>;
 
 export interface WebhookHistoryOptions {
   /** Maximum number of newest deliveries to return (defaults to 50). */
@@ -78,6 +82,7 @@ export interface WebhookManagerOptions {
   random?: () => number;
   sleep?: (ms: number) => Promise<void>;
   httpClient?: WebhookHttpClient;
+  resolver?: WebhookResolver;
   maxHistory?: number;
   maxAttempts?: number;
   queueRetriesOnly?: boolean;
@@ -156,7 +161,11 @@ const isPrivateIp = (address: string): boolean => {
   return bytes ? isPrivateIpv6(bytes) : false;
 };
 
-export async function validateWebhookUrl(raw: string, production = process.env.NODE_ENV === 'production'): Promise<URL> {
+export async function validateWebhookUrl(
+  raw: string,
+  production = process.env.NODE_ENV === 'production',
+  resolver: WebhookResolver = lookup,
+): Promise<ValidatedWebhookUrl> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -170,37 +179,64 @@ export async function validateWebhookUrl(raw: string, production = process.env.N
   if (isPrivateIp(url.hostname) || (!localhostDev && url.hostname.toLowerCase() === 'localhost')) {
     throw new HttpError(400, 'invalid_url', 'Webhook URL resolves to a private address');
   }
-  if (!localhostDev) {
+  let addresses: string[];
+  if (localhostDev) {
+    addresses = ['127.0.0.1', '::1'];
+  } else if (isIP(url.hostname.replace(/^\[|\]$/g, ''))) {
+    addresses = [url.hostname.replace(/^\[|\]$/g, '')];
+  } else {
     let records;
     try {
       // url.hostname keeps the brackets of an IPv6 literal, which dns.lookup does not accept.
-      records = await lookup(url.hostname.replace(/^\[|\]$/g, ''), { all: true, verbatim: true });
+      records = await resolver(url.hostname.replace(/^\[|\]$/g, ''), { all: true, verbatim: true });
     } catch {
       throw new HttpError(400, 'invalid_url', 'Webhook hostname could not be resolved');
     }
     if (!records.length || records.some((record) => isPrivateIp(record.address))) {
       throw new HttpError(400, 'invalid_url', 'Webhook URL resolves to a private address');
     }
+    addresses = records.map((record) => record.address);
   }
-  return url;
+  return Object.assign(url, { addresses });
 }
 
-const defaultHttpClient: WebhookHttpClient = (url, body, headers, timeoutMs) => new Promise((resolve, reject) => {
+export const defaultHttpClient: WebhookHttpClient = (url, body, headers, timeoutMs) => new Promise((resolve, reject) => {
+  const pinnedLookup: LookupFunction = (hostname, options, callback) => {
+    void hostname;
+    const records = url.addresses.map((address) => ({ address, family: isIP(address) }));
+    const wantsAll = typeof options === 'object' && options.all === true;
+    if (wantsAll) callback(null, records);
+    else callback(null, records[0].address, records[0].family);
+  };
   const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
     url,
-    { method: 'POST', headers, timeout: timeoutMs },
+    {
+      method: 'POST',
+      headers,
+      timeout: timeoutMs,
+      lookup: pinnedLookup,
+    },
     (response) => {
-      response.resume();
+      let bytesRead = 0;
+      const maxResponseBytes = 1024 * 1024;
+      response.on('data', (chunk: Buffer) => {
+        bytesRead += chunk.length;
+        if (bytesRead > maxResponseBytes) response.destroy(new Error('delivery response body too large'));
+      });
       response.once('end', () => {
         const raw = response.headers['retry-after'];
         const seconds = Number(Array.isArray(raw) ? raw[0] : raw);
         const retryAfterMs = raw !== undefined && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
         resolve({ statusCode: response.statusCode ?? 0, retryAfterMs });
       });
+      response.once('error', reject);
+      response.resume();
     },
   );
   request.once('timeout', () => request.destroy(new Error('delivery timeout')));
   request.once('error', reject);
+  const absoluteTimeout = setTimeout(() => request.destroy(new Error('delivery timeout')), timeoutMs);
+  request.once('close', () => clearTimeout(absoluteTimeout));
   request.end(body);
 });
 
@@ -310,6 +346,7 @@ export class WebhookManager {
   private readonly random: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly httpClient: WebhookHttpClient;
+  private readonly resolver: WebhookResolver;
   private readonly maxHistory: number;
   private readonly maxAttempts: number;
   private readonly queueRetriesOnly: boolean;
@@ -319,6 +356,7 @@ export class WebhookManager {
     this.random = options.random ?? Math.random;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.httpClient = options.httpClient ?? defaultHttpClient;
+    this.resolver = options.resolver ?? lookup;
     this.maxHistory = options.maxHistory ?? 1000;
     this.maxAttempts = options.maxAttempts ?? 6;
     this.queueRetriesOnly = options.queueRetriesOnly ?? (options.sleep === undefined);
@@ -327,7 +365,7 @@ export class WebhookManager {
 
   async create(input: { url?: unknown; events?: unknown; eventType?: unknown; filter?: unknown }): Promise<{ subscription: WebhookSubscriptionPublic; secret: string }> {
     const filter = this.parseFilter(input.filter);
-    const url = await validateWebhookUrl(String(input.url ?? ''));
+    const url = await validateWebhookUrl(String(input.url ?? ''), undefined, this.resolver);
     const events = this.parseEvents(input.events ?? input.eventType);
     const now = new Date(this.now()).toISOString();
     const subscription: WebhookSubscription = { id: randomUUID(), url: url.toString(), events, ...(filter ? { filter } : {}), active: true, secret: `whsec_${randomBytes(32).toString('base64')}`, createdAt: now, updatedAt: now };
@@ -341,7 +379,7 @@ export class WebhookManager {
   async update(id: string, input: { url?: unknown; events?: unknown; eventType?: unknown; active?: unknown; filter?: unknown }): Promise<WebhookSubscriptionPublic> {
     const subscription = this.require(id);
     const filter = input.filter === undefined ? undefined : this.parseFilter(input.filter);
-    if (input.url !== undefined) subscription.url = (await validateWebhookUrl(String(input.url))).toString();
+    if (input.url !== undefined) subscription.url = (await validateWebhookUrl(String(input.url), undefined, this.resolver)).toString();
     if (input.events !== undefined || input.eventType !== undefined) subscription.events = this.parseEvents(input.events ?? input.eventType);
     if (input.filter !== undefined) {
       if (filter) subscription.filter = filter;
@@ -491,6 +529,7 @@ export class WebhookManager {
       delivery.updatedAt = new Date(this.now()).toISOString();
       let retryAfterMs: number | undefined;
       try {
+        const url = await validateWebhookUrl(subscription.url, undefined, this.resolver);
         const url = await validateWebhookUrl(delivery.url);
         const timestamp = this.now();
         const signatureHeader = buildSignatureHeader(

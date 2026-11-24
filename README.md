@@ -120,8 +120,9 @@ history. Each delivery has its own `X-Delivery-ID`. After fixing an endpoint, re
 the original payload as a new delivery with the same `X-Event-ID`, a fresh `X-Delivery-ID`, a new signature and
 `redeliveryOf` set to the original id (`404` for unknown ids, `409` while the delivery is still pending).
 Payloads are kept only while the delivery is in the bounded history and are never returned by the history endpoint. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
-`http://localhost` is allowed only outside production. DNS can still change after validation,
-so production deployments should use egress controls as defense in depth.
+`http://localhost` is allowed only outside production. Every delivery re-validates DNS and pins the
+HTTP connection to the validated addresses, preserving the original hostname for SNI and `Host`.
+Redirects are not followed, and response bodies and delivery timeouts are bounded.
 
 ## Milestone templates
 
