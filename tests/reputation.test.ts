@@ -242,6 +242,37 @@ describe('Reputation leaderboard, Bayesian ranking, and rating histogram', () =>
     await request(app).get('/api/v1/reputation?cursor=not-valid-base64-json').expect(400);
   });
 
+  it('validates reviews pagination parameters and rejects repeated values', async () => {
+    const store = new EscrowStore();
+    addCompletedRatedJob(store, 'GCLIENT', 'GFREELANCER_REVIEWS', 5);
+    addCompletedRatedJob(store, 'GCLIENT', 'GFREELANCER_REVIEWS', 4);
+    const app = createApp(store);
+
+    for (const limit of ['abc', '0', '101', '1.5']) {
+      const response = await request(app).get(`/api/v1/reputation/GFREELANCER_REVIEWS/reviews?limit=${limit}`).expect(400);
+      expect(response.body.error).toBe('invalid_limit');
+    }
+    for (const cursor of ['abc', '0', '-1', '1.5']) {
+      const response = await request(app).get(`/api/v1/reputation/GFREELANCER_REVIEWS/reviews?cursor=${cursor}`).expect(400);
+      expect(response.body.error).toBe('invalid_cursor');
+    }
+
+    const repeatedLimit = await request(app).get('/api/v1/reputation/GFREELANCER_REVIEWS/reviews?limit=1&limit=2').expect(400);
+    expect(repeatedLimit.body.error).toBe('invalid_limit');
+    const repeatedCursor = await request(app).get('/api/v1/reputation/GFREELANCER_REVIEWS/reviews?cursor=1&cursor=2').expect(400);
+    expect(repeatedCursor.body.error).toBe('invalid_cursor');
+
+    const firstPage = await request(app).get('/api/v1/reputation/GFREELANCER_REVIEWS/reviews?limit=1').expect(200);
+    expect(firstPage.body.reviews).toHaveLength(1);
+    expect(firstPage.body.nextCursor).toBeTruthy();
+
+    const secondPage = await request(app)
+      .get(`/api/v1/reputation/GFREELANCER_REVIEWS/reviews?limit=1&cursor=${firstPage.body.nextCursor}`)
+      .expect(200);
+    expect(secondPage.body.reviews).toHaveLength(1);
+    expect(secondPage.body.nextCursor).toBeNull();
+  });
+
   it('filters leaderboard by since and windowDays without affecting lifetime rankings', async () => {
     let now = new Date('2026-01-01T00:00:00.000Z');
     const store = new EscrowStore({ clock: () => now, priorWeight: 5 });

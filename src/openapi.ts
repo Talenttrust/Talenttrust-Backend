@@ -1565,15 +1565,18 @@ const spec = {
             description: 'Filter by review direction',
           },
           { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
-          { name: 'cursor', in: 'query', required: false, schema: { type: 'integer' }, description: 'Pagination cursor (the previous page nextCursor)' },
+          { name: 'cursor', in: 'query', required: false, schema: { type: 'integer', minimum: 1 }, description: 'Pagination cursor (the previous page nextCursor)' },
         ],
-        responses: ok('Reviews', {
-          type: 'object',
-          properties: {
-            reviews: { type: 'array', items: reviewRef },
-            nextCursor: { type: 'integer', nullable: true },
-          },
-        }),
+        responses: {
+          ...ok('Reviews', {
+            type: 'object',
+            properties: {
+              reviews: { type: 'array', items: reviewRef },
+              nextCursor: { type: 'integer', nullable: true },
+            },
+          }),
+          400: errorResponse('Invalid limit (invalid_limit) or cursor (invalid_cursor)'),
+        },
       },
     },
     '/api/v1/receipts/verify': {
