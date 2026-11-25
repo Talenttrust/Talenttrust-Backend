@@ -218,6 +218,7 @@ export const ListQuery = z
     sort: z.string().optional(),
     linked: z.enum(['true', 'false']).optional(),
     fields: z.string().optional(),
+    q: z.string().optional(),
   })
   .strict();
 

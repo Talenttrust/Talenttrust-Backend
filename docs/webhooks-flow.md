@@ -1,72 +1,93 @@
-# Webhooks Request Lifecycle
+# Webhooks Request & Delivery Lifecycle
 
-This document provides an end-to-end view of the request lifecycle for webhook subscriptions in the Talenttrust-Backend. It covers the flow from the moment an HTTP request is received to its persistence in the database and the response sent back to the client.
+This document traces how webhook subscription requests and outbound event deliveries move through `src/app.ts`, `src/events.ts`, and `src/webhooks.ts`.
 
-## Request Flow Diagram
+For endpoint schemas, headers, and error codes, see [Webhooks API Reference](webhooks.md).
 
-The following sequence diagram illustrates the step-by-step lifecycle of a `POST /api/v1/webhook-subscriptions` request:
+## 1. Subscription Management Flow
+
+All management routes are mounted at `/api/v1/webhook-subscriptions` in `src/app.ts`.
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Router as Webhook Router
-    participant Auth as Auth Middleware
-    participant Validator as Validation Middleware
-    participant Handler as Route Handler
-    participant Repo as Webhook Repository
-    participant DB as Database
+    participant App as Express App (src/app.ts)
+    participant Auth as webhookAuth
+    participant Manager as WebhookManager (src/webhooks.ts)
+    participant DNS as dns.lookup
 
-    Client->>Router: POST /api/v1/webhook-subscriptions
-    Router->>Auth: requireAuth & requireRole('admin')
-    
-    alt Authentication/Authorization Failed
-        Auth-->>Client: 401 Unauthorized / 403 Forbidden
+    Client->>App: POST /api/v1/webhook-subscriptions
+    App->>App: noStore middleware (Cache-Control: no-store)
+    App->>Auth: Check WEBHOOK_ADMIN_TOKEN & Bearer header
+    alt WEBHOOK_ADMIN_TOKEN unset
+        Auth-->>Client: 404 not_found (application/problem+json)
+    else Invalid/missing Bearer token
+        Auth-->>Client: 401 unauthorized (application/problem+json)
     else Authorized
-        Auth->>Validator: validateSchema(createWebhookSubscriptionSchema)
+        App->>Manager: webhooks.create(req.body)
+        Manager->>Manager: parseFilter() & parseEvents()
+        Manager->>DNS: validateWebhookUrl(url)
+        alt Validation or SSRF check failed
+            Manager-->>Client: 400 invalid_url / invalid_events / invalid_filter
+        else Valid
+            Manager->>Manager: Generate UUID + whsec_ secret, store in Map
+            Manager-->>App: { subscription, secret }
+            App-->>Client: 201 Created ({ ...subscription, secret })
+        end
     end
-    
-    alt Schema Validation Failed
-        Validator-->>Client: 400 Bad Request
-    else Schema Valid
-        Validator->>Handler: Invoke POST Handler
-    end
-    
-    Handler->>Handler: validateWebhookUrl(url)
-    alt URL Validation Failed
-        Handler-->>Client: 400 Bad Request
-    else URL Valid
-        Handler->>Repo: repo.create(req.body)
-    end
-
-    Repo->>DB: INSERT INTO webhook_subscriptions
-    DB-->>Repo: Inserted Record
-    Repo-->>Handler: Subscription Object (with secret)
-    
-    Handler->>Handler: sanitizeSubscription(subscription)
-    Handler-->>Client: 201 Created (Sanitized Data)
 ```
 
-## Lifecycle Stages
+### Key Stages
 
-### 1. Routing
-The entry point for webhook subscription requests is defined in `src/app.ts`, which mounts the router at `/api/v1/webhook-subscriptions`. The router itself is implemented in `src/routes/webhook-subscription.routes.ts`.
+1. **Cache protection (`src/app.ts`)**: `noStore` sets `Cache-Control: no-store` and `Pragma: no-cache` on all `/api/v1/webhook-subscriptions` responses.
+2. **Admin auth (`src/app.ts` + `src/webhooks.ts`)**: `webhookAuth` fails closed with `404` when `WEBHOOK_ADMIN_TOKEN` is unset, and validates `Authorization: Bearer <token>` using `isWebhookAdminTokenValid`.
+3. **Validation (`src/webhooks.ts`)**: `parseFilter`, `parseEvents`, and `validateWebhookUrl` (scheme, credentials, IPv4/IPv6 private-range check, and DNS resolution check) run before mutating state.
+4. **In-memory storage (`src/webhooks.ts`)**: Subscriptions are stored in `WebhookManager.subscriptions` (`Map<string, WebhookSubscription>`). The `secret` is stripped by `publicSubscription` on `GET`/`PATCH` and returned only on `POST /` and `POST /:id/rotate-secret`.
 
-### 2. Authentication and Authorization (Auth)
-Before a request can be processed, it must pass through security middleware:
-- **`requireAuth`**: Ensures the request is made by an authenticated user.
-- **`requireRole('admin')`**: Restricts the creation, updating, and deletion of webhook subscriptions to users with admin privileges.
-These middleware functions are located in `src/middleware/authorization.ts`.
+## 2. Event Emission & Delivery Flow
 
-### 3. Validation
-The request payload and parameters are validated to ensure they meet the expected schema:
-- **`validateSchema`**: Uses Zod schemas (e.g., `createWebhookSubscriptionSchema` from `src/modules/webhooks/dto/webhook-subscription.dto.ts`) to validate the request body structure. Found in `src/middleware/validate.middleware.ts`.
-- **`validateWebhookUrl`**: A specialized validation step within the route handler that verifies the provided webhook URL is valid and secure. Located in `src/routes/webhook-subscription.validation.ts`.
+When a store mutation occurs, `EscrowStore` emits an `EscrowEvent` via `StoreEventEmitter` (`src/events.ts`). `WebhookManager` registers a listener in its constructor (`events.on((event) => { void this.dispatch(event); })`).
 
-### 4. Handler
-The core business logic resides in the route handlers in `src/routes/webhook-subscription.routes.ts`. The handler:
-1. Calls the repository to persist the data.
-2. Intercepts the created subscription object.
-3. Sanitizes the response (via `sanitizeSubscription`) to ensure sensitive information, such as the webhook `secret`, is never exposed to the client.
+```mermaid
+sequenceDiagram
+    participant Store as EscrowStore
+    participant Emitter as StoreEventEmitter (src/events.ts)
+    participant Manager as WebhookManager (src/webhooks.ts)
+    participant Target as Subscriber Endpoint
 
-### 5. Persistence (Store)
-The handler interacts with the data layer through the `SqliteWebhookSubscriptionRepository` (`src/repositories/webhook-subscription.repository.ts`). The repository executes the SQL statements needed to persist the subscription to the SQLite database (`src/db/database.ts`).
+    Store->>Emitter: emit(eventType, data)
+    Emitter->>Emitter: Clone data, append to 500-event ring buffer
+    Emitter->>Manager: listener(event) [fire-and-forget]
+    Manager->>Manager: eventMatches(subscription, event)
+    loop Each matching active subscription (Promise.all)
+        Manager->>Manager: Record WebhookDelivery (status: pending)
+        loop Up to 6 attempts
+            Manager->>Manager: validateWebhookUrl(subscription.url)
+            Manager->>Manager: Sign `${timestamp}.${body}` with HMAC-SHA256
+            Manager->>Target: POST (5000 ms timeout)
+            alt 2xx response
+                Target-->>Manager: 200 OK
+                Manager->>Manager: status = success, trimHistory()
+            else Permanent 4xx (not 408/425/429)
+                Target-->>Manager: 4xx
+                Manager->>Manager: Break loop, status = failed, trimHistory()
+            else Retryable (408/425/429/5xx/timeout/network)
+                Target-->>Manager: Error / status
+                Manager->>Manager: Sleep (Retry-After or exp backoff + jitter, cap 30s)
+            end
+        end
+    end
+```
+
+### Key Stages
+
+1. **Isolation (`src/events.ts`)**: `StoreEventEmitter.emit` wraps listener calls in `try/catch` so webhook failures never roll back a store mutation.
+2. **Filtering (`src/webhooks.ts`)**: `eventMatches` checks `subscription.active`, event type membership (or `"*"`), and optional `filter.contractIds` / `filter.parties` against `event.data.contract`.
+3. **Delivery & retries (`src/webhooks.ts`)**: `deliver` re-validates the URL on each attempt, signs the JSON payload, sends a `POST` with a `5000` ms timeout, and retries transient failures up to `6` times with exponential backoff (`1000` ms base, `30000` ms cap, ±10% jitter) or `Retry-After` (capped at `30000` ms).
+4. **History trimming (`src/webhooks.ts`)**: `trimHistory` caps total retained deliveries at `1000` (`maxHistory`), evicting the oldest entries from both `deliveries` and `deliveriesBySubscription`.
+
+## Related Documentation
+
+- [Webhooks API Reference](webhooks.md)
+- [Webhooks API Examples](webhooks-examples.md)
+- [Webhooks Operations Runbook](runbook-webhooks.md)

@@ -219,4 +219,174 @@ describe('contract list pagination, sorting and filters', () => {
     const secondIds = second.body.data.map((c: { id: number }) => c.id);
     expect(new Set([...firstIds, ...secondIds]).size).toBe(firstIds.length + secondIds.length);
   });
+
+  it('filters by title substring q (case-insensitive and trimmed)', async () => {
+    const store = steppedStore();
+    store.create({ title: 'Landing page redesign', client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    store.create({ title: 'Smart contract audit', client: 'GA', freelancer: 'GB', milestones: [{ amount: 200 }] });
+    store.create({ title: 'Mobile UI DESIGN system', client: 'GA', freelancer: 'GB', milestones: [{ amount: 150 }] });
+    const app = createApp(store);
+
+    const res = await request(app).get('/api/v1/contracts?q=design');
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((c: { title: string }) => c.title)).toEqual([
+      'Mobile UI DESIGN system',
+      'Landing page redesign',
+    ]);
+
+    // Trims surrounding whitespace and matches case-insensitively.
+    const trimmed = await request(app).get('/api/v1/contracts?q=%20%20ReDeSiGn%20%20');
+    expect(trimmed.status).toBe(200);
+    expect(trimmed.body.data.map((c: { title: string }) => c.title)).toEqual(['Landing page redesign']);
+
+    // 64-character query is accepted.
+    const maxLen = await request(app).get(`/api/v1/contracts?q=${'a'.repeat(64)}`);
+    expect(maxLen.status).toBe(200);
+    expect(maxLen.body.data).toEqual([]);
+  });
+
+  it('paginates filtered q results with stable pages and cursors', async () => {
+    const store = steppedStore();
+    for (let i = 1; i <= 5; i++) {
+      store.create({ title: `Design milestone ${i}`, client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+      store.create({ title: `Backend task ${i}`, client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    }
+    const app = createApp(store);
+
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      let url = '/api/v1/contracts?q=design&limit=2';
+      if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+      const res = await request(app).get(url);
+      expect(res.status).toBe(200);
+      for (const c of res.body.data) collected.push(c.title);
+      cursor = res.body.page.nextCursor;
+      if (!res.body.page.hasMore || !cursor) break;
+    }
+    expect(collected).toEqual([
+      'Design milestone 5',
+      'Design milestone 4',
+      'Design milestone 3',
+      'Design milestone 2',
+      'Design milestone 1',
+    ]);
+  });
+
+  it('includes q in the list ETag query string', async () => {
+    const store = steppedStore();
+    store.create({ title: 'Landing page redesign', client: 'GA', freelancer: 'GB', milestones: [{ amount: 100 }] });
+    const app = createApp(store);
+
+    const a = await request(app).get('/api/v1/contracts?q=design').expect(200);
+    const b = await request(app).get('/api/v1/contracts?q=landing').expect(200);
+    expect(a.headers.etag).toBeDefined();
+    expect(b.headers.etag).toBeDefined();
+    expect(a.headers.etag).not.toBe(b.headers.etag);
+
+    await request(app).get('/api/v1/contracts?q=design').set('If-None-Match', a.headers.etag).expect(304);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', '   '],
+    ['overlong (65 chars)', 'a'.repeat(65)],
+  ])('rejects %s q with 400 invalid_query', async (_label, value) => {
+    const app = createApp(new EscrowStore().seed());
+    const res = await request(app).get(`/api/v1/contracts?q=${encodeURIComponent(value)}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_query');
+  });
+});
+
+describe('pagination cursor signing secret', () => {
+  const savedEnv = {
+    CURSOR_SECRET: process.env.CURSOR_SECRET,
+    AUTH_SECRET: process.env.AUTH_SECRET,
+    NODE_ENV: process.env.NODE_ENV,
+  };
+
+  afterEach(() => {
+    for (const [key, val] of Object.entries(savedEnv)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  });
+
+  it('derives a shared cursor secret from AUTH_SECRET so two apps accept each other cursors', async () => {
+    delete process.env.CURSOR_SECRET;
+    process.env.AUTH_SECRET = 'shared-auth-secret-for-cursor-derivation';
+
+    const store = steppedStore();
+    makeContracts(store, 10);
+    const app1 = createApp(store);
+    const app2 = createApp(store);
+
+    const first = await fetchPage(app1, 5);
+    expect(first.status).toBe(200);
+    const cursor = first.body.page.nextCursor as string;
+    expect(cursor).toBeTruthy();
+
+    const second = await fetchPage(app2, 5, cursor);
+    expect(second.status).toBe(200);
+    expect(second.body.data.length).toBe(5);
+    const firstIds = first.body.data.map((c: { id: number }) => c.id);
+    const secondIds = second.body.data.map((c: { id: number }) => c.id);
+    expect(new Set([...firstIds, ...secondIds]).size).toBe(10);
+
+    // Tampered cursor still returns invalid_cursor
+    const tampered = await fetchPage(app2, 5, cursor.slice(0, -1) + (cursor.endsWith('A') ? 'B' : 'A'));
+    expect(tampered.status).toBe(400);
+    expect(tampered.body.error).toBe('invalid_cursor');
+  });
+
+  it('gives explicit CURSOR_SECRET precedence over AUTH_SECRET', async () => {
+    const store = steppedStore();
+    makeContracts(store, 10);
+
+    process.env.AUTH_SECRET = 'auth-secret-a';
+    process.env.CURSOR_SECRET = 'explicit-cursor-secret';
+    const app1 = createApp(store);
+
+    // Different AUTH_SECRET, same explicit CURSOR_SECRET -> accepted
+    process.env.AUTH_SECRET = 'auth-secret-b';
+    process.env.CURSOR_SECRET = 'explicit-cursor-secret';
+    const app2 = createApp(store);
+
+    // Same AUTH_SECRET as app1, no CURSOR_SECRET -> rejected (proves CURSOR_SECRET took precedence)
+    process.env.AUTH_SECRET = 'auth-secret-a';
+    delete process.env.CURSOR_SECRET;
+    const app3 = createApp(store);
+
+    const first = await fetchPage(app1, 5);
+    expect(first.status).toBe(200);
+    const cursor = first.body.page.nextCursor as string;
+
+    const fromApp2 = await fetchPage(app2, 5, cursor);
+    expect(fromApp2.status).toBe(200);
+    expect(fromApp2.body.data.length).toBe(5);
+
+    const fromApp3 = await fetchPage(app3, 5, cursor);
+    expect(fromApp3.status).toBe(400);
+    expect(fromApp3.body.error).toBe('invalid_cursor');
+  });
+
+  it('logs a one-time warning in production when neither CURSOR_SECRET nor AUTH_SECRET is set', () => {
+    delete process.env.CURSOR_SECRET;
+    delete process.env.AUTH_SECRET;
+    process.env.NODE_ENV = 'production';
+
+    const logger = {
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+    };
+
+    createApp({ store: new EscrowStore(), logger });
+    createApp({ store: new EscrowStore(), logger });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/CURSOR_SECRET/);
+  });
 });
