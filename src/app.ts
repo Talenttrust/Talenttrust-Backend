@@ -267,7 +267,10 @@ export function createApp(
   let receiptManagerInstance: ReceiptManager | undefined =
     second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
   const receiptManager = () =>
-    (receiptManagerInstance ??= new ReceiptManager(process.env.RECEIPT_SIGNING_SECRET));
+    (receiptManagerInstance ??= new ReceiptManager(
+      process.env.RECEIPT_SIGNING_SECRET,
+      process.env.RECEIPT_SIGNING_SECRETS_PREVIOUS,
+    ));
   // Per-process jti revocation list fed by POST /api/v1/auth/logout.
   const revokedTokens = new TokenRevocationList({ now: auth.now });
   const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required, revokedTokens);
@@ -824,9 +827,8 @@ export function createApp(
     sseStreams.add(closeStream);
     res.on('close', closeStream);
   });
-  const contractRouteDeps = { store, eventStore, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
   const cursorSecret = resolveCursorSecret({ authSecret: deps.authSecret, logger });
-  const contractRouteDeps = { store, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, cursorSecret, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
+  const contractRouteDeps = { store, eventStore, chainReader, requireAuth, requireNotPaused, requireResolveKey, maybeAttachReceipt, receiptManager, getOrigin, cursorSecret, wrapFn: wrap, jsonBody: jsonObjectBody, validateFn: validate } as const;
   v1.use(createContractsRouter({ segment: 'actions', ...contractRouteDeps }));
   v1.get('/stats', wrap(() => store.stats()));
   v1.use(createContractsRouter({ segment: 'main1', ...contractRouteDeps }));
@@ -870,7 +872,7 @@ export function createApp(
       if (!receipt || typeof receipt !== 'string') {
         throw new HttpError(400, 'invalid_receipt', 'receipt must be a non-empty JWS string');
       }
-      const verified = verifyReceipt(receipt, receiptManager().publicKey);
+      const verified = verifyReceipt(receipt, receiptManager());
       if (!verified.valid) {
         return {
           valid: false,

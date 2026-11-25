@@ -79,8 +79,9 @@ export class ReceiptManager {
   public readonly kid: string;
   public readonly publicKey: string;
   public readonly jwk: JwkKey;
+  private readonly previousKeys: Map<string, { publicKey: string; jwk: JwkKey }>;
 
-  constructor(secretSeed?: string) {
+  constructor(secretSeed?: string, previousSecrets?: string) {
     if (secretSeed) {
       try {
         this.keypair = Keypair.fromSecret(secretSeed);
@@ -100,19 +101,60 @@ export class ReceiptManager {
       crv: 'Ed25519',
       x: rawPub.toString('base64url'),
     };
+
+    // Parse previous secrets for key rotation
+    this.previousKeys = new Map();
+    if (previousSecrets) {
+      const secrets = previousSecrets.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+      for (const secret of secrets) {
+        try {
+          const prevKeypair = Keypair.fromSecret(secret);
+          const prevPub = prevKeypair.publicKey();
+          const prevRawPub = Buffer.from(prevKeypair.rawPublicKey());
+          const prevKid = `tt-key-${crypto.createHash('sha256').update(prevRawPub).digest('hex').slice(0, 12)}`;
+          this.previousKeys.set(prevKid, {
+            publicKey: prevPub,
+            jwk: {
+              kty: 'OKP',
+              crv: 'Ed25519',
+              x: prevRawPub.toString('base64url'),
+            },
+          });
+        } catch (err) {
+          console.warn(`[receipts] Invalid previous secret skipped: ${(err as Error).message}`);
+        }
+      }
+    }
   }
 
   getPublishedKeys(): { keys: PublishedKey[] } {
-    return {
-      keys: [
-        {
-          kid: this.kid,
-          alg: 'EdDSA',
-          publicKey: this.publicKey,
-          jwk: this.jwk,
-        },
-      ],
-    };
+    const keys: PublishedKey[] = [
+      {
+        kid: this.kid,
+        alg: 'EdDSA',
+        publicKey: this.publicKey,
+        jwk: this.jwk,
+      },
+    ];
+
+    // Add previous keys
+    for (const [kid, keyData] of this.previousKeys.entries()) {
+      keys.push({
+        kid,
+        alg: 'EdDSA',
+        publicKey: keyData.publicKey,
+        jwk: keyData.jwk,
+      });
+    }
+
+    return { keys };
+  }
+
+  getPublicKeyByKid(kid: string): string | undefined {
+    if (kid === this.kid) {
+      return this.publicKey;
+    }
+    return this.previousKeys.get(kid)?.publicKey;
   }
 
   issueReceipt(contract: Record<string, unknown>, iss: string): string {
@@ -144,7 +186,7 @@ export class ReceiptManager {
  * Pure verification helper for offline verification.
  * Verifies compact JWS against either a Stellar G... public key or raw ed25519 public key.
  */
-export function verifyReceipt(jws: string, expectedPublicKey?: string): VerifyReceiptResult {
+export function verifyReceipt(jws: string, expectedPublicKeyOrManager?: string | ReceiptManager): VerifyReceiptResult {
   if (typeof jws !== 'string' || !jws.includes('.')) {
     return { valid: false, error: 'Malformed JWS receipt string' };
   }
@@ -189,6 +231,18 @@ export function verifyReceipt(jws: string, expectedPublicKey?: string): VerifyRe
 
   if (signature.length !== 64) {
     return { valid: false, error: 'Ed25519 signature must be exactly 64 bytes' };
+  }
+
+  // Determine the public key to verify against
+  let expectedPublicKey: string | undefined;
+  if (expectedPublicKeyOrManager instanceof ReceiptManager) {
+    // Select key by kid from the manager
+    expectedPublicKey = expectedPublicKeyOrManager.getPublicKeyByKid(header.kid);
+    if (!expectedPublicKey) {
+      return { valid: false, error: 'Unknown key identifier (kid)' };
+    }
+  } else {
+    expectedPublicKey = expectedPublicKeyOrManager;
   }
 
   if (expectedPublicKey) {

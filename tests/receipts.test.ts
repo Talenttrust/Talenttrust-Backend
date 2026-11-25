@@ -23,6 +23,95 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
     app = createApp(store, manager);
   });
 
+  describe('Key Rotation Support', () => {
+    const oldKeypair = Keypair.random();
+    const oldSecret = oldKeypair.secret();
+    const newKeypair = Keypair.random();
+    const newSecret = newKeypair.secret();
+
+    it('publishes both current and previous keys in JWKS endpoint', () => {
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+      const published = rotationManager.getPublishedKeys();
+
+      expect(published.keys).toHaveLength(2);
+      expect(published.keys.some((k) => k.publicKey === newKeypair.publicKey())).toBe(true);
+      expect(published.keys.some((k) => k.publicKey === oldKeypair.publicKey())).toBe(true);
+    });
+
+    it('verifies receipts signed with previous key after rotation', () => {
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+
+      // Issue a receipt with the old key
+      const oldManager = new ReceiptManager(oldSecret);
+      const contract = store.get(1);
+      const oldReceipt = oldManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Verify with the rotation manager (which has both keys)
+      const verified = verifyReceipt(oldReceipt, rotationManager);
+      expect(verified.valid).toBe(true);
+      expect(verified.kid).toBe(oldManager.kid);
+    });
+
+    it('verifies receipts signed with current key after rotation', () => {
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+
+      // Issue a receipt with the new key
+      const contract = store.get(1);
+      const newReceipt = rotationManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Verify with the rotation manager
+      const verified = verifyReceipt(newReceipt, rotationManager);
+      expect(verified.valid).toBe(true);
+      expect(verified.kid).toBe(rotationManager.kid);
+    });
+
+    it('rejects receipts with unknown kid', () => {
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+      const unknownKeypair = Keypair.random();
+      const unknownManager = new ReceiptManager(unknownKeypair.secret());
+
+      // Issue a receipt with an unknown key
+      const contract = store.get(1);
+      const unknownReceipt = unknownManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Verify with the rotation manager (should fail)
+      const verified = verifyReceipt(unknownReceipt, rotationManager);
+      expect(verified.valid).toBe(false);
+      expect(verified.error).toContain('Unknown key identifier');
+    });
+
+    it('always signs with current key, not previous keys', () => {
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+
+      const contract = store.get(1);
+      const receipt = rotationManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Parse the receipt header to check the kid
+      const [b64Header] = receipt.split('.');
+      const header = JSON.parse(Buffer.from(b64Header, 'base64url').toString('utf8'));
+
+      expect(header.kid).toBe(rotationManager.kid);
+      expect(header.kid).not.toBe(new ReceiptManager(oldSecret).kid);
+    });
+
+    it('handles empty previous secrets string', () => {
+      const managerWithEmpty = new ReceiptManager(newSecret, '');
+      const published = managerWithEmpty.getPublishedKeys();
+
+      expect(published.keys).toHaveLength(1);
+      expect(published.keys[0].publicKey).toBe(newKeypair.publicKey());
+    });
+
+    it('handles invalid previous secrets gracefully', () => {
+      const managerWithInvalid = new ReceiptManager(newSecret, 'invalid-secret,another-invalid');
+      const published = managerWithInvalid.getPublishedKeys();
+
+      // Should only have the current key
+      expect(published.keys).toHaveLength(1);
+      expect(published.keys[0].publicKey).toBe(newKeypair.publicKey());
+    });
+  });
+
   describe('Canonical JSON & Hashing Test Vectors', () => {
     it('sorts keys deterministically and matches known test vector', () => {
       const obj1 = { b: 2, a: 1, c: { y: 'bar', x: 'foo' } };
@@ -68,6 +157,25 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
         x: Buffer.from(keypair.rawPublicKey()).toString('base64url'),
       });
     });
+
+    it('serves all keys (current and previous) when previous secrets are configured', async () => {
+      const oldKeypair = Keypair.random();
+      const oldSecret = oldKeypair.secret();
+      const newKeypair = Keypair.random();
+      const newSecret = newKeypair.secret();
+
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+      const rotationApp = createApp(store, rotationManager);
+
+      const res = await request(rotationApp).get('/.well-known/talenttrust-receipts.json').expect(200);
+      expect(res.body.keys).toBeDefined();
+      expect(Array.isArray(res.body.keys)).toBe(true);
+      expect(res.body.keys.length).toBe(2);
+
+      const publicKeys = res.body.keys.map((k: any) => k.publicKey);
+      expect(publicKeys).toContain(newKeypair.publicKey());
+      expect(publicKeys).toContain(oldKeypair.publicKey());
+    });
   });
 
   describe('Receipt Issuance & JOSE Interop', () => {
@@ -76,8 +184,8 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
       expect(res.body.receipt).toBeDefined();
       const jws = res.body.receipt;
 
-      // 1. Verify with internal pure helper
-      const localResult = verifyReceipt(jws, manager.publicKey);
+      // 1. Verify with internal pure helper (passing manager for key selection)
+      const localResult = verifyReceipt(jws, manager);
       expect(localResult.valid).toBe(true);
       expect(localResult.contractId).toBe(1);
       expect(localResult.kid).toBe(manager.kid);
@@ -104,7 +212,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
       payloadBuf[0] ^= 0xff; // Flip bits in first byte
       const tamperedJws = `${header}.${payloadBuf.toString('base64url')}.${sig}`;
 
-      const result = verifyReceipt(tamperedJws, manager.publicKey);
+      const result = verifyReceipt(tamperedJws, manager);
       expect(result.valid).toBe(false);
     });
 
@@ -114,10 +222,10 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
       const contract = store.get(1);
       const rogueJws = otherManager.issueReceipt(contract as any, 'http://localhost:3000');
 
-      // Verify against official manager public key
-      const result = verifyReceipt(rogueJws, manager.publicKey);
+      // Verify against official manager (unknown kid)
+      const result = verifyReceipt(rogueJws, manager);
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('verification failed');
+      expect(result.error).toContain('Unknown key identifier');
     });
   });
 
@@ -134,7 +242,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
 
       expect(res.headers['receipt']).toBeDefined();
       const receipt = res.headers['receipt'];
-      const v = verifyReceipt(receipt, manager.publicKey);
+      const v = verifyReceipt(receipt, manager);
       expect(v.valid).toBe(true);
       expect(v.contractId).toBe(res.body.id);
     });
@@ -151,7 +259,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
         .send({ amount: 100 })
         .expect(200);
       expect(dep.headers['receipt']).toBeDefined();
-      const depReceipt = verifyReceipt(dep.headers['receipt'], manager.publicKey);
+      const depReceipt = verifyReceipt(dep.headers['receipt'], manager);
       expect(depReceipt.valid).toBe(true);
       expect(depReceipt.contract?.status).toBe('Funded');
 
@@ -160,7 +268,7 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
         .post(`/api/v1/contracts/${cid}/milestones/0/release?receipt=true`)
         .expect(200);
       expect(rel.headers['receipt']).toBeDefined();
-      const relReceipt = verifyReceipt(rel.headers['receipt'], manager.publicKey);
+      const relReceipt = verifyReceipt(rel.headers['receipt'], manager);
       expect(relReceipt.valid).toBe(true);
       expect(relReceipt.contract?.status).toBe('Completed');
 
@@ -238,6 +346,56 @@ describe('Server-signed Escrow Receipts (Issue #1604)', () => {
     it('rejects missing or non-string receipt with 400', async () => {
       await request(app).post('/api/v1/receipts/verify').send({}).expect(400);
       await request(app).post('/api/v1/receipts/verify').send({ receipt: 12345 }).expect(400);
+    });
+
+    it('verifies receipt signed with previous key via verify endpoint', async () => {
+      const oldKeypair = Keypair.random();
+      const oldSecret = oldKeypair.secret();
+      const newKeypair = Keypair.random();
+      const newSecret = newKeypair.secret();
+
+      // Create app with key rotation
+      const rotationManager = new ReceiptManager(newSecret, oldSecret);
+      const rotationApp = createApp(store, rotationManager);
+
+      // Issue a receipt with the old key
+      const oldManager = new ReceiptManager(oldSecret);
+      const contract = store.get(1);
+      const oldReceipt = oldManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Verify via the endpoint
+      const verifyRes = await request(rotationApp)
+        .post('/api/v1/receipts/verify')
+        .send({ receipt: oldReceipt })
+        .expect(200);
+
+      expect(verifyRes.body.valid).toBe(true);
+      expect(verifyRes.body.kid).toBe(oldManager.kid);
+      expect(verifyRes.body.matchesCurrent).toBe(true);
+    });
+
+    it('rejects receipt with unknown kid via verify endpoint', async () => {
+      const newKeypair = Keypair.random();
+      const newSecret = newKeypair.secret();
+      const unknownKeypair = Keypair.random();
+
+      // Create app with only current key
+      const manager = new ReceiptManager(newSecret);
+      const testApp = createApp(store, manager);
+
+      // Issue a receipt with an unknown key
+      const unknownManager = new ReceiptManager(unknownKeypair.secret());
+      const contract = store.get(1);
+      const unknownReceipt = unknownManager.issueReceipt(contract as any, 'http://localhost:3000');
+
+      // Verify via the endpoint
+      const verifyRes = await request(testApp)
+        .post('/api/v1/receipts/verify')
+        .send({ receipt: unknownReceipt })
+        .expect(200);
+
+      expect(verifyRes.body.valid).toBe(false);
+      expect(verifyRes.body.matchesCurrent).toBe(false);
     });
   });
 
