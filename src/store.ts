@@ -1900,7 +1900,13 @@ export class EscrowStore {
     address: string,
     filter: { role?: string; limit?: number; cursor?: number } = {},
   ): { reviews: Review[]; nextCursor: number | null } {
-    const limit = filter.limit && filter.limit > 0 ? Math.min(filter.limit, 100) : 20;
+    if (filter.limit !== undefined && (!Number.isInteger(filter.limit) || filter.limit < 1 || filter.limit > 100)) {
+      throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+    }
+    if (filter.cursor !== undefined && (!Number.isInteger(filter.cursor) || filter.cursor < 1)) {
+      throw new HttpError(400, 'invalid_cursor', 'cursor must be a positive integer');
+    }
+    const limit = filter.limit ?? 20;
     const all = this.reviews
       .filter((r) => r.reviewee === address)
       .filter((r) => !filter.role || r.role === filter.role)

@@ -851,14 +851,30 @@ export function createApp(
   v1.get(
     '/reputation/:address/reviews',
     wrap((req) => {
-      const limitRaw = req.query.limit;
-      const limit = typeof limitRaw === 'string' ? Number(limitRaw) : undefined;
-      const cursorRaw = req.query.cursor;
-      const cursor = typeof cursorRaw === 'string' ? Number(cursorRaw) : undefined;
+      const limitRaw = oneParam(req.query.limit, 'invalid_limit', 'limit');
+      let limit: number | undefined;
+      if (limitRaw !== undefined) {
+        const parsedLimit = Number(limitRaw);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+        }
+        limit = parsedLimit;
+      }
+
+      const cursorRaw = oneParam(req.query.cursor, 'invalid_cursor', 'cursor');
+      let cursor: number | undefined;
+      if (cursorRaw !== undefined) {
+        const parsedCursor = Number(cursorRaw);
+        if (!Number.isInteger(parsedCursor) || parsedCursor < 1) {
+          throw new HttpError(400, 'invalid_cursor', 'cursor must be a positive integer');
+        }
+        cursor = parsedCursor;
+      }
+
       return store.listReviews(req.params.address, {
         role: optionalString(req.query.role),
-        limit: Number.isFinite(limit as number) ? (limit as number) : undefined,
-        cursor: Number.isFinite(cursor as number) ? cursor : undefined,
+        limit,
+        cursor,
       });
     }),
   );

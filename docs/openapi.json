@@ -7716,7 +7716,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1
             },
             "description": "Pagination cursor (the previous page nextCursor)"
           }
@@ -7740,6 +7741,16 @@
                       "nullable": true
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit (invalid_limit) or cursor (invalid_cursor)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
