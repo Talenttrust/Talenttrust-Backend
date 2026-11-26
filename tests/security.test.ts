@@ -4,6 +4,7 @@ import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { docsCsp, docsHtml } from '../src/openapi';
 import { normalizeOrigin, parseOrigins } from '../src/cors';
+import { bearerToken, secureEqual } from '../src/utils/secureCompare';
 
 const ALLOWED = 'https://allowed.example';
 const app = createApp(new EscrowStore(), [ALLOWED, 'http://localhost:3000']);
@@ -149,5 +150,52 @@ describe('Content-Security-Policy', () => {
     expect(inlineScripts).toHaveLength(1);
     expect(docsCsp.style).toBe(sha256Source(style as string));
     expect(docsCsp.script).toBe(sha256Source(inlineScripts[0]));
+  });
+});
+
+describe('secureEqual', () => {
+  it('matches equal secrets', () => {
+    expect(secureEqual('abc', 'abc')).toBe(true);
+    expect(secureEqual('Bearer token', 'Bearer token')).toBe(true);
+  });
+
+  it('rejects unequal secrets', () => {
+    expect(secureEqual('abc', 'abd')).toBe(false);
+    expect(secureEqual('Bearer x', 'Bearer y')).toBe(false);
+  });
+
+  it('rejects differing lengths without throwing', () => {
+    expect(() => secureEqual('abc', 'abcd')).not.toThrow();
+    expect(secureEqual('abc', 'abcd')).toBe(false);
+    expect(secureEqual('abcd', 'abc')).toBe(false);
+    expect(secureEqual('a', 'abc')).toBe(false);
+  });
+
+  it('rejects empty, missing, and null inputs', () => {
+    expect(secureEqual('', '')).toBe(false);
+    expect(secureEqual('', 'abc')).toBe(false);
+    expect(secureEqual('abc', '')).toBe(false);
+    expect(secureEqual(undefined, undefined)).toBe(false);
+    expect(secureEqual(null, null)).toBe(false);
+    expect(secureEqual(undefined, 'abc')).toBe(false);
+    expect(secureEqual('abc', null)).toBe(false);
+  });
+});
+
+describe('bearerToken', () => {
+  it('parses a bearer token', () => {
+    expect(bearerToken('Bearer secret')).toBe('secret');
+    expect(bearerToken('Bearer secret extra')).toBe('secret extra');
+  });
+
+  it('rejects missing, empty, and malformed headers', () => {
+    expect(bearerToken(undefined)).toBeUndefined();
+    expect(bearerToken(null)).toBeUndefined();
+    expect(bearerToken('')).toBeUndefined();
+    expect(bearerToken('Bearer')).toBeUndefined();
+    expect(bearerToken('Bearer ')).toBeUndefined();
+    expect(bearerToken('bearer secret')).toBeUndefined();
+    expect(bearerToken('Basic abc')).toBeUndefined();
+    expect(bearerToken('secret')).toBeUndefined();
   });
 });

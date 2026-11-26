@@ -3,7 +3,8 @@ import path from 'path';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { NETWORK_PASSPHRASES, type HealthRpcClient } from '../src/health';
+import { type HealthRpcClient } from '../src/health';
+import { NETWORK_PASSPHRASES } from '../src/config';
 
 /**
  * Keeps docs/health.md and docs/runbook-health.md honest: every source path

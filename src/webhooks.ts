@@ -1,4 +1,5 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHmac, randomBytes, randomUUID } from 'crypto';
+import { bearerToken, secureEqual } from './utils/secureCompare';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { lookup } from 'dns/promises';
@@ -240,12 +241,6 @@ export const defaultHttpClient: WebhookHttpClient = (url, body, headers, timeout
   request.end(body);
 });
 
-const safeEqual = (left: Buffer, right: Buffer): boolean => {
-  const a = createHash('sha256').update(left).digest();
-  const b = createHash('sha256').update(right).digest();
-  return timingSafeEqual(a, b) && left.length === right.length;
-};
-
 export function verifyWebhookSignature(
   secretOrBody: string,
   headers: Record<string, string | string[] | undefined>,
@@ -263,17 +258,11 @@ export function verifyWebhookSignature(
     const timestamp = Number(timestampRaw);
     if (!signature || !Number.isInteger(timestamp) || Math.abs(Date.now() - timestamp) > toleranceSec * 1000) return false;
     const expected = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
-    const expectedBuffer = Buffer.from(expected, 'hex');
 
     const signatureParts = signature.split(',').map((s) => s.trim());
     for (const part of signatureParts) {
       const received = part.match(/^sha256=([0-9a-f]{64})$/i)?.[1];
-      if (received) {
-        const receivedBuffer = Buffer.from(received, 'hex');
-        if (receivedBuffer.length === expectedBuffer.length && safeEqual(receivedBuffer, expectedBuffer)) {
-          return true;
-        }
-      }
+      if (received && secureEqual(received.toLowerCase(), expected.toLowerCase())) return true;
     }
     return false;
   };
@@ -283,9 +272,9 @@ export function verifyWebhookSignature(
 }
 
 export function isWebhookAdminTokenValid(configured: string | undefined, authorization: string | undefined): boolean {
-  if (!configured || !authorization?.startsWith('Bearer ')) return false;
-  const presented = authorization.slice('Bearer '.length);
-  return safeEqual(createHash('sha256').update(presented).digest(), createHash('sha256').update(configured).digest());
+  if (!configured) return false;
+  const presented = bearerToken(authorization);
+  return presented !== undefined && secureEqual(presented, configured);
 }
 
 const publicSubscription = (subscription: WebhookSubscription): WebhookSubscriptionPublic => {
@@ -313,6 +302,12 @@ const eventMatches = (subscription: WebhookSubscription, event: EscrowEvent) => 
   if (subscription.filter.contractIds && !subscription.filter.contractIds.includes(record.id as number)) return false;
   if (subscription.filter.parties && !subscription.filter.parties.some((party) => party === record.client || party === record.freelancer)) return false;
   return true;
+};
+
+/** Drop delivery fields that must not leave the process (secrets and the stored event). */
+const publicDelivery = (delivery: WebhookDeliveryRecord): WebhookDelivery => {
+  const { url: _url, secret: _secret, previousSecret: _previousSecret, previousExpiresAt: _previousExpiresAt, event: _event, ...safe } = delivery;
+  return safe;
 };
 
 function buildSignatureHeader(
@@ -422,7 +417,7 @@ export class WebhookManager {
     for (let i = deliveries.length - 1; i >= 0 && history.length < limit; i -= 1) {
       const delivery = deliveries[i];
       if (options.status && delivery.status !== options.status) continue;
-      history.push(delivery);
+      history.push(publicDelivery(delivery));
     }
     return history;
   }
@@ -486,34 +481,34 @@ export class WebhookManager {
     }
     const delivery = this.recordDelivery(subscription, original.eventId, original.eventType, body, original.id);
     void this.attempt(subscription, delivery, body);
-    return { ...delivery };
+    return publicDelivery(delivery);
   }
 
   private async deliver(subscription: WebhookSubscription, event: EscrowEvent): Promise<void> {
-    const delivery: WebhookDeliveryRecord = {
-      id: randomUUID(),
-      subscriptionId: subscription.id,
-      eventId: event.eventId,
-      eventType: event.eventType,
-      status: 'pending',
-      attempts: 0,
-      nextAttemptAt: null,
-      url: subscription.url,
-      secret: subscription.secret,
-      previousSecret: subscription.previousSecret,
-      previousExpiresAt: subscription.previousExpiresAt,
-      event,
-      createdAt: new Date(this.now()).toISOString(),
-      updatedAt: new Date(this.now()).toISOString(),
-    };
     const body = JSON.stringify(event);
     const delivery = this.recordDelivery(subscription, event.eventId, event.eventType, body);
     await this.attempt(subscription, delivery, body);
   }
 
-  private recordDelivery(subscription: WebhookSubscription, eventId: string, eventType: string, body: string, redeliveryOf?: string): WebhookDelivery {
+  private recordDelivery(subscription: WebhookSubscription, eventId: string, eventType: string, body: string, redeliveryOf?: string): WebhookDeliveryRecord {
     const now = new Date(this.now()).toISOString();
-    const delivery: WebhookDelivery = { id: randomUUID(), subscriptionId: subscription.id, eventId, eventType, status: 'pending', attempts: 0, ...(redeliveryOf ? { redeliveryOf } : {}), createdAt: now, updatedAt: now };
+    const delivery: WebhookDeliveryRecord = {
+      id: randomUUID(),
+      subscriptionId: subscription.id,
+      eventId,
+      eventType,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: null,
+      ...(redeliveryOf ? { redeliveryOf } : {}),
+      url: subscription.url,
+      secret: subscription.secret,
+      previousSecret: subscription.previousSecret,
+      previousExpiresAt: subscription.previousExpiresAt,
+      event: JSON.parse(body) as EscrowEvent,
+      createdAt: now,
+      updatedAt: now,
+    };
     this.deliveries.set(delivery.id, delivery);
     this.payloads.set(delivery.id, body);
     const perSubscription = this.deliveriesBySubscription.get(subscription.id);
@@ -530,12 +525,11 @@ export class WebhookManager {
       let retryAfterMs: number | undefined;
       try {
         const url = await validateWebhookUrl(subscription.url, undefined, this.resolver);
-        const url = await validateWebhookUrl(delivery.url);
         const timestamp = this.now();
         const signatureHeader = buildSignatureHeader(
-          delivery.secret,
-          delivery.previousSecret,
-          delivery.previousExpiresAt,
+          subscription.secret,
+          subscription.previousSecret,
+          subscription.previousExpiresAt,
           timestamp,
           body,
           this.now(),
@@ -548,13 +542,12 @@ export class WebhookManager {
             'Content-Type': 'application/json',
             'X-Signature': signatureHeader,
             'X-Timestamp': String(timestamp),
-            'X-Event-Type': event.eventType,
-            'X-Event-ID': event.eventId,
+            'X-Event-Type': delivery.eventType,
+            'X-Event-ID': delivery.eventId,
             'X-Delivery-ID': delivery.id,
           },
           5000,
         );
-        const response = await this.httpClient(url, body, { 'Content-Type': 'application/json', 'X-Signature': `sha256=${signature}`, 'X-Timestamp': String(timestamp), 'X-Event-Type': delivery.eventType, 'X-Event-ID': delivery.eventId, 'X-Delivery-ID': delivery.id }, 5000);
         delivery.statusCode = response.statusCode;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           delivery.status = 'success';
@@ -614,7 +607,7 @@ export class WebhookManager {
       let retryAfterMs: number | undefined;
 
       try {
-        const url = await validateWebhookUrl(record.url);
+        const url = await validateWebhookUrl(record.url, undefined, this.resolver);
         const body = JSON.stringify(record.event);
         const timestamp = this.now();
         const signatureHeader = buildSignatureHeader(

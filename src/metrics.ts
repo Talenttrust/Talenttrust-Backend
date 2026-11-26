@@ -1,5 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
-
 export type LabelSet = Record<string, string>;
 
 export const HTTP_DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5];
@@ -143,13 +141,6 @@ export class Registry {
 
 function valueToString(value: number): string {
   return Number.isFinite(value) ? value.toString() : String(value);
-}
-
-export function constantTimeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
 }
 
 export function createRegistry(): Registry {

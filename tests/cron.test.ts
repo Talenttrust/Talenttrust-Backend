@@ -35,6 +35,20 @@ describe('Cron endpoint', () => {
     delete process.env.CRON_SECRET;
   });
 
+  it('returns 200 when the bearer scheme varies in case or whitespace', async () => {
+    process.env.CRON_SECRET = 'test-secret';
+    const eventStore = new InMemoryEventStore();
+    const indexer = new EventIndexer(eventStore);
+    (indexer as any).rpc = { getEvents: async () => ({ events: [], cursor: 'cursor-0', latestLedger: 100 }) };
+    const app = createApp(undefined, eventStore, indexer);
+
+    const lower = await request(app).post('/api/cron/index-events').set('Authorization', 'bearer test-secret');
+    expect(lower.status).toBe(200);
+    const spaced = await request(app).get('/api/cron/index-events').set('Authorization', 'Bearer  test-secret');
+    expect(spaced.status).toBe(200);
+    delete process.env.CRON_SECRET;
+  });
+
   it('returns 200 with correct secret', async () => {
     process.env.CRON_SECRET = 'test-secret';
     const eventStore = new InMemoryEventStore();

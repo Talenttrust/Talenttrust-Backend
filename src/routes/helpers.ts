@@ -1,4 +1,5 @@
-import { createHmac, randomBytes, timingSafeEqual, createHash } from 'crypto';
+import { createHmac, randomBytes, createHash } from 'crypto';
+import { bearerToken, secureEqual } from '../utils/secureCompare';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { StrKey } from '@stellar/stellar-sdk';
 import {
@@ -174,12 +175,6 @@ export function resolveCursorSecret(
   return randomBytes(32).toString('base64url');
 }
 
-export function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
-}
-
 export function parseLimit(v: unknown): number {
   if (v === undefined) return 20;
   const n = Number(v);
@@ -211,7 +206,7 @@ export function parseCursorParam(cursor: unknown, sort: string, secret: string =
   if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   const [payload, sig] = parts;
   const expected = createHmac('sha256', secret).update(payload).digest('base64url');
-  if (!safeEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  if (!secureEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
   try {
     obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
@@ -425,11 +420,8 @@ export const isChainReadClient = (value: unknown): value is ChainReadClient =>
 export function requireAdminRead(req: Request, _res: Response, next: NextFunction) {
   const expected = process.env.ADMIN_READ_TOKEN;
   if (!expected) return next(new HttpError(404, 'not_found', 'Not found'));
-  const auth = req.headers.authorization;
-  const token = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined;
-  const a = Buffer.from(expected);
-  const b = Buffer.from(token ?? '');
-  if (!token || a.length !== b.length || !timingSafeEqual(a, b)) {
+  const token = bearerToken(req.headers.authorization);
+  if (!token || !secureEqual(token, expected)) {
     return next(new HttpError(401, 'unauthorized', 'Missing or invalid admin bearer token'));
   }
   next();
@@ -465,11 +457,13 @@ export function createRequireAdminRead(apiKeys: ParsedApiKeys, options: ScopedAp
 export const requireCronSecret = (req: Request) => {
   const expected = process.env.CRON_SECRET;
   if (!expected) throw new HttpError(404, 'not_found', 'Cron endpoint is not configured');
-  const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!supplied) throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
-  const expectedBytes = createHash('sha256').update(expected).digest();
-  const suppliedBytes = createHash('sha256').update(supplied).digest();
-  if (!timingSafeEqual(expectedBytes, suppliedBytes)) {
+  const raw = req.get('authorization');
+  // This route historically accepted a case-insensitive scheme and flexible
+  // whitespace (`/^Bearer\s+(.+)$/i`). Rewrite a match into the canonical
+  // header so parsing and comparison both go through the shared helpers.
+  const legacy = typeof raw === 'string' ? /^Bearer\s+(.+)$/i.exec(raw) : undefined;
+  const supplied = bearerToken(legacy ? `Bearer ${legacy[1]}` : raw);
+  if (!supplied || !secureEqual(supplied, expected)) {
     throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
   }
   return supplied;
