@@ -137,4 +137,28 @@ describe('structured request logging', () => {
     await request(app).get('/api/v1/contracts/1');
     expect(lines.length).toBe(0);
   });
+
+  it('includes requestId in access log entry', async () => {
+    const { logger, lines } = captureLogger();
+    const app = createApp({ store: new EscrowStore().seed(), logger });
+    const testRequestId = 'test-access-log-req-001';
+    const res = await request(app).get('/api/v1/contracts/1').set('x-request-id', testRequestId);
+    expect(res.status).toBe(200);
+    expect(getResponseHeader(res, 'x-request-id')).toBe(testRequestId);
+
+    const accessLogLines = lines.filter((l) => l.level === 'info' && l.msg === 'request');
+    expect(accessLogLines.length).toBeGreaterThan(0);
+    const accessLog = accessLogLines[0];
+    expect(accessLog.requestId).toBe(testRequestId);
+    // Verify field order is maintained and no sensitive fields are added
+    expect(Object.keys(accessLog)).toEqual([
+      'method',
+      'path',
+      'status',
+      'durationMs',
+      'contentLength',
+      'ip',
+      'requestId',
+    ]);
+  });
 });

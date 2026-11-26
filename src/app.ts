@@ -449,6 +449,7 @@ export function createApp(
         durationMs,
         contentLength: res.get('content-length') ?? undefined,
         ip: req.ip,
+        requestId: req.id,
       });
     });
     next();
